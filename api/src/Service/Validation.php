@@ -41,8 +41,10 @@ final class Validation
         if (!in_array($lang, ['cs', 'en'], true)) {
             $err['language'][] = 'Jazyk musí být cs nebo en';
         }
+        // Frontend může poslat 0/'' když uživatel zatím měnu nevybral.
+        // Ber to jako "nenastaveno" a nech repository použít supplier default.
         $curId = $data['currency_default_id'] ?? null;
-        if ($curId !== null && (!is_numeric($curId) || (int) $curId <= 0)) {
+        if ($curId !== null && $curId !== '' && (!is_numeric($curId) || (int) $curId < 0)) {
             $err['currency_default_id'][] = 'Neplatné currency_default_id';
         }
         if (isset($data['hourly_rate']) && (float) $data['hourly_rate'] < 0) {

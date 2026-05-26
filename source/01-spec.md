@@ -571,7 +571,7 @@ DSN se sestaví z `cfg.smtp.*`:
 - `smtp://user:pass@smtp.seznam.cz:465?encryption=ssl` (SSL/465)
 - `smtp://user:pass@smtp.gmail.com:587?encryption=tls&auth_mode=login` (STARTTLS/587)
 - `smtp://127.0.0.1:1025` (lokální MailHog, bez auth)
-- `gmail+oauth://USER:REFRESH_TOKEN@default?client_id=...&client_secret=...` (OAuth2 přes `symfony/google-mailer`)
+- `smtp://USER:OAUTH_ACCESS_TOKEN@smtp.office365.com:587?auth_mode=xoauth2` (OAuth2 přes SMTP XOAUTH2)
 
 Příklad odeslání faktury:
 ```php
@@ -614,8 +614,10 @@ Závislosti (Composer):
 | `auth_type` | `'LOGIN' \| 'PLAIN' \| 'CRAM-MD5' \| 'XOAUTH2'` | Mechanismus. Většina poskytovatelů akceptuje `LOGIN`. Pro Gmail/M365 doporučeno `XOAUTH2`. |
 | `user` | string | SMTP username (typicky email) |
 | `pass` | string | SMTP password / app password |
-| `oauth.provider` | `'google' \| 'microsoft' \| null` | Pokud `XOAUTH2` |
-| `oauth.client_id`, `oauth.client_secret`, `oauth.refresh_token` | string | OAuth2 credentials |
+| `oauth.provider` | `'microsoft' \| null` | Pokud `XOAUTH2` |
+| `oauth.microsoft.tenant_id`, `oauth.microsoft.client_id`, `oauth.microsoft.client_secret` | string | Microsoft OAuth2 credentials |
+| `oauth.microsoft.scope` | string | Default `https://outlook.office365.com/.default` |
+| `oauth.microsoft.token_url` | string | Volitelné, jinak se složí z `tenant_id` |
 
 #### Sender identity
 | Klíč | Default | Popis |
@@ -675,15 +677,18 @@ DKIM/SPF/DMARC infra se nastavuje na DNS úrovni (mimo aplikaci) — viz 9.12.
 'user' => 'me@gmail.com', 'pass' => 'xxxx-xxxx-xxxx-xxxx',
 ```
 
-**Gmail s OAuth2 (preferováno):**
+**Microsoft 365 s OAuth2 (preferováno):**
 ```php
 'auth_type' => 'XOAUTH2',
-'user' => 'me@gmail.com',
+'user' => 'mailbox@example.com',
 'oauth' => [
-    'provider' => 'google',
+  'provider' => 'microsoft',
+  'microsoft' => [
+    'tenant_id' => '...',
     'client_id' => '...',
     'client_secret' => '...',
-    'refresh_token' => '...',
+    'scope' => 'https://outlook.office365.com/.default',
+  ],
 ],
 ```
 

@@ -15,8 +15,8 @@ Due date:        {{ invoice.due_date|date('M j, Y') }}
 Days overdue:    {{ days_overdue }}
 Amount due:      {{ amount_to_pay|number_format(2, '.', ',') }} {{ invoice.currency }}
 
-The invoice PDF is attached.
-If payment was sent in the past few days, please disregard this reminder.
+{% if invoice_view_url %}Open invoice: {{ invoice_view_url }}
+{% endif %}If payment was sent in the past few days, please disregard this reminder.
 
 Thank you.
 {% endblock %}

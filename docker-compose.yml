@@ -44,6 +44,8 @@ services:
       TZ: Europe/Prague
       # Sjednocuje všechny stateful cesty pod /data (viz Config::applyDataDirOverrides()).
       MYINVOICE_DATA_DIR: /data
+      # Public base URL (used for OAuth callback, reset links, public invoice links).
+      MYINVOICE_APP_URL: ${MYINVOICE_APP_URL:-http://localhost:8088}
 
   db:
     image: mariadb:11

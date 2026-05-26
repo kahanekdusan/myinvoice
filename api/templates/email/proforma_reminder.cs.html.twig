@@ -61,11 +61,17 @@
 </table>
 {% endif %}
 
+{% if invoice_view_url %}
 <p style="margin:16px 0 8px;font-size:14px;color:#5A5470;">
-  Zálohová faktura v PDF je v příloze tohoto emailu{% if qr_data_uri %}, platbu lze provést naskenováním QR kódu výše{% endif %}.
+  Zálohovou fakturu otevřete přes bezpečný odkaz níže{% if qr_data_uri %}. Platbu lze provést naskenováním QR kódu výše{% endif %}.
   Po přijetí platby Vám obratem zašleme finální daňový doklad.
   Pokud byla platba odeslána v posledních dnech, považujte prosím tuto připomínku za bezpředmětnou.
 </p>
+<p style="margin:12px 0 16px;">
+  <a href="{{ invoice_view_url }}" style="display:inline-block;padding:11px 16px;border-radius:6px;background:#3B2D83;color:#ffffff;text-decoration:none;font-weight:600;">Otevřít zálohu</a>
+</p>
+<p style="margin:0 0 8px;font-size:12px;color:#7A748C;word-break:break-all;">{{ invoice_view_url }}</p>
+{% endif %}
 
 <p style="margin:24px 0 0;font-size:13px;color:#7A748C;">
   Děkujeme za vyřízení.

@@ -655,6 +655,10 @@ async function updateApprovalStatus() {
         <span class="text-xs px-2 py-0.5 rounded font-normal bg-neutral-100 text-neutral-600">
           {{ typeLabel(invoice.invoice_type) }}
         </span>
+        <span v-if="invoice.sent_at" class="text-xs px-1.5 py-0.5 rounded bg-success-50 text-success-600"
+          :title="t('invoice.sent_at', { date: formatDate(invoice.sent_at) })">✉</span>
+        <span v-if="invoice.public_first_viewed_at" class="text-xs px-1.5 py-0.5 rounded bg-sky-50 text-sky-700"
+          :title="t('invoice.viewed_at', { date: formatDate(invoice.public_first_viewed_at) })">👁</span>
         <RouterLink v-if="invoice.recurring_template_id"
           :to="{ name: 'recurring-edit', params: { id: invoice.recurring_template_id } }"
           class="text-xs px-2 py-0.5 rounded font-normal bg-primary-50 text-primary-700 border border-primary-200 hover:bg-primary-100"
@@ -897,6 +901,9 @@ async function updateApprovalStatus() {
           <div class="flex justify-between"><dt class="text-neutral-500">{{ t('invoice.issue_date') }}</dt><dd>{{ formatDate(invoice.issue_date) }}</dd></div>
           <div v-if="invoice.tax_date && !isProforma" class="flex justify-between"><dt class="text-neutral-500">{{ t('invoice.tax_date') }}</dt><dd>{{ formatDate(invoice.tax_date) }}</dd></div>
           <div class="flex justify-between"><dt class="text-neutral-500">{{ t('invoice.due_date') }}</dt><dd>{{ formatDate(invoice.due_date) }}</dd></div>
+          <div v-if="invoice.sent_at" class="flex justify-between"><dt class="text-neutral-500">{{ t('invoice.sent') }}</dt><dd>{{ formatDate(invoice.sent_at) }}</dd></div>
+          <div v-if="invoice.public_first_opened_at" class="flex justify-between"><dt class="text-neutral-500">{{ t('invoice.link_opened_at') }}</dt><dd>{{ formatDate(invoice.public_first_opened_at) }}</dd></div>
+          <div v-if="invoice.public_first_viewed_at" class="flex justify-between"><dt class="text-neutral-500">{{ t('invoice.viewed_at_label') }}</dt><dd>{{ formatDate(invoice.public_first_viewed_at) }}</dd></div>
           <div v-if="invoice.paid_at" class="flex justify-between"><dt class="text-neutral-500">{{ t('status.paid') }}</dt><dd>{{ formatDate(invoice.paid_at) }}</dd></div>
         </dl>
       </div>

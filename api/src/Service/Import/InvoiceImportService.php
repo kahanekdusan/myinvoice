@@ -51,9 +51,12 @@ final class InvoiceImportService
      * Import balíku souborů — vystavené i přijaté faktury.
      *
      * `$kind` parametr:
-     *   - `'issued'`   — všechny soubory zpracovat jako vydané faktury (legacy behavior).
-     *                    Soubory s buyer-tenant IČO (= my zákazník) skipnout jako odmítnuté.
-     *   - `'purchase'` — všechny zpracovat jako přijaté faktury (vendor je supplier z ISDOC).
+    *   - `'issued'`   — všechny soubory zpracovat jako vydané faktury (legacy behavior).
+    *                    Pokud má tenant IČO, ověří se role dodavatele; bez tenant IČO
+    *                    se role neověřuje (kvůli zpětné kompatibilitě).
+    *   - `'purchase'` — všechny zpracovat jako přijaté faktury (vendor je supplier z ISDOC).
+    *                    Pokud má tenant IČO, ověří se role odběratele; bez tenant IČO
+    *                    se role neověřuje.
      *   - `'auto'`     — per-soubor detekce dle IČO:
      *       supplier IČO == tenant → my dodavatel → issued cesta
      *       customer IČO == tenant → my zákazník → purchase cesta
@@ -69,10 +72,10 @@ final class InvoiceImportService
         }
 
         $supplierIc = $this->loadSupplierIc($supplierId);
-        if ($supplierIc === null) {
-            throw new \RuntimeException("Supplier #$supplierId nemá vyplněné IČO — import nemůže ověřit shodu.");
+        $tenantIc = $supplierIc !== null ? (preg_replace('/\D/', '', $supplierIc) ?: '') : '';
+        if ($kind === 'auto' && $tenantIc === '') {
+            throw new \InvalidArgumentException("Supplier #$supplierId nemá vyplněné IČO — auto-detekce importu vyžaduje IČO dodavatele.");
         }
-        $tenantIc = preg_replace('/\D/', '', $supplierIc);
 
         // 1. Rozbalení ZIPů na ploché soubory.
         $flat = [];
@@ -171,10 +174,12 @@ final class InvoiceImportService
         $weAreCustomer = $customerIc !== '' && $customerIc === $tenantIc;
 
         if ($kind === 'issued') {
+            if ($tenantIc === '') return 'issued';
             if (!$weAreSupplier) return "ISDOC patří jinému dodavateli (supplier IČO: {$supplierIc}, tenant: {$tenantIc}).";
             return 'issued';
         }
         if ($kind === 'purchase') {
+            if ($tenantIc === '') return 'purchase';
             if (!$weAreCustomer) return "ISDOC patří jinému plátci (buyer IČO: {$customerIc}, tenant: {$tenantIc}).";
             return 'purchase';
         }

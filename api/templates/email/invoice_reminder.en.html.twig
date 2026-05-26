@@ -61,10 +61,16 @@
 </table>
 {% endif %}
 
+{% if invoice_view_url %}
 <p style="margin:16px 0 8px;font-size:14px;color:#5A5470;">
-  The invoice PDF is attached{% if qr_data_uri %}; you can pay by scanning the QR code above{% endif %}.
+  Please open your invoice using the secure link below{% if qr_data_uri %}. You can pay by scanning the QR code above{% endif %}.
   If payment was sent in the past few days, please disregard this reminder.
 </p>
+<p style="margin:12px 0 16px;">
+  <a href="{{ invoice_view_url }}" style="display:inline-block;padding:11px 16px;border-radius:6px;background:#3B2D83;color:#ffffff;text-decoration:none;font-weight:600;">Open invoice</a>
+</p>
+<p style="margin:0 0 8px;font-size:12px;color:#7A748C;word-break:break-all;">{{ invoice_view_url }}</p>
+{% endif %}
 
 <p style="margin:24px 0 0;font-size:13px;color:#7A748C;">
   Thank you.

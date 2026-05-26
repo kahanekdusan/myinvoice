@@ -109,7 +109,27 @@ export interface AiExtractResult {
   error?: string
 }
 
+export interface MicrosoftOauthStatus {
+  configured: boolean
+  refresh_token_present: boolean
+  transport: string
+  auth_type: string
+  from_user: string
+  app_url: string
+  redirect_uri: string
+  scope: string
+  tenant_id_present: boolean
+  client_id_present: boolean
+  start_path: string
+}
+
 export const integrationsApi = {
+  // Microsoft SMTP/Graph OAuth (delegated)
+  getMicrosoftOauthStatus: () =>
+    api.get<MicrosoftOauthStatus>('/admin/smtp/oauth/microsoft/status').then(r => r.data),
+  disconnectMicrosoftOauth: () =>
+    api.delete<{ ok: boolean; disconnected: boolean }>('/admin/smtp/oauth/microsoft').then(r => r.data),
+
   // iDoklad credentials
   getIdokladCreds: () =>
     api.get<IdokladCredentialsStatus>('/admin/imports/idoklad/credentials').then(r => r.data),

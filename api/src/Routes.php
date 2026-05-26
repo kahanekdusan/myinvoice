@@ -16,6 +16,7 @@ use MyInvoice\Action\Client\UpdateClientAction;
 use MyInvoice\Action\Codebook\CodebookAction;
 use MyInvoice\Action\Admin\ApprovalListAction;
 use MyInvoice\Action\Admin\EmailTemplateAction;
+use MyInvoice\Action\Admin\SmtpMicrosoftOauthAction;
 use MyInvoice\Action\Approval\PublicApprovalDecideAction;
 use MyInvoice\Action\Approval\PublicApprovalGetAction;
 use MyInvoice\Action\Approval\RequestApprovalAction;
@@ -79,6 +80,9 @@ use MyInvoice\Action\PurchaseInvoice\UploadPurchaseInvoicePdfAction;
 use MyInvoice\Action\Recurring\RecurringTemplateAction;
 use MyInvoice\Action\Invoice\IssueFinalFromProformaAction;
 use MyInvoice\Action\Invoice\PdfAction;
+use MyInvoice\Action\Invoice\PublicInvoiceGetAction;
+use MyInvoice\Action\Invoice\PublicInvoiceHeartbeatAction;
+use MyInvoice\Action\Invoice\PublicInvoicePdfAction;
 use MyInvoice\Action\Invoice\ListPdfsAction;
 use MyInvoice\Action\Invoice\DownloadArchivedPdfAction;
 use MyInvoice\Action\Invoice\Attachment\ListAttachmentsAction;
@@ -280,6 +284,11 @@ final class Routes
         $app->get    ('/api/public/approval/{token:[a-f0-9]{32,128}}',          PublicApprovalGetAction::class);
         $app->post   ('/api/public/approval/{token:[a-f0-9]{32,128}}/decide',   PublicApprovalDecideAction::class);
 
+        // Public invoice link endpointy (bez auth, jen token)
+        $app->get    ('/api/public/invoice/{token:[a-f0-9]{32,128}}',            PublicInvoiceGetAction::class);
+        $app->post   ('/api/public/invoice/{token:[a-f0-9]{32,128}}/heartbeat',  PublicInvoiceHeartbeatAction::class);
+        $app->get    ('/api/public/invoice/{token:[a-f0-9]{32,128}}/pdf',        PublicInvoicePdfAction::class);
+
         // Dashboard
         $app->get ('/api/dashboard/summary',        SummaryAction::class);
 
@@ -372,6 +381,12 @@ final class Routes
         $app->get    ('/api/admin/email-templates/{code:[a-z_]+}/{locale:cs|en}',    [EmailTemplateAction::class, 'get']);
         $app->put    ('/api/admin/email-templates/{code:[a-z_]+}/{locale:cs|en}',    [EmailTemplateAction::class, 'put']);
         $app->delete ('/api/admin/email-templates/{code:[a-z_]+}/{locale:cs|en}',    [EmailTemplateAction::class, 'delete']);
+
+        // SMTP Microsoft OAuth (delegated) — in-app authorize flow bez externího callbacku
+        $app->get    ('/api/admin/smtp/oauth/microsoft/status',   [SmtpMicrosoftOauthAction::class, 'status']);
+        $app->get    ('/api/admin/smtp/oauth/microsoft/start',    [SmtpMicrosoftOauthAction::class, 'start']);
+        $app->get    ('/api/admin/smtp/oauth/microsoft/callback', [SmtpMicrosoftOauthAction::class, 'callback']);
+        $app->delete ('/api/admin/smtp/oauth/microsoft',          [SmtpMicrosoftOauthAction::class, 'disconnect']);
 
         // Multi-supplier (M7)
         $app->get    ('/api/suppliers',                     [SettingsAction::class, 'listSuppliers']);

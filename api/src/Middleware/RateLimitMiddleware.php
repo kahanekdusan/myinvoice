@@ -139,6 +139,17 @@ final class RateLimitMiddleware implements MiddlewareInterface
             return ['rl:setup-ares:ip:' . $this->ipBucket($ip), 10, 60]; // 10/min/IP
         }
 
+        // Public invoice links — per-IP throttle proti brute-force token scanům.
+        if (preg_match('#^/api/public/invoice/[a-f0-9]{32,128}$#', $path) === 1 && $method === 'GET') {
+            return ['rl:pub-invoice:get:ip:' . $this->ipBucket($ip), 120, 60];
+        }
+        if (preg_match('#^/api/public/invoice/[a-f0-9]{32,128}/heartbeat$#', $path) === 1 && $method === 'POST') {
+            return ['rl:pub-invoice:heartbeat:ip:' . $this->ipBucket($ip), 240, 60];
+        }
+        if (preg_match('#^/api/public/invoice/[a-f0-9]{32,128}/pdf$#', $path) === 1 && $method === 'GET') {
+            return ['rl:pub-invoice:pdf:ip:' . $this->ipBucket($ip), 60, 60];
+        }
+
         // ARES / VIES lookups (per user) — chrání 24h cache před zaplněním
         if (in_array($path, ['/api/clients/lookup-ares', '/api/clients/lookup-vies'], true) && $userId > 0) {
             return ['rl:ares:user:' . $userId, (int) ($rl['ares_per_min_per_user'] ?? 30), 60];

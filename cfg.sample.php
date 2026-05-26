@@ -84,6 +84,11 @@ return [
         ],
     ],
     'smtp' => [
+        // Transport mode
+        // - 'smtp'  = klasicky přes SMTP server
+        // - 'graph' = Microsoft Graph API (obejde tenant blokaci SMTP AUTH)
+        'transport'      => 'smtp',
+
         // Connection
         'host'           => 'smtp.example.com',
         'port'           => 587,                     // 25 plain | 465 SSL | 587 STARTTLS
@@ -95,17 +100,44 @@ return [
         'user'           => 'CHANGE-ME',
         'pass'           => 'CHANGE-ME',
 
-        // OAuth2 (jen pokud auth_type='XOAUTH2', např. Gmail/M365 moderní auth)
+        // OAuth2 (jen pokud auth_type='XOAUTH2').
+        // Aktuální implementace SMTP OAuth podporuje provider 'microsoft'.
         'oauth' => [
-            'provider'      => null,                 // 'google' | 'microsoft' | null
-            'client_id'     => '',
-            'client_secret' => '',
-            'refresh_token' => '',
+            'provider' => null,                      // 'microsoft' | null
+            'microsoft' => [
+                // grant_type:
+                // - 'client_credentials' = app-only (vyžaduje SMTP.SendAsApp)
+                // - 'refresh_token'      = delegated (funguje s delegovaným SMTP.Send)
+                // Pokud není vyplněno, použije se automaticky:
+                // refresh_token present => refresh_token, jinak client_credentials.
+                'grant_type'    => 'refresh_token',
+                'tenant_id'     => 'CHANGE-ME',
+                'client_id'     => 'CHANGE-ME',
+                'client_secret' => 'CHANGE-ME',
+                // Delegated refresh token z OAuth consent flow.
+                'refresh_token' => '',
+                // Delegated default: https://outlook.office365.com/SMTP.Send offline_access
+                // App-only default: https://outlook.office365.com/.default
+                'scope'         => 'https://outlook.office365.com/SMTP.Send offline_access',
+                // Scope pro Graph transport.
+                // Delegated default: https://graph.microsoft.com/Mail.Send offline_access
+                // App-only default: https://graph.microsoft.com/.default
+                'graph_scope'   => 'https://graph.microsoft.com/Mail.Send offline_access',
+                // Volitelně explicitní Graph send endpoint.
+                // Pokud je prázdný, použije se:
+                // - /users/{smtp.user}/sendMail (pokud je smtp.user vyplněný)
+                // - /me/sendMail (jinak)
+                'graph_send_url' => '',
+                // Redirect URI pro in-app flow (když je prázdné, použije se app.url + /api/admin/smtp/oauth/microsoft/callback).
+                'redirect_uri'  => '',
+                // Volitelně explicitní token endpoint (jinak se složí z tenant_id):
+                // 'token_url'   => 'https://login.microsoftonline.com/<tenant_id>/oauth2/v2.0/token',
+            ],
         ],
 
         // Sender identity
-        'from_email'     => 'noreply@example.com',   // adresa v hlavičce From: (musí být na doméně, kde máš DKIM/SPF)
-        'from_name'      => 'MyInvoice',             // zobrazované jméno odesílatele
+        'from_email'     => 'info@dusankahanek.cz',   // adresa v hlavičce From: (musí být na doméně, kde máš DKIM/SPF)
+        'from_name'      => 'Dušan Kahánek',             // zobrazované jméno odesílatele
         'reply_to_email' => '',                      // pokud prázdné, použije se from_email
         'reply_to_name'  => '',
 

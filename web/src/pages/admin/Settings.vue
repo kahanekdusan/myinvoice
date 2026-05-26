@@ -12,6 +12,7 @@ const toast = useToast()
 const supplier = ref<Supplier | null>(null)
 const currencies = ref<CurrencyAccount[]>([])
 const loading = ref(true)
+const loadError = ref('')
 
 const editingCurrency = ref<number | null>(null)
 const editingCurrencyLabel = ref<string>('')
@@ -36,6 +37,7 @@ const creditNoteFormatError = computed(() => validateAndPreview(supplier.value?.
 
 async function load() {
   loading.value = true
+  loadError.value = ''
   try {
     [supplier.value, currencies.value] = await Promise.all([
       settingsApi.getSupplier(),
@@ -43,6 +45,10 @@ async function load() {
     ])
     // První render preview hned po loadu supplier
     bumpPreview()
+  } catch (e: any) {
+    supplier.value = null
+    currencies.value = []
+    loadError.value = e?.response?.data?.error?.message || t('settings.missing_supplier_error')
   } finally { loading.value = false }
 }
 
@@ -757,6 +763,12 @@ async function removeCurrency(c: CurrencyAccount) {
           </div>
         </div>
       </div>
+    </div>
+
+    <div v-else class="rounded-lg border border-warning-200 bg-warning-50 p-4 text-sm text-warning-900">
+      <p class="font-medium">{{ t('settings.missing_supplier_title') }}</p>
+      <p class="mt-1">{{ loadError || t('settings.missing_supplier_error') }}</p>
+      <p class="mt-2 text-warning-800">{{ t('settings.missing_supplier_hint') }}</p>
     </div>
   </div>
 </template>

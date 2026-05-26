@@ -76,6 +76,14 @@ export interface Invoice {
   approval_reminder_count: number
   project_requires_approval?: boolean
   sent_at: string | null
+  public_link_sent_at: string | null
+  public_first_opened_at: string | null
+  public_last_opened_at: string | null
+  public_open_count: number
+  public_first_viewed_at: string | null
+  public_last_viewed_at: string | null
+  public_view_count: number
+  public_viewed_seconds: number
   last_reminder_at: string | null
   reminder_count: number
   paid_at: string | null
@@ -156,6 +164,14 @@ export interface InvoiceListItem {
   status: InvoiceStatus
   payment_method: PaymentMethod
   sent_at: string | null
+  public_link_sent_at: string | null
+  public_first_opened_at: string | null
+  public_last_opened_at: string | null
+  public_open_count: number
+  public_first_viewed_at: string | null
+  public_last_viewed_at: string | null
+  public_view_count: number
+  public_viewed_seconds: number
   last_reminder_at: string | null
   reminder_count: number
   paid_at: string | null

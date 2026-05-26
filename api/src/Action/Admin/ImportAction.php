@@ -72,6 +72,8 @@ final class ImportAction
 
         try {
             $report = $this->importer->importBundle($files, $supplierId, (int) ($user['id'] ?? 0), $kind);
+        } catch (\InvalidArgumentException $e) {
+            return Json::error($response, 'import_invalid', $e->getMessage(), 400);
         } catch (\Throwable $e) {
             return Json::error($response, 'import_failed', $e->getMessage(), 500);
         }

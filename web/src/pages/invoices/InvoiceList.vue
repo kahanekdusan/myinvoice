@@ -657,6 +657,8 @@ const monthOptions = computed(() => (tm('common.months_short') as unknown as str
                   </span>
                   <span v-if="inv.sent_at" class="ml-1 text-xs px-1 py-0.5 rounded bg-success-50 text-success-600"
                     :title="t('invoice.sent_at', { date: formatDate(inv.sent_at) })">✉</span>
+                  <span v-if="inv.public_first_viewed_at" class="ml-1 text-xs px-1 py-0.5 rounded bg-sky-50 text-sky-700"
+                    :title="t('invoice.viewed_at', { date: formatDate(inv.public_first_viewed_at) })">👁</span>
                   <span v-if="inv.reminder_count > 0" class="ml-1 text-xs px-1 py-0.5 rounded bg-warning-50 text-warning-600 font-semibold"
                     :title="t('invoice.reminder_at', { count: inv.reminder_count, date: formatDate(inv.last_reminder_at) })">⚠ {{ inv.reminder_count }}</span>
                 </td>
@@ -713,6 +715,8 @@ const monthOptions = computed(() => (tm('common.months_short') as unknown as str
                   <div class="flex items-center gap-1 flex-wrap justify-end">
                     <span v-if="inv.sent_at" class="text-xs px-1 py-0.5 rounded bg-success-50 text-success-600"
                       :title="t('invoice.sent_at', { date: formatDate(inv.sent_at) })">✉</span>
+                    <span v-if="inv.public_first_viewed_at" class="text-xs px-1 py-0.5 rounded bg-sky-50 text-sky-700"
+                      :title="t('invoice.viewed_at', { date: formatDate(inv.public_first_viewed_at) })">👁</span>
                     <span v-if="inv.reminder_count > 0" class="text-xs px-1 py-0.5 rounded bg-warning-50 text-warning-600 font-semibold"
                       :title="t('invoice.reminder_at', { count: inv.reminder_count, date: formatDate(inv.last_reminder_at) })">⚠ {{ inv.reminder_count }}</span>
                     <span class="text-xs px-2 py-0.5 rounded" :class="statusBadgeClass(inv.status)">

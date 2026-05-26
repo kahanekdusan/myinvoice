@@ -11,10 +11,10 @@ use MyInvoice\Infrastructure\Database\Connection;
 use MyInvoice\Middleware\AuthMiddleware;
 use MyInvoice\Repository\InvoiceRepository;
 use MyInvoice\Service\ActivityLogger;
+use MyInvoice\Service\Invoice\PublicInvoiceLinkFactory;
 use MyInvoice\Service\IpMatcher;
 use MyInvoice\Service\Mail\InvoiceEmailVarsBuilder;
 use MyInvoice\Service\Mail\Mailer;
-use MyInvoice\Service\Pdf\InvoicePdfRenderer;
 use MyInvoice\Service\Validation\InvoiceAmountPolicy;
 use Psr\Http\Message\ResponseInterface as Response;
 use Psr\Http\Message\ServerRequestInterface as Request;
@@ -31,9 +31,9 @@ final class SendTestReminderAction
 {
     public function __construct(
         private readonly InvoiceRepository $repo,
-        private readonly InvoicePdfRenderer $renderer,
         private readonly Mailer $mailer,
         private readonly InvoiceEmailVarsBuilder $varsBuilder,
+        private readonly PublicInvoiceLinkFactory $linkFactory,
         private readonly Config $config,
         private readonly ActivityLogger $logger,
         private readonly IpMatcher $ipMatcher,
@@ -75,14 +75,11 @@ final class SendTestReminderAction
             }
         }
 
-        try {
-            $pdfPath = $this->renderer->render($id);
-        } catch (\Throwable $e) {
-            return Json::error($response, 'pdf_failed', 'Nepodařilo se vygenerovat PDF: ' . $e->getMessage(), 500);
-        }
+        $publicToken = $this->repo->rotatePublicViewToken($id);
+        $invoiceViewUrl = $this->linkFactory->build($publicToken);
 
         $locale = (string) ($invoice['language'] ?? 'cs');
-        $vars = $this->varsBuilder->buildReminder($invoice, $daysOverdue, $locale);
+        $vars = $this->varsBuilder->buildReminder($invoice, $daysOverdue, $locale, $invoiceViewUrl);
         // Označ jako TEST v subjectu (na rozdíl od reálné upomínky)
         $vars['subject'] = ($locale === 'en' ? '[TEST] ' : '[TEST] ') . $vars['subject'];
 
@@ -97,11 +94,7 @@ final class SendTestReminderAction
                 null,
                 [],
                 [],
-                [[
-                    'path' => $pdfPath,
-                    'name' => basename($pdfPath),
-                    'contentType' => 'application/pdf',
-                ]],
+                [],
             );
         } catch (\Throwable $e) {
             return Json::error($response, 'send_failed', 'Email se nepodařilo odeslat: ' . $e->getMessage(), 502);
@@ -112,7 +105,8 @@ final class SendTestReminderAction
         $this->logger->log('email.sent_test_reminder', $user['id'] ?? null, 'invoice', $id, [
             'to'            => $testRecipient,
             'days_overdue'  => $daysOverdue,
-            'pdf_path'      => basename($pdfPath),
+            'delivery_mode' => 'public_link',
+            'invoice_view_url' => $invoiceViewUrl,
             'smtp_response' => $smtpResponse,
         ], $ip, $request->getHeaderLine('User-Agent'));
 

@@ -72,14 +72,12 @@ final class SetupAction
             ]);
             $userId = (int) $pdo->lastInsertId();
 
-            // Volitelně dodavatel
-            if ($supplier !== null) {
-                $this->insertSupplier($pdo, $supplier);
-            }
+            $effectiveSupplier = $supplier ?? $this->buildDefaultSupplier($admin);
+            $this->insertSupplier($pdo, $effectiveSupplier);
 
             $this->logger->log('setup.completed', $userId, 'user', $userId, [
                 'email' => $admin['email'],
-                'has_supplier' => $supplier !== null,
+                'has_supplier' => true,
                 'require_totp' => $requireTotp,
             ], $ip, $request->getHeaderLine('User-Agent'));
 
@@ -233,6 +231,33 @@ final class SetupAction
         $pdo->prepare('UPDATE supplier SET default_currency_id = ? WHERE id = ?')
             ->execute([$defaultCurrencyId, $supplierId]);
         $pdo->exec('SET FOREIGN_KEY_CHECKS = 1');
+    }
+
+    private function buildDefaultSupplier(array $admin): array
+    {
+        $name = trim((string) ($admin['name'] ?? 'MyInvoice Supplier'));
+        if ($name === '') {
+            $name = 'MyInvoice Supplier';
+        }
+
+        $email = trim((string) ($admin['email'] ?? 'admin@example.com'));
+        if ($email === '') {
+            $email = 'admin@example.com';
+        }
+
+        return [
+            'company_name' => $name,
+            'display_name' => $name,
+            'street' => 'Unknown street',
+            'city' => 'Unknown city',
+            'zip' => '00000',
+            'country_iso2' => 'CZ',
+            'email' => $email,
+            'default_currency' => 'CZK',
+            'default_payment_due_days' => 7,
+            'default_hourly_rate' => '0.00',
+            'is_vat_payer' => false,
+        ];
     }
 
     /**
