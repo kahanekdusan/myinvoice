@@ -221,6 +221,9 @@ final class InvoiceRepository
                        i.advance_paid_amount, i.amount_to_pay,
                        i.status, i.payment_method,
                        i.sent_at, i.last_reminder_at, i.reminder_count,
+                       i.public_link_sent_at,
+                       i.public_first_opened_at, i.public_last_opened_at, i.public_open_count,
+                       i.public_first_viewed_at, i.public_last_viewed_at, i.public_view_count, i.public_viewed_seconds,
                        i.paid_at, i.cancelled_at,
                        c.company_name AS client_company_name,
                        p.name AS project_name,
@@ -565,6 +568,9 @@ final class InvoiceRepository
         }
         if (isset($row['client_reverse_charge'])) $row['client_reverse_charge'] = (bool) $row['client_reverse_charge'];
         if (array_key_exists('reminder_count', $row)) $row['reminder_count'] = (int) $row['reminder_count'];
+        if (array_key_exists('public_open_count', $row)) $row['public_open_count'] = (int) $row['public_open_count'];
+        if (array_key_exists('public_view_count', $row)) $row['public_view_count'] = (int) $row['public_view_count'];
+        if (array_key_exists('public_viewed_seconds', $row)) $row['public_viewed_seconds'] = (int) $row['public_viewed_seconds'];
         if (array_key_exists('approval_reminder_count', $row)) {
             $row['approval_reminder_count'] = (int) $row['approval_reminder_count'];
         }
@@ -577,6 +583,87 @@ final class InvoiceRepository
             $row['has_work_report'] = (bool) $row['has_work_report'];
         }
         return $row;
+    }
+
+    /**
+     * Vygeneruje nový single-use public token pro fakturu a uloží jen jeho hash.
+     * Vrací plaintext token pro vložení do emailu.
+     */
+    public function rotatePublicViewToken(int $invoiceId): string
+    {
+        $token = bin2hex(random_bytes(32)); // 64 hex chars
+        $hash = hash('sha256', $token);
+
+        $this->db->pdo()->prepare(
+            'UPDATE invoices
+                SET public_view_token_hash = ?,
+                    public_view_token_created_at = NOW(),
+                    public_link_sent_at = NOW(),
+                    public_first_opened_at = NULL,
+                    public_last_opened_at = NULL,
+                    public_open_count = 0,
+                    public_first_viewed_at = NULL,
+                    public_last_viewed_at = NULL,
+                    public_view_count = 0,
+                    public_viewed_seconds = 0
+              WHERE id = ?'
+        )->execute([$hash, $invoiceId]);
+
+        return $token;
+    }
+
+    /**
+     * Najde fakturu podle public tokenu (porovnává se SHA-256 hash tokenu).
+     */
+    public function findByPublicViewToken(string $token): ?array
+    {
+        $hash = hash('sha256', $token);
+
+        $stmt = $this->db->pdo()->prepare(
+            'SELECT id
+               FROM invoices
+              WHERE public_view_token_hash = ?
+              LIMIT 1'
+        );
+        $stmt->execute([$hash]);
+
+        $id = $stmt->fetchColumn();
+        if ($id === false) {
+            return null;
+        }
+
+        return $this->find((int) $id);
+    }
+
+    /**
+     * Tracking prvního/posledního otevření veřejného odkazu.
+     */
+    public function markPublicLinkOpened(int $invoiceId): void
+    {
+        $this->db->pdo()->prepare(
+            'UPDATE invoices
+                SET public_first_opened_at = COALESCE(public_first_opened_at, NOW()),
+                    public_last_opened_at = NOW(),
+                    public_open_count = public_open_count + 1
+              WHERE id = ?'
+        )->execute([$invoiceId]);
+    }
+
+    /**
+     * Tracking "viděna" po heartbeatu (>= 10s).
+     */
+    public function markPublicLinkViewed(int $invoiceId, int $viewedSeconds): void
+    {
+        $seconds = max(10, $viewedSeconds);
+
+        $this->db->pdo()->prepare(
+            'UPDATE invoices
+                SET public_first_viewed_at = COALESCE(public_first_viewed_at, NOW()),
+                    public_last_viewed_at = NOW(),
+                    public_view_count = public_view_count + 1,
+                    public_viewed_seconds = GREATEST(public_viewed_seconds, ?)
+              WHERE id = ?'
+        )->execute([$seconds, $invoiceId]);
     }
 
     /**

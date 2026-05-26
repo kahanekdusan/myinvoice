@@ -334,23 +334,37 @@ final class ClientRepository
     {
         if (isset($data['currency_default_id'])) {
             $id = (int) $data['currency_default_id'];
-            $check = $this->db->pdo()->prepare('SELECT 1 FROM currencies WHERE id = ? AND supplier_id = ?');
-            $check->execute([$id, $supplierId]);
-            if (!$check->fetchColumn()) {
-                throw new \InvalidArgumentException("Currency #$id nepatří supplier #$supplierId.");
+            if ($id > 0) {
+                $check = $this->db->pdo()->prepare('SELECT 1 FROM currencies WHERE id = ? AND supplier_id = ?');
+                $check->execute([$id, $supplierId]);
+                if (!$check->fetchColumn()) {
+                    throw new \InvalidArgumentException("Currency #$id nepatří supplier #$supplierId.");
+                }
+                return $id;
             }
-            return $id;
         }
-        $code = strtoupper((string) ($data['currency_default'] ?? 'CZK'));
-        $stmt = $this->db->pdo()->prepare(
-            'SELECT id FROM currencies WHERE supplier_id = ? AND code = ? ORDER BY is_default DESC, id ASC LIMIT 1'
-        );
-        $stmt->execute([$supplierId, $code]);
-        $id = $stmt->fetchColumn();
-        if ($id === false) {
-            throw new \InvalidArgumentException("Currency not found: $code (supplier #$supplierId)");
+
+        $code = strtoupper(trim((string) ($data['currency_default'] ?? '')));
+        if ($code !== '') {
+            $stmt = $this->db->pdo()->prepare(
+                'SELECT id FROM currencies WHERE supplier_id = ? AND code = ? ORDER BY is_default DESC, id ASC LIMIT 1'
+            );
+            $stmt->execute([$supplierId, $code]);
+            $id = $stmt->fetchColumn();
+            if ($id === false) {
+                throw new \InvalidArgumentException("Currency not found: $code (supplier #$supplierId)");
+            }
+            return (int) $id;
         }
-        return (int) $id;
+
+        // Fallback: výchozí měna suppliera (odpovídá OpenAPI kontraktu).
+        $stmt = $this->db->pdo()->prepare('SELECT default_currency_id FROM supplier WHERE id = ? LIMIT 1');
+        $stmt->execute([$supplierId]);
+        $id = (int) $stmt->fetchColumn();
+        if ($id <= 0) {
+            throw new \InvalidArgumentException("Supplier #$supplierId nemá nastavenou výchozí měnu.");
+        }
+        return $id;
     }
 
     public function archive(int $id): void

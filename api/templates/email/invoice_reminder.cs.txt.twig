@@ -15,8 +15,8 @@ Splatnost:         {{ invoice.due_date|date('j.n.Y') }}
 Po splatnosti:     {{ days_overdue }} {% if days_overdue == 1 %}den{% elseif days_overdue < 5 %}dny{% else %}dní{% endif %}
 K úhradě:          {{ amount_to_pay|number_format(2, ',', ' ') }} {{ invoice.currency }}
 
-Faktura v PDF je v příloze tohoto emailu.
-Pokud byla platba odeslána v posledních dnech, považujte prosím tuto upomínku za bezpředmětnou.
+{% if invoice_view_url %}Otevřít fakturu: {{ invoice_view_url }}
+{% endif %}Pokud byla platba odeslána v posledních dnech, považujte prosím tuto upomínku za bezpředmětnou.
 
 Děkujeme za vyřízení.
 {% endblock %}

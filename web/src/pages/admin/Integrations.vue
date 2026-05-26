@@ -3,7 +3,7 @@ import { ref, onMounted, onUnmounted, computed, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { integrationsApi,
   type IdokladCredentialsStatus, type FakturoidCredentialsStatus,
-  type AnthropicCredentialsStatus, type AiExtractResult, type ImportJob } from '@/api/integrations'
+  type AnthropicCredentialsStatus, type AiExtractResult, type ImportJob, type MicrosoftOauthStatus } from '@/api/integrations'
 import { useRouter, useRoute } from 'vue-router'
 import { useToast } from '@/composables/useToast'
 import { apiErrorMessage } from '@/api/errors'
@@ -11,13 +11,13 @@ import { apiErrorMessage } from '@/api/errors'
 const { t } = useI18n()
 const toast = useToast()
 
-type Tab = 'idoklad' | 'fakturoid' | 'ai'
+type Tab = 'idoklad' | 'fakturoid' | 'microsoft' | 'ai'
 // Tab z ?tab=... query (default idoklad). Watch pro proklik mezi sidebar položkami
 // "Externí integrace" (no query) ↔ "AI import" (?tab=ai).
 const route = useRoute()
 function readTabFromQuery(): Tab {
   const q = String(route.query.tab ?? '')
-  return q === 'fakturoid' || q === 'ai' ? q as Tab : 'idoklad'
+  return q === 'fakturoid' || q === 'microsoft' || q === 'ai' ? q as Tab : 'idoklad'
 }
 const tab = ref<Tab>(readTabFromQuery())
 watch(() => route.query.tab, () => {
@@ -281,6 +281,40 @@ const aiExtracting = ref(false)
 const aiResult = ref<AiExtractResult | null>(null)
 const aiPerRequestModel = ref('')  // empty = použít default
 
+// ── Microsoft OAuth (SMTP/Graph) ────────────────────────────────────
+const msStatus = ref<MicrosoftOauthStatus | null>(null)
+const msLoading = ref(false)
+const msDisconnecting = ref(false)
+
+async function loadMicrosoftStatus() {
+  msLoading.value = true
+  try {
+    msStatus.value = await integrationsApi.getMicrosoftOauthStatus()
+  } catch (e) {
+    toast.error(apiErrorMessage(e))
+  } finally {
+    msLoading.value = false
+  }
+}
+
+function connectMicrosoft() {
+  window.location.href = '/api/admin/smtp/oauth/microsoft/start'
+}
+
+async function disconnectMicrosoft() {
+  if (!confirm(t('integrations.microsoft.disconnect_confirm'))) return
+  msDisconnecting.value = true
+  try {
+    await integrationsApi.disconnectMicrosoftOauth()
+    toast.success(t('integrations.microsoft.disconnected'))
+    await loadMicrosoftStatus()
+  } catch (e) {
+    toast.error(apiErrorMessage(e))
+  } finally {
+    msDisconnecting.value = false
+  }
+}
+
 async function loadAiStatus() {
   try {
     aiStatus.value = await integrationsApi.getAnthropicCreds()
@@ -443,6 +477,7 @@ onMounted(() => {
   loadIdokladStatus()
   loadFakStatus()
   loadAiStatus()
+  loadMicrosoftStatus()
 })
 
 onUnmounted(() => {
@@ -457,10 +492,10 @@ onUnmounted(() => {
       <p class="text-sm text-neutral-500 mt-0.5">{{ t('integrations.subtitle') }}</p>
     </div>
 
-    <!-- Tabs: iDoklad / Fakturoid / AI -->
+    <!-- Tabs: iDoklad / Fakturoid / Microsoft / AI -->
     <div class="border-b border-neutral-200 mb-4 flex gap-1 overflow-x-auto">
       <button
-        v-for="tt in (['idoklad', 'fakturoid', 'ai'] as const)" :key="tt"
+        v-for="tt in (['idoklad', 'fakturoid', 'microsoft', 'ai'] as const)" :key="tt"
         @click="tab = tt"
         class="cursor-pointer px-4 py-2 text-sm border-b-2 transition whitespace-nowrap inline-flex items-center gap-1.5"
         :class="tab === tt
@@ -841,6 +876,55 @@ onUnmounted(() => {
             <pre class="mt-2 max-h-72 overflow-y-auto bg-neutral-900 text-neutral-100 p-3 rounded font-mono text-[11px] whitespace-pre-wrap">{{ currentJob.log_text }}</pre>
           </details>
         </div>
+      </div>
+    </div>
+
+    <!-- ════ Microsoft tab ════ -->
+    <div v-else-if="tab === 'microsoft'" class="space-y-4">
+      <div class="bg-white border border-neutral-200 rounded-lg p-5 shadow-sm">
+        <h2 class="text-sm font-medium text-neutral-700 mb-2">{{ t('integrations.microsoft.title') }}</h2>
+        <p class="text-xs text-neutral-500 mb-4">{{ t('integrations.microsoft.hint') }}</p>
+
+        <div v-if="msLoading" class="text-sm text-neutral-500">{{ t('common.loading') }}…</div>
+
+        <template v-else>
+          <div class="rounded-md px-3 py-2 text-sm mb-4 border"
+               :class="msStatus?.configured
+                ? 'bg-success-50 text-success-600 border-success-500/40'
+                : 'bg-warning-50 text-warning-700 border-warning-500/40'">
+            <template v-if="msStatus?.configured">✓ {{ t('integrations.microsoft.connected') }}</template>
+            <template v-else>⚠ {{ t('integrations.microsoft.not_connected') }}</template>
+          </div>
+
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs text-neutral-600 mb-4">
+            <div class="rounded border border-neutral-200 bg-neutral-50 px-3 py-2">
+              <div class="text-neutral-500">{{ t('integrations.microsoft.transport') }}</div>
+              <div class="font-mono mt-1">{{ msStatus?.transport || '—' }}</div>
+            </div>
+            <div class="rounded border border-neutral-200 bg-neutral-50 px-3 py-2">
+              <div class="text-neutral-500">{{ t('integrations.microsoft.sender_mailbox') }}</div>
+              <div class="font-mono mt-1">{{ msStatus?.from_user || '—' }}</div>
+            </div>
+            <div class="rounded border border-neutral-200 bg-neutral-50 px-3 py-2 md:col-span-2">
+              <div class="text-neutral-500">{{ t('integrations.microsoft.redirect_uri') }}</div>
+              <div class="font-mono mt-1 break-all">{{ msStatus?.redirect_uri || '—' }}</div>
+            </div>
+          </div>
+
+          <div class="flex items-center justify-between gap-2 mt-4 pt-4 border-t border-neutral-100">
+            <button v-if="msStatus?.configured" type="button" @click="disconnectMicrosoft" :disabled="msDisconnecting"
+                    class="cursor-pointer h-10 px-4 text-sm border border-danger-500/50 text-danger-500 hover:bg-danger-50 disabled:opacity-50 rounded-md">
+              {{ msDisconnecting ? '…' : t('integrations.microsoft.disconnect') }}
+            </button>
+            <span v-else></span>
+            <button type="button" @click="connectMicrosoft"
+                    class="cursor-pointer h-10 px-5 text-sm bg-primary-600 hover:bg-primary-700 text-white font-medium rounded-md">
+              {{ t('integrations.microsoft.connect') }}
+            </button>
+          </div>
+
+          <p class="text-xs text-neutral-500 mt-3">{{ t('integrations.microsoft.post_connect_hint') }}</p>
+        </template>
       </div>
     </div>
 

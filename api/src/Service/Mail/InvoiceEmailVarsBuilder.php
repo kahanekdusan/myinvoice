@@ -23,7 +23,7 @@ final class InvoiceEmailVarsBuilder
      * `proforma_reminder.{locale}.{html,txt}.twig` (podle invoice_type).
      * Stejný shape jako build() + extra `days_overdue` pro template.
      */
-    public function buildReminder(array $invoice, int $daysOverdue, string $locale): array
+    public function buildReminder(array $invoice, int $daysOverdue, string $locale, ?string $invoiceViewUrl = null): array
     {
         $varsymbol = (string) ($invoice['varsymbol'] ?? '');
         $supplier = $this->resolveSupplierName($invoice, false);
@@ -54,10 +54,11 @@ final class InvoiceEmailVarsBuilder
             'is_test'        => false,
             'is_paid'        => ($invoice['status'] ?? '') === 'paid',
             'payment_method' => (string) ($invoice['payment_method'] ?? 'bank_transfer'),
+            'invoice_view_url' => $invoiceViewUrl,
         ];
     }
 
-    public function build(array $invoice, bool $isTest, string $locale): array
+    public function build(array $invoice, bool $isTest, string $locale, ?string $invoiceViewUrl = null): array
     {
         $type = (string) $invoice['invoice_type'];
         $varsymbol = (string) ($invoice['varsymbol'] ?? '');
@@ -78,12 +79,12 @@ final class InvoiceEmailVarsBuilder
         // ho nepoužívají.
         if ($locale === 'en') {
             $greeting = 'Hello,';
-            $intro_prefix = "we're sending you {$typeLabel}";
-            $intro_plain = "we're sending you {$typeLabel} No. {$varsymbol}.";
+            $intro_prefix = "your {$typeLabel} is available online";
+            $intro_plain = "your {$typeLabel} No. {$varsymbol} is available via a secure link below.";
         } else {
             $greeting = 'Dobrý den,';
-            $intro_prefix = "v příloze posíláme {$typeLabel}";
-            $intro_plain = "v příloze posíláme {$typeLabel} č. {$varsymbol}.";
+            $intro_prefix = "Vaše {$typeLabel} je připravena online";
+            $intro_plain = "Vaše {$typeLabel} č. {$varsymbol} je dostupná přes bezpečný odkaz níže.";
         }
         // Legacy `intro` value — autoescape-safe (žádné raw <strong>); custom email
         // template overrides v DB mohou používat `{{ intro }}` (bez |raw) a dostanou
@@ -104,6 +105,7 @@ final class InvoiceEmailVarsBuilder
             'supplier'       => $this->loadSupplierFooter($invoice),
             'is_paid'        => ($invoice['status'] ?? '') === 'paid',
             'payment_method' => (string) ($invoice['payment_method'] ?? 'bank_transfer'),
+            'invoice_view_url' => $invoiceViewUrl,
         ];
     }
 

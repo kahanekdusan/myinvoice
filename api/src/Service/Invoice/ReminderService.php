@@ -9,7 +9,6 @@ use MyInvoice\Repository\InvoiceRepository;
 use MyInvoice\Service\ActivityLogger;
 use MyInvoice\Service\Mail\InvoiceEmailVarsBuilder;
 use MyInvoice\Service\Mail\Mailer;
-use MyInvoice\Service\Pdf\InvoicePdfRenderer;
 use MyInvoice\Infrastructure\Config\Config;
 use MyInvoice\Service\Validation\InvoiceAmountPolicy;
 
@@ -27,7 +26,7 @@ final class ReminderService
     public function __construct(
         private readonly InvoiceRepository $repo,
         private readonly Connection $db,
-        private readonly InvoicePdfRenderer $renderer,
+        private readonly PublicInvoiceLinkFactory $linkFactory,
         private readonly Mailer $mailer,
         private readonly InvoiceEmailVarsBuilder $varsBuilder,
         private readonly ActivityLogger $logger,
@@ -88,10 +87,11 @@ final class ReminderService
             }
         }
 
-        $pdfPath = $this->renderer->render($invoiceId);
+        $publicToken = $this->repo->rotatePublicViewToken($invoiceId);
+        $invoiceViewUrl = $this->linkFactory->build($publicToken);
 
         $locale = (string) ($invoice['language'] ?? 'cs');
-        $vars = $this->varsBuilder->buildReminder($invoice, $daysOverdue, $locale);
+        $vars = $this->varsBuilder->buildReminder($invoice, $daysOverdue, $locale, $invoiceViewUrl);
 
         $templateCode = $invoice['invoice_type'] === 'proforma' ? 'proforma_reminder' : 'invoice_reminder';
         $this->mailer->sendTemplate(
@@ -102,13 +102,14 @@ final class ReminderService
             null,
             $cc,
             [],
-            [['path' => $pdfPath, 'name' => basename($pdfPath), 'contentType' => 'application/pdf']],
+            [],
         );
 
         // Status → 'reminded' (z 'paid' nepřechází, protože jsme to vyloučili výše)
         $this->db->pdo()->prepare(
             "UPDATE invoices
                 SET status = 'reminded',
+                    public_link_sent_at = NOW(),
                     last_reminder_at = NOW(),
                     reminder_count = reminder_count + 1
               WHERE id = ?"
@@ -119,6 +120,8 @@ final class ReminderService
             'cc'           => $cc,
             'days_overdue' => $daysOverdue,
             'reminder_no'  => (int) $invoice['reminder_count'] + 1,
+            'delivery_mode' => 'public_link',
+            'invoice_view_url' => $invoiceViewUrl,
         ], $ip, $userAgent);
 
         return ['sent_to' => $to, 'days_overdue' => $daysOverdue];

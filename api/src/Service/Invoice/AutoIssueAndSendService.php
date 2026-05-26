@@ -10,8 +10,6 @@ use MyInvoice\Repository\InvoiceRepository;
 use MyInvoice\Service\ActivityLogger;
 use MyInvoice\Service\Mail\InvoiceEmailVarsBuilder;
 use MyInvoice\Service\Mail\Mailer;
-use MyInvoice\Service\Pdf\InvoicePdfRenderer;
-use MyInvoice\Service\Pdf\PdfArchiveService;
 use MyInvoice\Service\Stats\StatsRecomputer;
 use MyInvoice\Service\Validation\InvoiceAmountPolicy;
 
@@ -34,13 +32,12 @@ final class AutoIssueAndSendService
         private readonly Connection $db,
         private readonly VarsymbolGenerator $varsymbol,
         private readonly SnapshotBuilder $snapshots,
-        private readonly InvoicePdfRenderer $renderer,
+        private readonly PublicInvoiceLinkFactory $linkFactory,
         private readonly Mailer $mailer,
         private readonly InvoiceEmailVarsBuilder $varsBuilder,
         private readonly ActivityLogger $logger,
         private readonly StatsRecomputer $stats,
         private readonly Config $config,
-        private readonly PdfArchiveService $pdfArchive,
     ) {}
 
     /**
@@ -81,17 +78,10 @@ final class AutoIssueAndSendService
                 'auto_reason' => 'work_report_approved',
             ], $ip, $ua);
             $this->stats->recomputeForInvoiceId($invoiceId);
-            // Re-invalidate i po flipu na 'issued' — kdyby si někdo mezi alokací VS
-            // a tímto blokem vyrenderoval Faktura-VS.pdf jako draft (bez "issued"
-            // metadat), nahradíme ho čerstvým renderem.
-            $this->renderer->invalidate($invoiceId, 'invalidate_issue');
             $invoice = $this->repo->find($invoiceId);
         }
 
-        // 2. PDF
-        $pdfPath = $this->renderer->render($invoiceId);
-
-        // 3. Příjemci (stejná logika jako SendEmailAction)
+        // 2. Příjemci (stejná logika jako SendEmailAction)
         $to = $this->resolveRecipients($invoice);
         $cc = [];
         if ((bool) $this->config->get('smtp.cc_supplier_on_send', false)) {
@@ -111,8 +101,11 @@ final class AutoIssueAndSendService
             return ['issued' => $issued, 'sent_to' => [], 'varsymbol' => $invoice['varsymbol'] ?? null];
         }
 
+        $publicToken = $this->repo->rotatePublicViewToken($invoiceId);
+        $invoiceViewUrl = $this->linkFactory->build($publicToken);
+
         $locale = (string) ($invoice['language'] ?? 'cs');
-        $vars = $this->varsBuilder->build($invoice, false, $locale);
+        $vars = $this->varsBuilder->build($invoice, false, $locale, $invoiceViewUrl);
 
         $this->mailer->sendTemplate(
             'invoice_send',
@@ -122,21 +115,17 @@ final class AutoIssueAndSendService
             null,
             $cc,
             [],
-            [['path' => $pdfPath, 'name' => basename($pdfPath), 'contentType' => 'application/pdf']],
+            [],
         );
 
         $newStatus = $invoice['status'] === 'issued' ? 'sent' : $invoice['status'];
-        $this->db->pdo()->prepare('UPDATE invoices SET status = ?, sent_at = NOW() WHERE id = ?')
+        $this->db->pdo()->prepare('UPDATE invoices SET status = ?, sent_at = NOW(), public_link_sent_at = NOW() WHERE id = ?')
             ->execute([$newStatus, $invoiceId]);
-
-        // Archivuj kopii PDF jako 'sent' verzi — viz SendEmailAction
-        $sentToAll = array_values(array_unique(array_merge($to, $cc)));
-        $archiveId = $this->pdfArchive->archiveCopy($invoiceId, $pdfPath, 'sent', wasSent: true, sentTo: $sentToAll);
 
         $this->logger->log('invoice.sent', $userId, 'invoice', $invoiceId, [
             'to' => $to, 'cc' => $cc,
-            'pdf_path' => basename($pdfPath),
-            'pdf_archive_id' => $archiveId,
+            'delivery_mode' => 'public_link',
+            'invoice_view_url' => $invoiceViewUrl,
             'auto_reason' => 'work_report_approved',
         ], $ip, $ua);
 

@@ -33,6 +33,9 @@ final class Mailer
     private mixed $transport = null;
     private ?Environment $twig = null;
     private ?array $supplierFooter = null;
+    private ?string $oauthAccessToken = null;
+    private int $oauthAccessTokenExpiresAt = 0;
+    private string $oauthAccessTokenScope = '';
 
     public function __construct(
         private readonly Config $config,
@@ -115,6 +118,7 @@ final class Mailer
 
         // Per-supplier branding logo jako CID inline image — je-li `email_branding_enabled`
         // a logo soubor existuje. Twig používá `cid:supplier_logo` jako image src.
+        $inlineAttachments = [];
         if ($supplier !== null
             && !empty($supplier['email_branding_enabled'])
             && !empty($supplier['logo_path'])
@@ -125,6 +129,12 @@ final class Mailer
             // neukazuje do storage/supplier-logos/sup-{id}.{png|svg|...}.
             $logoAbs = SafeLogoPath::resolve((string) $supplier['logo_path'], (int) $supplier['id']);
             if ($logoAbs !== null) {
+                $inlineAttachments[] = [
+                    'path' => $logoAbs,
+                    'name' => 'supplier-logo.png',
+                    'contentType' => 'image/png',
+                    'contentId' => 'supplier_logo',
+                ];
                 $email->embedFromPath($logoAbs, 'supplier_logo', 'image/png');
             }
         }
@@ -149,6 +159,36 @@ final class Mailer
 
         foreach ($attachments as $att) {
             $email->attachFromPath($att['path'], $att['name'], $att['contentType']);
+        }
+
+        $transportMode = strtolower((string) $this->config->get('smtp.transport', 'smtp'));
+        if ($transportMode === 'graph') {
+            $graphResponse = $this->sendViaMicrosoftGraph(
+                (string) $vars['subject'],
+                $html,
+                $text,
+                $to,
+                $cc,
+                $bcc,
+                $replyEmail,
+                $replyName,
+                $attachments,
+                $inlineAttachments,
+            );
+
+            $this->logger->info('mail.sent', [
+                'template'      => $code,
+                'locale'        => $locale,
+                'to'            => $to,
+                'cc'            => $cc,
+                'bcc'           => $bcc,
+                'attachments'   => count($attachments) + count($inlineAttachments),
+                'provider'      => 'graph',
+                'smtp_response' => $graphResponse,
+                'smtp_debug'    => '',
+            ]);
+
+            return $graphResponse;
         }
 
         // DKIM signer
@@ -239,6 +279,7 @@ final class Mailer
         $host = (string) $this->config->get('smtp.host');
         $port = (int) $this->config->get('smtp.port', 25);
         $authEnabled = (bool) $this->config->get('smtp.auth_enabled', false);
+        $authType = strtolower((string) $this->config->get('smtp.auth_type', 'password'));
         $user = (string) $this->config->get('smtp.user', '');
         $pass = (string) $this->config->get('smtp.pass', '');
         $encryption = (string) $this->config->get('smtp.encryption', '');
@@ -246,6 +287,12 @@ final class Mailer
 
         $userPart = '';
         if ($authEnabled && $user !== '') {
+            if ($authType === 'xoauth2') {
+                $oauthToken = $this->resolveOauthAccessToken();
+                if ($oauthToken !== '') {
+                    $pass = $oauthToken;
+                }
+            }
             $userPart = rawurlencode($user) . ':' . rawurlencode($pass) . '@';
         }
 
@@ -258,6 +305,9 @@ final class Mailer
             // Plain — disable peer verify implicitly
             $verifyPeer = false;
         }
+        if ($authEnabled && $authType === 'xoauth2') {
+            $params[] = 'auth_mode=xoauth2';
+        }
         if (!$verifyPeer) {
             $params[] = 'verify_peer=0';
         }
@@ -265,6 +315,327 @@ final class Mailer
         $query = $params ? '?' . implode('&', $params) : '';
 
         return sprintf('smtp://%s%s:%d%s', $userPart, $host, $port, $query);
+    }
+
+    private function resolveOauthAccessToken(?string $forcedScope = null): string
+    {
+        $now = time();
+        $cacheScope = $forcedScope ?? '__default__';
+        if (
+            $this->oauthAccessToken !== null
+            && $this->oauthAccessTokenExpiresAt > ($now + 60)
+            && $this->oauthAccessTokenScope === $cacheScope
+        ) {
+            return $this->oauthAccessToken;
+        }
+
+        $provider = strtolower((string) $this->config->get('smtp.oauth.provider', 'microsoft'));
+        if ($provider !== 'microsoft') {
+            $this->logger->warning('smtp.oauth.provider is not supported', ['provider' => $provider]);
+            return '';
+        }
+
+        $tenant = (string) $this->config->get('smtp.oauth.microsoft.tenant_id', '');
+        $clientId = (string) $this->config->get('smtp.oauth.microsoft.client_id', '');
+        $clientSecret = (string) $this->config->get('smtp.oauth.microsoft.client_secret', '');
+        $refreshToken = (string) $this->config->get('smtp.oauth.microsoft.refresh_token', '');
+        // Backward compatibility: support older flat oauth keys from legacy cfg samples.
+        if ($clientId === '') {
+            $clientId = (string) $this->config->get('smtp.oauth.client_id', '');
+        }
+        if ($clientSecret === '') {
+            $clientSecret = (string) $this->config->get('smtp.oauth.client_secret', '');
+        }
+        if ($refreshToken === '') {
+            $refreshToken = (string) $this->config->get('smtp.oauth.refresh_token', '');
+        }
+        if ($refreshToken === '') {
+            // cfg.local.php may be updated at runtime by OAuth callback while current
+            // request still holds an older Config snapshot; pull token from disk.
+            $refreshToken = $this->readRefreshTokenFromLocalConfig();
+        }
+
+        $grantType = strtolower((string) $this->config->get('smtp.oauth.microsoft.grant_type', ''));
+        if ($grantType === '') {
+            $grantType = $refreshToken !== '' ? 'refresh_token' : 'client_credentials';
+        }
+
+        $fallbackToClientCredentials = false;
+        if ($grantType === 'refresh_token' && $refreshToken === '') {
+            $this->logger->warning('Missing Microsoft OAuth refresh_token, falling back to client_credentials grant.');
+            $grantType = 'client_credentials';
+            $fallbackToClientCredentials = true;
+        }
+
+        $scopeDefault = $grantType === 'refresh_token'
+            ? 'https://outlook.office365.com/SMTP.Send offline_access'
+            : 'https://outlook.office365.com/.default';
+        $scope = $forcedScope !== null
+            ? $forcedScope
+            : (string) $this->config->get('smtp.oauth.microsoft.scope', $scopeDefault);
+        if ($fallbackToClientCredentials && $forcedScope !== null && !str_contains($scope, '.default')) {
+            $scope = str_contains($scope, 'graph.microsoft.com')
+                ? 'https://graph.microsoft.com/.default'
+                : 'https://outlook.office365.com/.default';
+        }
+        $tokenUrl = (string) $this->config->get('smtp.oauth.microsoft.token_url', '');
+        if ($tenant === '' && $tokenUrl === '') {
+            $this->logger->warning('Missing Microsoft OAuth tenant_id (or explicit token_url).');
+            return '';
+        }
+        if ($clientId === '' || $clientSecret === '') {
+            $this->logger->warning('Missing Microsoft OAuth SMTP credentials.');
+            return '';
+        }
+
+        if ($tokenUrl === '') {
+            $tokenUrl = 'https://login.microsoftonline.com/' . rawurlencode($tenant) . '/oauth2/v2.0/token';
+        }
+
+        $postData = [
+            'grant_type' => $grantType,
+            'client_id' => $clientId,
+            'client_secret' => $clientSecret,
+            'scope' => $scope,
+        ];
+        if ($grantType === 'refresh_token') {
+            $postData['refresh_token'] = $refreshToken;
+        } elseif ($grantType !== 'client_credentials') {
+            $this->logger->warning('Unsupported Microsoft OAuth grant_type for SMTP.', ['grant_type' => $grantType]);
+            return '';
+        }
+
+        $postFields = http_build_query($postData);
+
+        $ch = curl_init($tokenUrl);
+        curl_setopt_array($ch, [
+            CURLOPT_POST => true,
+            CURLOPT_POSTFIELDS => $postFields,
+            CURLOPT_HTTPHEADER => ['Content-Type: application/x-www-form-urlencoded'],
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_TIMEOUT => 15,
+        ]);
+        $raw = curl_exec($ch);
+        $httpCode = (int) curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+        $curlErr = curl_error($ch);
+        curl_close($ch);
+
+        if (!is_string($raw) || $httpCode < 200 || $httpCode >= 300) {
+            $this->logger->warning('Failed to fetch SMTP OAuth token', [
+                'http_code' => $httpCode,
+                'error' => $curlErr,
+            ]);
+            return '';
+        }
+
+        $json = json_decode($raw, true);
+        $accessToken = is_array($json) ? (string) ($json['access_token'] ?? '') : '';
+        $expiresIn = is_array($json) ? (int) ($json['expires_in'] ?? 0) : 0;
+        if ($accessToken === '' || $expiresIn <= 0) {
+            $this->logger->warning('SMTP OAuth response missing token.', ['response' => $json]);
+            return '';
+        }
+
+        $this->oauthAccessToken = $accessToken;
+        $this->oauthAccessTokenExpiresAt = time() + $expiresIn;
+        $this->oauthAccessTokenScope = $cacheScope;
+        return $accessToken;
+    }
+
+    /**
+     * @param string[] $to
+     * @param string[] $cc
+     * @param string[] $bcc
+     * @param array<int,array{path:string,name:string,contentType:string}> $attachments
+     * @param array<int,array{path:string,name:string,contentType:string,contentId:string}> $inlineAttachments
+     */
+    private function sendViaMicrosoftGraph(
+        string $subject,
+        string $html,
+        string $text,
+        array $to,
+        array $cc,
+        array $bcc,
+        string $replyEmail,
+        string $replyName,
+        array $attachments,
+        array $inlineAttachments,
+    ): string {
+        $grantType = strtolower((string) $this->config->get('smtp.oauth.microsoft.grant_type', ''));
+        $refreshToken = (string) $this->config->get('smtp.oauth.microsoft.refresh_token', '');
+        if ($refreshToken === '') {
+            $refreshToken = (string) $this->config->get('smtp.oauth.refresh_token', '');
+        }
+        if ($refreshToken === '') {
+            $refreshToken = $this->readRefreshTokenFromLocalConfig();
+        }
+        if ($grantType === '') {
+            $grantType = $refreshToken !== '' ? 'refresh_token' : 'client_credentials';
+        } elseif ($grantType === 'refresh_token' && $refreshToken === '') {
+            $grantType = 'client_credentials';
+        }
+
+        $graphScopeDefault = $grantType === 'refresh_token'
+            ? 'https://graph.microsoft.com/Mail.Send offline_access'
+            : 'https://graph.microsoft.com/.default';
+        $graphScope = (string) $this->config->get('smtp.oauth.microsoft.graph_scope', $graphScopeDefault);
+        $accessToken = $this->resolveOauthAccessToken($graphScope);
+        if ($accessToken === '') {
+            throw new \RuntimeException('Microsoft Graph token nebyl získán. Zkontroluj oauth scope a refresh token.');
+        }
+
+        $fromUser = trim((string) $this->config->get('smtp.user', ''));
+        $sendUrl = trim((string) $this->config->get('smtp.oauth.microsoft.graph_send_url', ''));
+        if ($sendUrl === '') {
+            if ($grantType === 'refresh_token') {
+                // Delegated token: prefer explicit mailbox when configured.
+                // This is important when OAuth consent was done by one account but
+                // sending should happen from another mailbox with SendAs/SendOnBehalf rights.
+                $sendUrl = $fromUser !== ''
+                    ? 'https://graph.microsoft.com/v1.0/users/' . rawurlencode($fromUser) . '/sendMail'
+                    : 'https://graph.microsoft.com/v1.0/me/sendMail';
+            } else {
+                // App-only token: requires explicit mailbox address + Mail.Send application permission.
+                if ($fromUser === '') {
+                    throw new \RuntimeException('Pro Graph app-only režim nastav smtp.user (mailbox adresa).');
+                }
+                $sendUrl = 'https://graph.microsoft.com/v1.0/users/' . rawurlencode($fromUser) . '/sendMail';
+            }
+        }
+
+        $message = [
+            'subject' => $subject,
+            'body' => [
+                'contentType' => $html !== '' ? 'HTML' : 'Text',
+                'content' => $html !== '' ? $html : $text,
+            ],
+            'toRecipients' => array_map(fn (string $addr) => [
+                'emailAddress' => ['address' => $addr],
+            ], $to),
+        ];
+        if (!empty($cc)) {
+            $message['ccRecipients'] = array_map(fn (string $addr) => [
+                'emailAddress' => ['address' => $addr],
+            ], $cc);
+        }
+        if (!empty($bcc)) {
+            $message['bccRecipients'] = array_map(fn (string $addr) => [
+                'emailAddress' => ['address' => $addr],
+            ], $bcc);
+        }
+        if ($replyEmail !== '') {
+            $message['replyTo'] = [[
+                'emailAddress' => ['address' => $replyEmail, 'name' => $replyName],
+            ]];
+        }
+
+        $graphAttachments = [];
+        foreach ($attachments as $att) {
+            if (!is_file($att['path'])) {
+                continue;
+            }
+            $bytes = file_get_contents($att['path']);
+            if ($bytes === false) {
+                continue;
+            }
+            $graphAttachments[] = [
+                '@odata.type' => '#microsoft.graph.fileAttachment',
+                'name' => $att['name'],
+                'contentType' => $att['contentType'],
+                'contentBytes' => base64_encode($bytes),
+            ];
+        }
+        foreach ($inlineAttachments as $att) {
+            if (!is_file($att['path'])) {
+                continue;
+            }
+            $bytes = file_get_contents($att['path']);
+            if ($bytes === false) {
+                continue;
+            }
+            $graphAttachments[] = [
+                '@odata.type' => '#microsoft.graph.fileAttachment',
+                'name' => $att['name'],
+                'contentType' => $att['contentType'],
+                'contentBytes' => base64_encode($bytes),
+                'isInline' => true,
+                'contentId' => $att['contentId'],
+            ];
+        }
+        if (!empty($graphAttachments)) {
+            $message['attachments'] = $graphAttachments;
+        }
+
+        $payload = json_encode([
+            'message' => $message,
+            'saveToSentItems' => true,
+        ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        if (!is_string($payload)) {
+            throw new \RuntimeException('Nepodařilo se serializovat payload pro Graph.');
+        }
+
+        $ch = curl_init($sendUrl);
+        curl_setopt_array($ch, [
+            CURLOPT_POST => true,
+            CURLOPT_POSTFIELDS => $payload,
+            CURLOPT_HTTPHEADER => [
+                'Content-Type: application/json',
+                'Authorization: Bearer ' . $accessToken,
+            ],
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_TIMEOUT => 20,
+        ]);
+        $raw = curl_exec($ch);
+        $httpCode = (int) curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+        $curlErr = curl_error($ch);
+        curl_close($ch);
+
+        if ($curlErr !== '') {
+            throw new \RuntimeException('Graph send selhal: ' . $curlErr);
+        }
+        if ($httpCode < 200 || $httpCode >= 300) {
+            $detail = 'HTTP ' . $httpCode;
+            $json = is_string($raw) ? json_decode($raw, true) : null;
+            if (is_array($json)) {
+                $errCode = (string) ($json['error']['code'] ?? '');
+                $msg = (string) (($json['error']['message'] ?? $json['message'] ?? ''));
+                if ($errCode !== '') {
+                    $detail .= ' [' . $errCode . ']';
+                }
+                if ($msg !== '') {
+                    $detail .= ' - ' . $msg;
+                }
+            }
+            throw new \RuntimeException('Graph send selhal (' . $grantType . '): ' . $detail);
+        }
+
+        return 'Graph send accepted (HTTP ' . $httpCode . ')';
+    }
+
+    private function readRefreshTokenFromLocalConfig(): string
+    {
+        $candidates = [
+            '/data/cfg.local.php',
+            dirname(__DIR__, 4) . '/cfg.local.php',
+        ];
+
+        foreach ($candidates as $path) {
+            if (!is_file($path)) {
+                continue;
+            }
+
+            $data = @include $path;
+            if (!is_array($data)) {
+                continue;
+            }
+
+            $token = trim((string) ($data['smtp']['oauth']['microsoft']['refresh_token'] ?? ''));
+            if ($token !== '') {
+                return $token;
+            }
+        }
+
+        return '';
     }
 
     private function twig(): Environment

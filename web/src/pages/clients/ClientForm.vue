@@ -188,20 +188,31 @@ async function submit() {
   submitting.value = true
   error.value = ''
   errors.value = {}
+  const payload: any = { ...form.value }
+  if (!payload.currency_default_id || Number(payload.currency_default_id) <= 0) {
+    delete payload.currency_default_id
+  }
   try {
     if (isEdit.value && clientId.value) {
-      const updated = await clientsApi.update(clientId.value, form.value)
+      const updated = await clientsApi.update(clientId.value, payload)
       if (props.embedded) { emit('created', updated); return }
       router.push(`/clients/${clientId.value}`)
     } else {
-      const created = await clientsApi.create(form.value)
+      const created = await clientsApi.create(payload)
       if (props.embedded) { emit('created', created); return }
       router.push(`/clients/${created.id}`)
     }
   } catch (e: any) {
     const data = e?.response?.data?.error
     error.value = data?.message || t('errors.generic')
-    if (data?.fields) errors.value = data.fields
+    if (data?.fields) {
+      errors.value = data.fields
+      const firstField = Object.keys(data.fields)[0]
+      const firstMsg = firstField ? data.fields[firstField]?.[0] : null
+      if (firstMsg && !String(error.value).includes(String(firstMsg))) {
+        error.value = `${error.value} (${firstField}: ${firstMsg})`
+      }
+    }
   } finally {
     submitting.value = false
   }
@@ -342,6 +353,7 @@ async function submit() {
               class="w-full h-10 px-3 border border-neutral-300 rounded-md bg-white focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 outline-none">
               <option v-for="c in currencies" :key="c.id" :value="c.id">{{ c.label }}</option>
             </select>
+            <p v-if="errors.currency_default_id" class="text-xs text-danger-500 mt-1">{{ errors.currency_default_id[0] }}</p>
           </div>
           <div>
             <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('client.hourly_rate') }}</label>
