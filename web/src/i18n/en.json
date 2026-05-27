@@ -1,7 +1,7 @@
 {
   "app": { "title": "MyInvoice.cz", "subtitle": "Invoicing system" },
   "nav": {
-    "dashboard": "Dashboard", "invoices": "Issued invoices", "clients": "Clients",
+    "dashboard": "Dashboard", "invoices": "Issued invoices", "price_quotes": "Price quotes", "clients": "Clients",
     "projects": "Projects", "stats": "Sales", "bank": "Bank", "system": "System", "section_taxes": "Taxes",
     "settings": "Settings", "supplier_current": "Supplier", "suppliers": "Suppliers", "codebooks": "Codebooks", "users": "Users",
     "log": "Activity log", "cron_jobs": "Scheduled jobs", "exports": "Issued exports", "imports": "Imports", "imports_issued": "Imports (issued)", "imports_purchase": "Imports (purchase)", "ai_import": "AI import", "integrations": "External integrations", "crm": "CRM", "reports_dph": "VAT return", "reports_kh": "Control statement", "reports_dph_book": "VAT ledger", "reports_shv": "Recapitulative statement", "reports_income_tax": "Income tax", "reports_submissions": "Submission archive", "email_templates": "Email templates", "approvals": "Approvals", "updates": "Updates", "api_tokens": "API tokens", "recurring": "Recurring invoices", "help": "Help", "logout": "Sign out",

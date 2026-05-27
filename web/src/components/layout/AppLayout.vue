@@ -95,6 +95,7 @@ const navSections = computed<NavSection[]>(() => {
       accent: 'primary',
       items: [
         { to: '/invoices',         label: t('nav.invoices'),   icon: ICONS.invoices },
+        { to: '/price-quotes',     label: t('nav.price_quotes'), icon: ICONS.invoices },
         { to: '/recurring',        label: t('nav.recurring'),  icon: ICONS.recurring },
         { to: '/clients',          label: t('nav.clients'),    icon: ICONS.clients },
         { to: '/projects',         label: t('nav.projects'),   icon: ICONS.projects },

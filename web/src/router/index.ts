@@ -20,6 +20,10 @@ const routes: RouteRecordRaw[] = [
       { path: 'invoices/new',           name: 'invoice-new',    component: () => import('@/pages/invoices/InvoiceEditor.vue'), meta: { requiresWrite: true } },
       { path: 'invoices/:id(\\d+)',     name: 'invoice-detail', component: () => import('@/pages/invoices/InvoiceDetail.vue') },
       { path: 'invoices/:id(\\d+)/edit', name: 'invoice-edit',  component: () => import('@/pages/invoices/InvoiceEditor.vue'), meta: { requiresWrite: true } },
+      { path: 'price-quotes',               name: 'price-quotes',       component: () => import('@/pages/price-quotes/PriceQuoteList.vue') },
+      { path: 'price-quotes/new',           name: 'price-quote-new',    component: () => import('@/pages/price-quotes/PriceQuoteEditor.vue'), meta: { requiresWrite: true } },
+      { path: 'price-quotes/:id(\\d+)',     name: 'price-quote-detail', component: () => import('@/pages/price-quotes/PriceQuoteDetail.vue') },
+      { path: 'price-quotes/:id(\\d+)/edit', name: 'price-quote-edit',  component: () => import('@/pages/price-quotes/PriceQuoteEditor.vue'), meta: { requiresWrite: true } },
       // Přijaté faktury (fáze 1 integrace forku)
       { path: 'purchase-invoices',                 name: 'purchase-invoices',        component: () => import('@/pages/purchase-invoices/InvoiceList.vue') },
       { path: 'purchase-invoices/export',          name: 'purchase-invoices-export', component: () => import('@/pages/purchase-invoices/Export.vue') },
