@@ -12,6 +12,7 @@ use MyInvoice\Middleware\AuthMiddleware;
 use MyInvoice\Service\ActivityLogger;
 use MyInvoice\Service\Export\PurchaseInvoiceExportService;
 use MyInvoice\Service\IpMatcher;
+use MyInvoice\Service\Pdf\PurchaseInvoicePdfRenderer;
 use Psr\Http\Message\ResponseInterface as Response;
 use Psr\Http\Message\ServerRequestInterface as Request;
 use Slim\Psr7\Stream;
@@ -23,12 +24,14 @@ use ZipArchive;
  * Export přijatých faktur za měsíc jako ZIP s **vendor original PDF**.
  *
  * Priorita per faktura:
- *   1) Pokud pdf_path není NULL → použij archivovaný originál od dodavatele
- *   2) Jinak (v fázi 1 NEDOPLŇUJEME naše generované PDF) → faktura se SKIPNE
- *      s warningem v response headeru X-Export-Warnings.
+ *   1) Archivovaný originál od dodavatele (pdf_path) → použij ten
+ *      (`Prijata-{vs}-{vendor}.pdf`).
+ *   2) Jinak → doplň NAŠI rekonstrukci z dat faktury (PurchaseInvoicePdfRenderer),
+ *      pojmenovanou `Prijata-{vs}-{vendor}-rekonstrukce.pdf`, ať účetní pozná, že
+ *      nejde o originál. Faktura se přeskočí jen pokud selže i rekonstrukce.
  *
- * Pozn.: v fázi 6+ (po VAT klasifikaci) může backend dodat fallback PDF s
- * interním rozpisem (pro účetní), aby uživatel neměl gap v archivu.
+ * Počet doplněných rekonstrukcí vrací header `X-Export-Reconstructed`; reálné
+ * chyby (poškozený originál i selhání rekonstrukce) jdou do `X-Export-Warnings`.
  *
  * Přístup: admin nebo accountant.
  */
@@ -40,6 +43,7 @@ final class ExportPurchaseInvoicesAction
         private readonly ActivityLogger $logger,
         private readonly IpMatcher $ipMatcher,
         private readonly PurchaseInvoiceExportService $exporter,
+        private readonly PurchaseInvoicePdfRenderer $renderer,
     ) {}
 
     public function __invoke(Request $request, Response $response): Response
@@ -89,39 +93,53 @@ final class ExportPurchaseInvoicesAction
         }
 
         $included = 0;
+        $reconstructed = 0;
         $skipped = [];
         $isWindows = DIRECTORY_SEPARATOR === '\\';
 
         foreach ($rows as $r) {
-            $vs = (string) ($r['varsymbol'] ?? $r['vendor_invoice_number'] ?? ('id-' . $r['id']));
+            $id = (int) $r['id'];
+            $vs = (string) ($r['varsymbol'] ?? $r['vendor_invoice_number'] ?? ('id-' . $id));
             $vendor = (string) ($r['vendor_company_name'] ?? 'vendor');
+            // Sanitize filename pro ZIP entry (zip-slip via varsymbol/vendor name)
+            $entryBase = substr(preg_replace('/[^A-Za-z0-9._\\-]/u', '_', $vs . '-' . $vendor) ?: 'invoice', 0, 100);
 
-            if (empty($r['pdf_path'])) {
-                $skipped[] = "{$vs} ({$vendor}) — žádný archivovaný PDF";
-                continue;
-            }
-
-            // Resolve relativni path + path-traversal guard (zip-slip protection).
-            $abs = $archiveRoot . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, (string) $r['pdf_path']);
-            $absReal = realpath($abs);
-            if ($absReal === false || !is_file($absReal)) {
-                $skipped[] = "{$vs} ({$vendor}) — soubor nenalezen na disku";
-                continue;
-            }
-            if ($archiveRootReal !== false) {
-                $needle = ($isWindows ? strtolower($archiveRootReal) : $archiveRootReal) . DIRECTORY_SEPARATOR;
-                $haystack = $isWindows ? strtolower($absReal) : $absReal;
-                if (!str_starts_with($haystack, $needle)) {
-                    $skipped[] = "{$vs} ({$vendor}) — path mimo archive root";
-                    continue;
+            // 1) Archivovaný originál od dodavatele má přednost. Resolve relativní path
+            //    + path-traversal guard (zip-slip). Pokud byl originál očekáván
+            //    (pdf_path) ale je nedostupný, zalogujeme warning a spadneme na rekonstrukci.
+            $originalAbs = null;
+            if (!empty($r['pdf_path'])) {
+                $abs = $archiveRoot . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, (string) $r['pdf_path']);
+                $absReal = realpath($abs);
+                if ($absReal === false || !is_file($absReal)) {
+                    $skipped[] = "{$vs} ({$vendor}) — originál nenalezen na disku, doplněna rekonstrukce";
+                } elseif ($archiveRootReal !== false
+                    && !str_starts_with(
+                        $isWindows ? strtolower($absReal) : $absReal,
+                        ($isWindows ? strtolower($archiveRootReal) : $archiveRootReal) . DIRECTORY_SEPARATOR
+                    )) {
+                    $skipped[] = "{$vs} ({$vendor}) — originál mimo archive root, doplněna rekonstrukce";
+                } else {
+                    $originalAbs = $absReal;
                 }
             }
 
-            // Sanitize filename pro ZIP entry (zip-slip via varsymbol/vendor name)
-            $entryBase = $vs . '-' . $vendor;
-            $entryBase = preg_replace('/[^A-Za-z0-9._\\-]/u', '_', $entryBase) ?: 'invoice';
-            $entryName = 'Prijata-' . substr($entryBase, 0, 100) . '.pdf';
-            $zip->addFile($absReal, $entryName);
+            if ($originalAbs !== null) {
+                $zip->addFile($originalAbs, 'Prijata-' . $entryBase . '.pdf');
+                $included++;
+                continue;
+            }
+
+            // 2) Fallback: naše rekonstrukce z dat faktury (mimic dodavatelského PDF).
+            //    Odlišený název, ať účetní pozná, že nejde o originál.
+            try {
+                $pdfBytes = $this->renderer->render($id, $sid);
+            } catch (\Throwable $e) {
+                $skipped[] = "{$vs} ({$vendor}) — bez originálu a rekonstrukce selhala: " . $e->getMessage();
+                continue;
+            }
+            $zip->addFromString('Prijata-' . $entryBase . '-rekonstrukce.pdf', $pdfBytes);
+            $reconstructed++;
             $included++;
         }
 
@@ -129,17 +147,16 @@ final class ExportPurchaseInvoicesAction
 
         if ($included === 0) {
             @unlink($tmpZip);
-            return Json::error($response, 'no_archived_pdfs',
-                "Žádná z {$month} přijatých faktur nemá archivovaný PDF. " .
-                'Pro archivaci nahrávej originál PDF v editoru přijaté faktury (drag & drop).',
-                404,
+            return Json::error($response, 'no_invoices_processed',
+                "Za měsíc {$month} se nepodařilo vyexportovat žádnou přijatou fakturu.",
+                500,
                 ['skipped' => $skipped],
             );
         }
 
         $this->logger->log('purchase_invoices.exported', $user['id'] ?? null, null, null, [
             'format' => 'pdf-zip', 'month' => $month, 'date_by' => $dateBy,
-            'included' => $included, 'skipped_count' => count($skipped),
+            'included' => $included, 'reconstructed' => $reconstructed, 'skipped_count' => count($skipped),
         ], $this->ipMatcher->clientIpFromRequest($request->getServerParams()), $request->getHeaderLine('User-Agent'));
 
         // Stream ZIP přímo z disku (PSR-7 withBody) — neslurpovat celý soubor do paměti
@@ -160,7 +177,8 @@ final class ExportPurchaseInvoicesAction
             ->withBody($stream)
             ->withHeader('Content-Type', 'application/zip')
             ->withHeader('Content-Disposition', 'attachment; filename="purchase-invoices-' . $month . '.zip"')
-            ->withHeader('Content-Length', (string) $size);
+            ->withHeader('Content-Length', (string) $size)
+            ->withHeader('X-Export-Reconstructed', (string) $reconstructed);
         if (!empty($skipped)) {
             // Truncate hlavičky aby nebyla too long pro proxy
             $warnings = array_slice($skipped, 0, 10);
