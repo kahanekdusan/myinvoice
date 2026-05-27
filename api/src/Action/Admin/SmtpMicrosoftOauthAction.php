@@ -287,7 +287,11 @@ final class SmtpMicrosoftOauthAction
 
     private function cfg(string $path, string $default): string
     {
-        $value = (string) $this->config->get($path, $default);
+        try {
+            $value = (string) Config::load(Bootstrap::rootDir())->get($path, $default);
+        } catch (\Throwable) {
+            $value = (string) $this->config->get($path, $default);
+        }
         return trim($value);
     }
 
