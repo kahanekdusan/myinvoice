@@ -13,7 +13,6 @@ import { useYearOptions } from '@/composables/useYearOptions'
 import TableSkeleton from '@/components/ui/TableSkeleton.vue'
 import EmptyState from '@/components/ui/EmptyState.vue'
 import SearchableSelect from '@/components/ui/SearchableSelect.vue'
-import WorkReportModal from '@/components/modals/WorkReportModal.vue'
 
 const { t, tm, rt } = useI18n()
 const toast = useToast()
@@ -203,14 +202,14 @@ async function bulkIssue() {
     toast.warning(t('invoice.bulk_issue_no_eligible'))
     return
   }
-  if (!confirm(t('invoice.bulk_issue_confirm', { n: list.length }))) return
+  if (!confirm(t('invoice.bulk_issue_confirm_quote', { n: list.length }))) return
   bulkBusy.value = true
   let okCount = 0
   const errors: string[] = []
   try {
     for (const inv of list) {
       try {
-        await invoicesApi.issue(inv.id)
+        await invoicesApi.issue(inv.id, { numbering_type: 'quote' })
         okCount++
       } catch (e: any) {
         errors.push(`#${inv.id}: ${e?.response?.data?.error?.message || 'chyba'}`)
@@ -439,14 +438,6 @@ function openInvoice(inv: InvoiceListItem) {
   router.push(`${listBasePath.value}/${inv.id}`)
 }
 
-// Work Report modal: otevíráno z buttonu "Výkaz" v sloupci Stav.
-const wrModalOpen = ref(false)
-const wrModalInvoiceId = ref(0)
-function openWorkReport(id: number) {
-  wrModalInvoiceId.value = id
-  wrModalOpen.value = true
-}
-
 // Year dropdown — distinct roky z `invoices` aktuálního supplier (issue #33).
 // Composable doplňuje aktuální + minulý rok + aktuálně zvolený rok z URL.
 const yearOptions = useYearOptions('invoices', yearFilter)
@@ -618,7 +609,7 @@ const monthOptions = computed(() => (tm('common.months_short') as unknown as str
                 <th class="text-left px-4 py-2 font-medium">{{ t('invoice.client_project') }}</th>
                 <th class="text-center px-4 py-2 font-medium">Typ</th>
                 <th class="text-center px-4 py-2 font-medium">DUZP / Vystaveno</th>
-                <th class="text-center px-4 py-2 font-medium">Splatnost</th>
+                <th class="text-center px-4 py-2 font-medium">Platnost do</th>
                 <th class="text-right px-4 py-2 font-medium">{{ t('invoice.amount_to_pay') }}</th>
                 <th class="text-center px-4 py-2 font-medium">Stav</th>
               </tr>
@@ -660,16 +651,7 @@ const monthOptions = computed(() => (tm('common.months_short') as unknown as str
                   {{ formatMoney(inv.amount_to_pay ?? inv.total_with_vat, inv.currency) }}
                 </td>
                 <td class="px-4 py-2.5 text-center" @click.stop>
-                  <!-- Pro koncepty s workflow projektem (nebo s již vytvořeným výkazem)
-                       zobraz tlačítko "Výkaz" místo "KONCEPT" badge — rychlý přístup k modalu. -->
-                  <button v-if="inv.status === 'draft' && (inv.project_requires_approval || inv.has_work_report || inv.recurring_template_id)"
-                    @click="openWorkReport(inv.id)"
-                    class="cursor-pointer text-xs px-2 py-0.5 rounded border border-primary-500/40 text-primary-700 hover:bg-primary-50 inline-flex items-center gap-1"
-                    :title="t('invoice.wr_btn')">
-                    <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 17v-6m3 6v-4m3 4v-2"/></svg>
-                    {{ t('invoice.wr_btn') }}
-                  </button>
-                  <span v-else class="text-xs px-2 py-0.5 rounded" :class="statusBadgeClass(inv.status)">
+                  <span class="text-xs px-2 py-0.5 rounded" :class="statusBadgeClass(inv.status)">
                     {{ statusLabel(inv.status) }}
                   </span>
                   <span v-if="inv.sent_at" class="ml-1 text-xs px-1 py-0.5 rounded bg-success-50 text-success-600"
@@ -736,16 +718,7 @@ const monthOptions = computed(() => (tm('common.months_short') as unknown as str
                       :title="t('invoice.viewed_at', { date: formatDate(inv.public_first_viewed_at) })">👁</span>
                     <span v-if="inv.reminder_count > 0" class="text-xs px-1 py-0.5 rounded bg-warning-50 text-warning-600 font-semibold"
                       :title="t('invoice.reminder_at', { count: inv.reminder_count, date: formatDate(inv.last_reminder_at) })">⚠ {{ inv.reminder_count }}</span>
-                    <!-- Pro koncepty s workflow projektem (nebo s již vytvořeným výkazem)
-                         zobraz tlačítko "Výkaz" místo "KONCEPT" badge — stejně jako v desktop tabulce. -->
-                    <button v-if="inv.status === 'draft' && (inv.project_requires_approval || inv.has_work_report || inv.recurring_template_id)"
-                      @click="openWorkReport(inv.id)"
-                      class="cursor-pointer text-xs px-2 py-0.5 rounded border border-primary-500/40 text-primary-700 hover:bg-primary-50 inline-flex items-center gap-1"
-                      :title="t('invoice.wr_btn')">
-                      <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 17v-6m3 6v-4m3 4v-2"/></svg>
-                      {{ t('invoice.wr_btn') }}
-                    </button>
-                    <span v-else class="text-xs px-2 py-0.5 rounded" :class="statusBadgeClass(inv.status)">
+                    <span class="text-xs px-2 py-0.5 rounded" :class="statusBadgeClass(inv.status)">
                       {{ statusLabel(inv.status) }}
                     </span>
                   </div>
@@ -764,11 +737,5 @@ const monthOptions = computed(() => (tm('common.months_short') as unknown as str
         </button>
       </div>
     </div>
-
-    <!-- Work report modal — otevřený z buttonu "Výkaz" v sloupci Stav. -->
-    <WorkReportModal v-if="wrModalInvoiceId > 0"
-      v-model="wrModalOpen"
-      :invoice-id="wrModalInvoiceId"
-      @saved="load(true)" />
   </div>
 </template>

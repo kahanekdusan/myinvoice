@@ -355,8 +355,8 @@ final class InvoiceRepository
             (invoice_type, parent_invoice_id, client_id, project_id, supplier_id,
              issue_date, tax_date, due_date, currency_id, reverse_charge, language,
              note_above_items, note_below_items, advance_paid_amount, discount_percent, varsymbol,
-             payment_method, status, vat_classification_code, revenue_category, created_by)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "draft", ?, ?, ?)';
+             payment_method, numbering_type, status, vat_classification_code, revenue_category, created_by)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "draft", ?, ?, ?)';
 
         $stmt = $pdo->prepare($sql);
         $stmt->execute([
@@ -377,6 +377,7 @@ final class InvoiceRepository
             self::clampDiscountPercent($data['discount_percent'] ?? 0),
             $manualVarsymbol,
             $paymentMethod,
+            (($data['numbering_type'] ?? 'default') === 'quote') ? 'quote' : 'default',
             !empty($data['vat_classification_code']) ? (string) $data['vat_classification_code'] : null,
             !empty($data['revenue_category']) ? (string) $data['revenue_category'] : null,
             $userId,
@@ -415,7 +416,8 @@ final class InvoiceRepository
                 currency_id = ?, reverse_charge = ?, language = ?,
                 note_above_items = ?, note_below_items = ?,
                 advance_paid_amount = ?, discount_percent = ?,
-                vat_classification_code = ?, revenue_category = ?'
+            vat_classification_code = ?, revenue_category = ?,
+            numbering_type = ?'
               . ($hasVarsymbol ? ', varsymbol = ?' : '')
               . ($hasPaymentMethod ? ', payment_method = ?' : '')
               . ' WHERE id = ?';
@@ -435,6 +437,7 @@ final class InvoiceRepository
             self::clampDiscountPercent($data['discount_percent'] ?? 0),
             !empty($data['vat_classification_code']) ? (string) $data['vat_classification_code'] : null,
             !empty($data['revenue_category']) ? (string) $data['revenue_category'] : null,
+            (($data['numbering_type'] ?? 'default') === 'quote') ? 'quote' : 'default',
         ];
         if ($hasVarsymbol) $params[] = $manualVarsymbol;
         if ($hasPaymentMethod) $params[] = $paymentMethod;
@@ -756,6 +759,17 @@ final class InvoiceRepository
                     public_open_count = public_open_count + 1
               WHERE id = ?'
         )->execute([$invoiceId]);
+    }
+
+    /**
+     * Přepne variantu proforma dokladu (default/quote) bez zásahu do ostatních polí.
+     */
+    public function setNumberingType(int $invoiceId, string $numberingType): void
+    {
+        $normalized = $numberingType === 'quote' ? 'quote' : 'default';
+        $this->db->pdo()->prepare(
+            'UPDATE invoices SET numbering_type = ? WHERE id = ?'
+        )->execute([$normalized, $invoiceId]);
     }
 
     /**

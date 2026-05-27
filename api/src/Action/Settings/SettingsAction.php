@@ -196,7 +196,7 @@ final class SettingsAction
             'default_hourly_rate', 'auto_send_reminders', 'auto_generate_recurring', 'embed_isdoc',
             'pohoda_account_code', 'pohoda_centre_code', 'pohoda_activity_code', 'pohoda_contract_code',
             // Per-supplier konfigurace číslování faktur (migrace 0014)
-            'invoice_number_format', 'proforma_number_format', 'credit_note_number_format',
+                'invoice_number_format', 'quote_number_format', 'proforma_number_format', 'credit_note_number_format',
             'invoice_number_period',
             // Per-supplier branding emailů (migrace 0016)
             'email_branding_enabled', 'email_accent_color',
@@ -239,7 +239,7 @@ final class SettingsAction
         }
         // Validace per-supplier varsymbol templatů: prázdný string → NULL (= fallback na cfg);
         // jinak max 60 znaků a musí obsahovat alespoň jeden counter placeholder {C+}.
-        foreach (['invoice_number_format', 'proforma_number_format', 'credit_note_number_format'] as $f) {
+        foreach (['invoice_number_format', 'quote_number_format', 'proforma_number_format', 'credit_note_number_format'] as $f) {
             if (array_key_exists($f, $body)) {
                 $v = trim((string) ($body[$f] ?? ''));
                 if ($v === '') {
@@ -387,6 +387,7 @@ final class SettingsAction
         // použila kdyby ponechal pole prázdné).
         $row['cfg_varsymbol_fallback'] = [
             'invoice'     => (string) $this->config->get('varsymbol.templates.invoice', ''),
+            'quote'       => (string) $this->config->get('varsymbol.templates.quote', '2{YY}{MM}{CCC}'),
             'proforma'    => (string) $this->config->get('varsymbol.templates.proforma', ''),
             'credit_note' => (string) $this->config->get('varsymbol.templates.credit_note', ''),
         ];

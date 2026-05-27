@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, watch } from 'vue'
 import { useRoute, useRouter, RouterLink } from 'vue-router'
-import { invoicesApi, type Invoice, type InvoicePayload, type InvoiceItem, type WorkReportItem } from '@/api/invoices'
+import { invoicesApi, type Invoice, type InvoicePayload, type InvoiceItem } from '@/api/invoices'
 import { useHotkey } from '@/composables/useHotkey'
 import { useToast } from '@/composables/useToast'
 import { useI18n } from 'vue-i18n'
@@ -26,9 +26,8 @@ const supplierStore = useSupplierStore()
 const route = useRoute()
 const router = useRouter()
 
-const quoteMode = computed(() => route.path.startsWith('/price-quotes'))
-const listBasePath = computed(() => (quoteMode.value ? '/price-quotes' : '/invoices'))
-const detailPath = (id: number) => `${listBasePath.value}/${id}`
+const listBasePath = '/price-quotes'
+const detailPath = (id: number) => `${listBasePath}/${id}`
 
 const isEdit = computed(() => route.params.id !== undefined && route.params.id !== 'new')
 const invoiceId = computed(() => (isEdit.value ? Number(route.params.id) : null))
@@ -45,21 +44,9 @@ const editedVarsymbol = ref<string | null>(null)
 const varsymbolAutoPreview = ref<string>('')
 const varsymbolAutoHasTemplate = ref<boolean>(true)
 
-// Type-aware texty: titulek stránky + popisek pole čísla (proforma / dobropis / faktura).
-const editorTitle = computed(() => {
-  if (quoteMode.value) return isEdit.value ? 'Úprava cenové nabídky' : 'Nová cenová nabídka'
-  const suffix = form.value.invoice_type === 'proforma' ? '_proforma'
-               : form.value.invoice_type === 'credit_note' ? '_credit_note'
-               : ''
-  const key = (isEdit.value ? 'invoice.edit_title' : 'invoice.new_title') + suffix
-  return t(key)
-})
-const varsymbolLabelKey = computed(() => {
-  if (quoteMode.value) return 'invoice.varsymbol_label_proforma'
-  if (form.value.invoice_type === 'proforma') return 'invoice.varsymbol_label_proforma'
-  if (form.value.invoice_type === 'credit_note') return 'invoice.varsymbol_label_credit_note'
-  return 'invoice.varsymbol_label'
-})
+const editorTitle = computed(() => (isEdit.value ? 'Úprava cenové nabídky' : 'Nová cenová nabídka'))
+const quoteNumberLabel = 'Číslo cenové nabídky'
+const QUOTE_DEFAULT_VALIDITY_DAYS = 30
 
 const clients = ref<Client[]>([])
 const projects = ref<Project[]>([])
@@ -87,7 +74,7 @@ const showReverseChargeUI = computed(() => {
 })
 
 const form = ref<{
-  invoice_type: 'invoice' | 'proforma' | 'credit_note'
+  invoice_type: 'proforma'
   parent_invoice_id: number | null
   client_id: number | null
   project_id: number | null
@@ -102,20 +89,19 @@ const form = ref<{
   note_below_items: string
   advance_paid_amount: number
   discount_percent: number
-  payment_method: 'bank_transfer' | 'card' | 'cash' | 'other'
   exchange_rate: number | null
   varsymbol: string  // Ruční override čísla faktury (prázdný = generuje se při issue)
   vat_classification_code: string | null
   revenue_category: string | null
   items: InvoiceItem[]
 }>({
-  invoice_type: 'invoice',
+  invoice_type: 'proforma',
   parent_invoice_id: null,
   client_id: null,
   project_id: null,
   issue_date: today(),
   tax_date: today(),
-  due_date: addDays(today(), 7),
+  due_date: addDays(today(), QUOTE_DEFAULT_VALIDITY_DAYS),
   currency_id: 0,
   currency: 'CZK',
   reverse_charge: false,
@@ -124,7 +110,6 @@ const form = ref<{
   note_below_items: '',
   advance_paid_amount: 0,
   discount_percent: 0,
-  payment_method: 'bank_transfer',
   exchange_rate: null,
   varsymbol: '',
   vat_classification_code: null,
@@ -172,8 +157,6 @@ function vatRateLabel(r: VatRate): string {
 }
 
 function blankItem(): InvoiceItem {
-  // Dobropis = záporné množství (sleva/refundace), default -1
-  const qty = form.value.invoice_type === 'credit_note' ? -1 : 1
   const projectRate = projects.value.find(p => p.id === form.value.project_id)?.hourly_rate
   const clientRate = clients.value.find(c => c.id === form.value.client_id)?.hourly_rate
   // Project sazba má přednost; client.hourly_rate je fallback pro faktury bez zakázky.
@@ -182,7 +165,7 @@ function blankItem(): InvoiceItem {
     : 0
   return {
     description: '',
-    quantity: qty,
+    quantity: 1,
     unit: defaultItemUnit(),
     unit_price_without_vat: rate,
     vat_rate_id: defaultVatRateId(form.value.reverse_charge),
@@ -199,13 +182,8 @@ watch(() => form.value.reverse_charge, (newVal, oldVal) => {
 // Náhled čísla faktury — backend zná aktuální counter pro per-supplier templ.
 // Volá se při mount + při změně typu / data; cancellation nemá číslo.
 async function loadVarsymbolPreview() {
-  if (form.value.invoice_type === ('cancellation' as never)) {
-    varsymbolAutoPreview.value = ''
-    varsymbolAutoHasTemplate.value = true
-    return
-  }
   try {
-    const r = await invoicesApi.previewVarsymbol(form.value.invoice_type, form.value.issue_date)
+    const r = await invoicesApi.previewVarsymbol('quote', form.value.issue_date)
     varsymbolAutoPreview.value = r.varsymbol
     varsymbolAutoHasTemplate.value = r.has_template
   } catch {
@@ -217,34 +195,11 @@ watch(() => [form.value.invoice_type, form.value.issue_date], () => {
   if (loaded.value && editedStatus.value === 'draft') loadVarsymbolPreview()
 })
 
-// Při změně Vystaveno přepočti Splatnost — projekt přebíjí klienta. Jen pro draft / nový
-// (po `loaded`), abys nepřepsal uloženou hodnotu při hydrataci nebo u vystavených dokladů.
+// Při změně Vystaveno přepočti Platnost do na výchozích 30 dní.
+// Jen pro draft / nový (po `loaded`), aby se nepřepsala uložená hodnota při hydrataci.
 watch(() => form.value.issue_date, (newIssue) => {
   if (!loaded.value || editedStatus.value !== 'draft' || !newIssue) return
-  let days: number | null = null
-  if (form.value.project_id) {
-    const p = projects.value.find(x => x.id === form.value.project_id)
-    if (p && typeof p.payment_due_days === 'number') days = p.payment_due_days
-  }
-  if (days === null && form.value.client_id) {
-    const c = clients.value.find(x => x.id === form.value.client_id)
-    if (c && typeof c.payment_due_default === 'number') days = c.payment_due_default
-  }
-  if (days !== null) form.value.due_date = addDays(newIssue, days)
-})
-
-// Při přepnutí typu na credit_note převrať množství všech existujících položek na záporná.
-watch(() => form.value.invoice_type, (newType, oldType) => {
-  if (newType === 'credit_note' && oldType !== 'credit_note') {
-    for (const it of form.value.items) {
-      if (it.quantity > 0) it.quantity = -it.quantity
-    }
-  }
-  if (oldType === 'credit_note' && newType !== 'credit_note') {
-    for (const it of form.value.items) {
-      if (it.quantity < 0) it.quantity = -it.quantity
-    }
-  }
+  form.value.due_date = addDays(newIssue, QUOTE_DEFAULT_VALIDITY_DAYS)
 })
 
 onMounted(async () => {
@@ -275,11 +230,7 @@ onMounted(async () => {
     editedStatus.value = inv.status
     editedVarsymbol.value = inv.varsymbol
     Object.assign(form.value, {
-      invoice_type: quoteMode.value
-        ? 'proforma'
-        : (inv.invoice_type === 'proforma' || inv.invoice_type === 'credit_note')
-        ? inv.invoice_type
-        : 'invoice',
+      invoice_type: 'proforma',
       parent_invoice_id: inv.parent_invoice_id,
       client_id: inv.client_id,
       project_id: inv.project_id,
@@ -294,7 +245,6 @@ onMounted(async () => {
       note_below_items: inv.note_below_items ?? '',
       advance_paid_amount: inv.advance_paid_amount,
       discount_percent: inv.discount_percent ?? 0,
-      payment_method: inv.payment_method ?? 'bank_transfer',
       // Slevové položky (item_kind='discount') jsou generované z discount_percent —
       // do editovatelného seznamu nepatří (jinak by se editovaly / zdvojily při uložení).
       items: inv.items.filter(i => i.item_kind !== 'discount').map(i => ({ ...i })),
@@ -306,34 +256,32 @@ onMounted(async () => {
     loadedRate.value = (inv.exchange_rate && inv.currency !== 'CZK')
       ? { rate: inv.exchange_rate, date: (inv.exchange_rate_date ?? inv.issue_date).slice(0, 10), currency: inv.currency }
       : null
+
     if (inv.client_id) {
       await loadProjects(inv.client_id)
       await verifyClientVies(inv.client_id)
     }
-    // Načti existující work_report (pokud existuje)
-    await loadWorkReport()
+
     if (editedStatus.value === 'draft') await loadVarsymbolPreview()
   } else {
-    if (quoteMode.value) {
-      form.value.invoice_type = 'proforma'
-    }
-    // New invoice — pre-select from query
+    // New quote — pre-select from query
     if (route.query.client_id) {
       form.value.client_id = Number(route.query.client_id)
-      await loadProjects(form.value.client_id!)
-      await applyClientDefaults(form.value.client_id!)
+      await loadProjects(form.value.client_id)
+      await applyClientDefaults(form.value.client_id)
     }
     if (route.query.project_id) {
       form.value.project_id = Number(route.query.project_id)
-      await applyProjectDefaults(form.value.project_id!)
+      await applyProjectDefaults(form.value.project_id)
     } else if (projects.value.length === 1) {
-      // Pokud klient má jen jeden projekt, předvyplň ho.
       form.value.project_id = projects.value[0].id
       await applyProjectDefaults(form.value.project_id)
     }
+
     if (form.value.items.length === 0) {
       form.value.items = [blankItem()]
     }
+
     await loadVarsymbolPreview()
   }
 
@@ -390,18 +338,12 @@ async function applyClientDefaults(clientId: number) {
   const rcChanged = form.value.reverse_charge !== newRc
   form.value.reverse_charge = newRc
   if (rcChanged) syncItemsVatRateToReverseCharge()
-  if (c.payment_due_default) {
-    form.value.due_date = addDays(form.value.issue_date, c.payment_due_default)
-  }
   // Klientská sazba — fallback pro faktury bez zakázky (project rate přepíše později).
   // „Prázdná položka" = prázdný popis; rate mohl naplnit předchozí klient/projekt, přesto chceme refresh.
   if (!form.value.project_id && c.hourly_rate && c.hourly_rate > 0) {
     if (form.value.items.length === 1 && (form.value.items[0].description || '').trim() === '') {
       form.value.items[0].unit_price_without_vat = c.hourly_rate
       form.value.items[0].unit = defaultItemUnit()
-    }
-    if (wrItems.value.length === 1 && (wrItems.value[0].description || '').trim() === '') {
-      wrItems.value[0].rate = c.hourly_rate
     }
   }
 }
@@ -441,14 +383,10 @@ async function applyProjectDefaults(projectId: number) {
   if (!p) return
   form.value.currency_id = p.currency_id
   form.value.currency = p.currency
-  form.value.due_date = addDays(form.value.issue_date, p.payment_due_days)
   // Pokud má jen jednu prázdnou položku (bez popisu), refresh sazby z projektu.
   if (form.value.items.length === 1 && (form.value.items[0].description || '').trim() === '') {
     form.value.items[0].unit_price_without_vat = p.hourly_rate
     form.value.items[0].unit = defaultItemUnit()
-  }
-  if (wrItems.value.length === 1 && (wrItems.value[0].description || '').trim() === '') {
-    wrItems.value[0].rate = p.hourly_rate
   }
 }
 
@@ -531,11 +469,7 @@ const computed_totals = computed(() => {
   }
 })
 
-const requiresPositiveAmountToPay = computed(() => {
-  if (form.value.invoice_type === 'proforma') return true
-  if (form.value.invoice_type !== 'invoice') return false
-  return !form.value.parent_invoice_id
-})
+const requiresPositiveAmountToPay = computed(() => true)
 
 const hasNonPositiveAmountToPay = computed(() =>
   requiresPositiveAmountToPay.value && computed_totals.value.amount_to_pay <= 0
@@ -555,170 +489,12 @@ function itemTotal(item: InvoiceItem): number {
   return round2(item.quantity * item.unit_price_without_vat)
 }
 
-// ─── WORK REPORT ────────────────────────────────────────────────
-const wrOpen = ref(false)
-const wrTitle = ref('')
-const wrItems = ref<WorkReportItem[]>([])
-
-async function loadWorkReport() {
-  if (!invoiceId.value) return
-  const wr = await invoicesApi.getWorkReport(invoiceId.value)
-  if (wr) {
-    wrTitle.value = wr.title
-    wrItems.value = wr.items.map(i => ({ ...i }))
-    wrOpen.value = true
-  }
-}
-
-// Pro výpočty + uložení: jen řádky s vyplněným popisem. Prázdné řádky uživatel
-// typicky nevyplní (přidal Přidat řádek a zapomněl), automaticky je ignorujeme,
-// aby totals v položce faktury seděly s tím, co se opravdu uloží.
-const wrItemsValid = computed(() => wrItems.value.filter(i => (i.description || '').trim() !== ''))
-const wrTotalHours = computed(() => wrItemsValid.value.reduce((s, i) => s + (Number(i.hours) || 0), 0))
-const wrTotalAmount = computed(() => wrItemsValid.value.reduce((s, i) => s + (Number(i.hours) || 0) * (Number(i.rate) || 0), 0))
-
-function addWrItem() {
-  // 1. project hourly rate, 2. client hourly rate, 3. existing WR row rate, 4. default 1500
-  const projectRate = projects.value.find(p => p.id === form.value.project_id)?.hourly_rate
-  const clientRate = clients.value.find(c => c.id === form.value.client_id)?.hourly_rate
-  const previousRate = wrItems.value[wrItems.value.length - 1]?.rate
-  const defaultRate = (projectRate && projectRate > 0) ? projectRate
-    : (clientRate && clientRate > 0) ? clientRate
-    : (previousRate && previousRate > 0) ? previousRate
-    : 1500
-  wrItems.value.push({ description: '', hours: 1, rate: defaultRate, order_index: wrItems.value.length })
-}
-function removeWrItem(idx: number) {
-  wrItems.value.splice(idx, 1)
-}
-
-function moveWrItem(idx: number, dir: -1 | 1) {
-  const newIdx = idx + dir
-  if (newIdx < 0 || newIdx >= wrItems.value.length) return
-  const [item] = wrItems.value.splice(idx, 1)
-  wrItems.value.splice(newIdx, 0, item)
-}
-function openWorkReport() {
-  if (wrItems.value.length === 0) {
-    const date = (form.value.tax_date || form.value.issue_date || '').slice(0, 7) // YYYY-MM
-    wrTitle.value = date ? t('invoice.wr_title_with_date', { date }) : t('invoice.work_report')
-    addWrItem()
-  }
-  wrOpen.value = true
-}
-
-// Přenese sumu výkazu jako jednu položku faktury (popis = title výkazu, qty = 1, cena = celková suma výkazu).
-// Pokud už existuje položka se stejným popisem (= title výkazu), AKTUALIZUJE ji
-// (množství / cena / DPH zůstává); jinak přidá novou. Tím se opětovné kliknutí
-// "Přenést jako položku faktury" po editaci výkazu chová jako sync, ne jako duplicate.
-function pushWrToInvoiceItem() {
-  if (wrItemsValid.value.length === 0) return
-  const totalAmount = wrTotalAmount.value
-  const defaultVatId = defaultVatRateId(form.value.reverse_charge)
-  const description = wrTitle.value || t('invoice.work_report')
-  // Cíleně "ks" (kus) — výkaz se přenáší jako 1 × celková suma.
-  // Když uživatel "ks" v číselníku nemá, fallback na literál (přidá free-text).
-  const unit = units.value.find(u => u.code === 'ks')?.code || 'ks'
-
-  // 1. Položka se shodným popisem → sync (aktualizace ceny).
-  // 2. Jinak prázdná položka (z blankItem na nové faktuře) → naplň ji, ne push.
-  //    Cena se ignoruje — blankItem default cenu předvyplňuje z project.hourly_rate
-  //    (nebo client.hourly_rate fallback), takže placeholder typicky cenu má.
-  // 3. Jinak nová položka.
-  const existing = form.value.items.find(it => (it.description || '').trim() === description.trim())
-  const empty = !existing
-    ? form.value.items.find(it => (it.description || '').trim() === '')
-    : undefined
-  const target = existing || empty
-
-  if (target) {
-    target.description = description
-    target.quantity = 1
-    target.unit = unit
-    target.unit_price_without_vat = totalAmount
-    // vat_rate_id záměrně neměníme — uživatel ho mohl ručně změnit
-  } else {
-    form.value.items.push({
-      description,
-      quantity: 1,
-      unit,
-      unit_price_without_vat: totalAmount,
-      vat_rate_id: defaultVatId,
-      order_index: form.value.items.length,
-    })
-  }
-}
-
-async function deleteWorkReport() {
-  if (!confirm(t('invoice.wr_delete_confirm'))) return
-  // Pokud je faktura už uložená, smaž i z DB; jinak jen lokálně.
-  if (invoiceId.value) {
-    try {
-      await invoicesApi.deleteWorkReport(invoiceId.value, isForce.value)
-    } catch (e: any) {
-      // 404 = výkaz v DB neexistuje (nový), pokračuj s lokálním clear
-      if (e?.response?.status !== 404) {
-        error.value = apiErrorMessage(e, t('invoice.wr_delete_failed'))
-        return
-      }
-    }
-  }
-  wrItems.value = []
-  wrTitle.value = ''
-  wrOpen.value = false
-}
-
-/**
- * Pokud uživatel má otevřený výkaz s položkami, ověř jestli odpovídá faktuře.
- * Vrací null = OK, jinak warning string pro confirm().
- */
-function checkWorkReportSync(): string | null {
-  if (!wrOpen.value || wrItemsValid.value.length === 0) return null
-  const totalHours = Math.round(wrTotalHours.value * 100) / 100
-  const totalAmount = Math.round(wrTotalAmount.value * 100) / 100
-  const description = (wrTitle.value || t('invoice.work_report')).trim()
-  if (description === '') return null
-
-  const ccy = currencies.value.find(c => c.id === form.value.currency_id)?.code || ''
-  const loc = locale.value === 'cs' ? 'cs' : 'en-US'
-  const item = form.value.items.find(it => (it.description || '').trim() === description)
-
-  if (!item) {
-    return t('invoice.wr_not_in_items_confirm', {
-      description,
-      hours: totalHours,
-      amount: totalAmount.toLocaleString(loc),
-      ccy,
-    })
-  }
-
-  const itemQty = Number(item.quantity) || 0
-  const itemRate = Number(item.unit_price_without_vat) || 0
-  const itemAmount = Math.round(itemQty * itemRate * 100) / 100
-  const amountDiff = Math.abs(itemAmount - totalAmount) > 0.01
-
-  if (amountDiff) {
-    return t('invoice.wr_diff_confirm', {
-      hours: totalHours,
-      amount: totalAmount.toLocaleString(loc),
-      itemAmount: itemAmount.toLocaleString(loc),
-      ccy,
-    })
-  }
-  return null
-}
-
 async function submit() {
   // Tiše vyhoď prázdné řádky (bez popisu i bez ceny) — uživatel přidal řádek a nezapsal ho.
-  // Zároveň smaž z form.value.items, ať checkWorkReportSync vidí stejnou množinu jako payload.
   form.value.items = form.value.items.filter(it =>
     (it.description || '').trim() !== '' || (Number(it.unit_price_without_vat) || 0) !== 0
   )
   form.value.items.forEach((it, i) => (it.order_index = i))
-
-  // Detekce nesouladu mezi výkazem a položkou faktury — uživatel má šanci se vrátit
-  const wrWarning = checkWorkReportSync()
-  if (wrWarning && !confirm(wrWarning)) return
 
   if (hasNonPositiveAmountToPay.value) {
     error.value = t('invoice.amount_positive_required')
@@ -729,11 +505,12 @@ async function submit() {
   error.value = ''
   try {
     const payload: InvoicePayload = {
-      invoice_type: quoteMode.value ? 'proforma' : form.value.invoice_type,
+      invoice_type: 'proforma',
+      numbering_type: 'quote',
       client_id: form.value.client_id!,
       project_id: form.value.project_id,
       issue_date: form.value.issue_date,
-      tax_date: (quoteMode.value ? 'proforma' : form.value.invoice_type) === 'proforma' ? null : form.value.tax_date,
+      tax_date: null,
       due_date: form.value.due_date,
       currency_id: form.value.currency_id,
       reverse_charge: form.value.reverse_charge,
@@ -742,7 +519,6 @@ async function submit() {
       note_below_items: form.value.note_below_items || null,
       advance_paid_amount: form.value.advance_paid_amount,
       discount_percent: form.value.discount_percent || 0,
-      payment_method: form.value.payment_method,
       // Pošli kurz jen pokud uživatel ho má nastavený a měna není CZK — backend bere
       // explicit hodnotu jako manuální override (nepřepočítá z ČNB).
       exchange_rate: (form.value.currency !== 'CZK' && form.value.exchange_rate && form.value.exchange_rate > 0)
@@ -782,27 +558,6 @@ async function submit() {
         : 'invoice.czk_recap.warning_fallback'
       toast.warning(t(key, { rate: rateStr, currency: rateMeta.currency, date: dateStr }))
     }
-    // Po uložení faktury — pokud uživatel otevřel work report, ulož ho
-    // (jen řádky s vyplněným popisem; prázdné řádky tiše ignorujeme — viz wrItemsValid)
-    if (wrOpen.value && wrItemsValid.value.length > 0) {
-      try {
-        await invoicesApi.saveWorkReport(saved.id, {
-          project_id: saved.project_id,
-          title: wrTitle.value,
-          items: wrItemsValid.value.map((it, i) => ({
-            description: it.description,
-            work_date: it.work_date || null,
-            hours: Number(it.hours) || 0,
-            rate: Number(it.rate) || 0,
-            order_index: i,
-          })),
-        }, isForce.value)
-      } catch (e: any) {
-        // Faktura je uložená, výkaz ne — nepokračuj v redirectu, ať uživatel nepřijde o data ve formuláři
-        error.value = apiErrorMessage(e, t('invoice.wr_save_failed'))
-        return
-      }
-    }
     router.push(detailPath(saved.id))
   } catch (e: any) {
     error.value = apiErrorMessage(e, t('common.save_failed'))
@@ -816,7 +571,7 @@ async function deleteDraft() {
   if (!confirm(t('invoice.delete_draft_confirm'))) return
   try {
     await invoicesApi.delete(invoiceId.value)
-    router.push(listBasePath.value)
+    router.push(listBasePath)
   } catch (e: any) {
     error.value = apiErrorMessage(e, t('common.delete_failed'))
   }
@@ -833,10 +588,8 @@ async function deleteDraft() {
         <h1 class="text-2xl font-semibold mt-1">
           {{ editorTitle }}
           <span class="text-sm font-normal text-neutral-500 ml-2">
-            <span v-if="quoteMode" class="px-2 py-0.5 bg-accent-100 text-accent-600 rounded">Cenová nabídka</span>
-            <span v-else-if="form.invoice_type === 'proforma'" class="px-2 py-0.5 bg-accent-100 text-accent-600 rounded">{{ t('type.proforma') }}</span>
-            <span v-else-if="form.invoice_type === 'credit_note'" class="px-2 py-0.5 bg-danger-50 text-danger-500 rounded">{{ t('type.credit_note') }}</span>
-            <span v-else-if="editedStatus !== 'draft'" class="px-2 py-0.5 bg-warning-50 text-warning-600 rounded">{{ t(`status.${editedStatus}`) }}</span>
+            <span class="px-2 py-0.5 bg-accent-100 text-accent-600 rounded">Cenová nabídka</span>
+            <span v-if="editedStatus !== 'draft'" class="px-2 py-0.5 bg-warning-50 text-warning-600 rounded">{{ t(`status.${editedStatus}`) }}</span>
             <span v-else class="px-2 py-0.5 bg-neutral-100 text-neutral-600 rounded">{{ t('status.draft') }}</span>
           </span>
         </h1>
@@ -865,17 +618,9 @@ async function deleteDraft() {
           <div class="space-y-3">
             <div>
               <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('invoice.doc_type') }} *</label>
-              <select v-if="!quoteMode" v-model="form.invoice_type" class="w-full h-10 px-3 border border-neutral-300 rounded-md bg-white">
-                <option value="invoice">{{ t('invoice.doc_invoice') }}</option>
-                <option value="proforma">{{ t('invoice.doc_proforma') }}</option>
-                <option value="credit_note">{{ t('invoice.doc_credit_note') }}</option>
-              </select>
-              <div v-else class="w-full h-10 px-3 border border-neutral-300 rounded-md bg-neutral-50 inline-flex items-center text-sm text-neutral-700">
+              <div class="w-full h-10 px-3 border border-neutral-300 rounded-md bg-neutral-50 inline-flex items-center text-sm text-neutral-700">
                 Cenová nabídka
               </div>
-              <p v-if="form.invoice_type === 'credit_note'" class="text-xs text-warning-600 mt-1">
-                {{ t('invoice.credit_note_warning') }}
-              </p>
             </div>
             <div>
               <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('invoice.client') }} *</label>
@@ -957,18 +702,6 @@ async function deleteDraft() {
                 </select>
               </div>
             </div>
-            <div>
-              <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('payment_method.label') }}</label>
-              <select v-model="form.payment_method" class="w-full h-10 px-3 border border-neutral-300 rounded-md bg-white">
-                <option value="bank_transfer">{{ t('payment_method.bank_transfer') }}</option>
-                <option value="card">{{ t('payment_method.card') }}</option>
-                <option value="cash">{{ t('payment_method.cash') }}</option>
-                <option value="other">{{ t('payment_method.other') }}</option>
-              </select>
-              <p v-if="form.payment_method !== 'bank_transfer'" class="text-xs text-warning-600 mt-1">
-                {{ t('payment_method.hint') }}
-              </p>
-            </div>
             <label v-if="showReverseChargeUI" class="flex items-center gap-2 text-sm text-neutral-700">
               <input v-model="form.reverse_charge" type="checkbox" class="rounded border-neutral-300 text-primary-600" />
               <span>{{ t('invoice.reverse_charge') }} ({{ t('invoice.totals.vat') }} 0 %)</span>
@@ -983,7 +716,7 @@ async function deleteDraft() {
                  Placeholder ukazuje, jaké číslo dostane fakturu při Issue (z preview API).
                  Když není žádný template (ani per-supplier ani v cfg), ukáže warning. -->
             <div v-if="editedStatus === 'draft'">
-              <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t(varsymbolLabelKey) }}</label>
+              <label class="block text-sm font-medium text-neutral-700 mb-1">{{ quoteNumberLabel }}</label>
               <input v-model="form.varsymbol" type="text" maxlength="20"
                 :placeholder="varsymbolAutoPreview || t('invoice.varsymbol_placeholder')"
                 class="w-full h-10 px-3 border border-neutral-300 rounded-md font-mono" />
@@ -993,22 +726,15 @@ async function deleteDraft() {
               <p v-else class="text-xs text-neutral-500 mt-1">{{ t('invoice.varsymbol_hint') }}</p>
             </div>
             <div v-else-if="editedVarsymbol" class="rounded-md bg-neutral-50 border border-neutral-200 p-3 text-sm">
-              <span class="text-neutral-500">{{ t(varsymbolLabelKey) }}:</span>
+              <span class="text-neutral-500">{{ quoteNumberLabel }}:</span>
               <code class="ml-2 font-mono font-semibold">{{ editedVarsymbol }}</code>
             </div>
             <div>
               <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('invoice.issue_date') }} *</label>
               <input v-model="form.issue_date" type="date" required class="w-full h-10 px-3 border border-neutral-300 rounded-md" />
             </div>
-            <div v-if="form.invoice_type !== 'proforma'">
-              <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('invoice.tax_date') }} *</label>
-              <input v-model="form.tax_date" type="date" required class="w-full h-10 px-3 border border-neutral-300 rounded-md" />
-            </div>
-            <div v-else class="rounded-md bg-accent-50 border border-accent-100 p-3 text-sm text-accent-600">
-              {{ t('invoice.proforma_no_tax_point') }}
-            </div>
             <div>
-              <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('invoice.due_date') }} *</label>
+              <label class="block text-sm font-medium text-neutral-700 mb-1">Platnost do *</label>
               <input v-model="form.due_date" type="date" required class="w-full h-10 px-3 border border-neutral-300 rounded-md" />
             </div>
             <div v-if="form.currency !== 'CZK' && form.exchange_rate !== null && form.exchange_rate > 0">
@@ -1243,162 +969,6 @@ async function deleteDraft() {
               }) }}
             </div>
           </dl>
-        </div>
-      </div>
-
-      <!-- Výkaz víceprací -->
-      <div class="bg-white border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
-        <header class="px-5 py-3 border-b border-neutral-200 flex items-center justify-between">
-          <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-500">{{ t('invoice.work_report') }}</h3>
-          <div class="flex items-center gap-2">
-            <button v-if="!wrOpen" type="button" @click="openWorkReport"
-              class="cursor-pointer px-4 h-9 text-sm border border-primary-500/40 text-primary-700 hover:bg-primary-50 font-medium rounded-md inline-flex items-center gap-1.5">
-              <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6m0 0v6m0-6h6m-6 0H6"/></svg>
-              {{ t('invoice.wr_add') }}
-            </button>
-            <button v-if="wrOpen && wrItems.length > 0" type="button" @click="pushWrToInvoiceItem"
-              class="cursor-pointer px-4 h-9 text-sm bg-emerald-700 hover:bg-emerald-800 text-white font-semibold rounded-md inline-flex items-center gap-1.5 shadow-sm">
-              <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M7 16V4m0 0L3 8m4-4l4 4m6 0v12m0 0l4-4m-4 4l-4-4"/></svg>
-              {{ t('invoice.wr_push_to_item') }}
-            </button>
-            <button v-if="wrOpen && wrItems.length > 0" type="button" @click="deleteWorkReport"
-              class="cursor-pointer px-3 h-8 text-xs border border-danger-500/50 text-danger-500 hover:bg-danger-50 rounded-md">
-              {{ t('invoice.wr_delete') }}
-            </button>
-          </div>
-        </header>
-        <div v-if="wrOpen" class="p-5 space-y-3">
-          <input v-model="wrTitle" type="text" :placeholder="t('invoice.wr_title')"
-            class="w-full h-10 px-3 border border-neutral-300 rounded-md text-sm" />
-          <!-- Desktop: tabulka -->
-          <div class="hidden md:block overflow-x-auto">
-          <table class="w-full text-sm table-sticky-first">
-            <thead class="bg-neutral-50 text-xs text-neutral-500 uppercase tracking-wide">
-              <tr>
-                <th class="px-2 py-2 w-12"></th>
-                <th class="px-3 py-2 text-left font-medium">{{ t('invoice.wr_description') }}</th>
-                <th class="px-3 py-2 text-left font-medium w-36">{{ t('invoice.wr_date') }}</th>
-                <th class="px-3 py-2 text-right font-medium w-24">{{ t('invoice.wr_hours') }}</th>
-                <th class="px-3 py-2 text-right font-medium w-28">{{ t('invoice.wr_rate') }}</th>
-                <th class="px-3 py-2 text-right font-medium w-32">{{ t('invoice.wr_total') }}</th>
-                <th class="px-2 py-2 w-10"></th>
-              </tr>
-            </thead>
-            <tbody class="divide-y divide-neutral-100">
-              <tr v-for="(it, i) in wrItems" :key="i">
-                <td class="px-2 py-2 text-center text-xs text-neutral-400">
-                  <button type="button" @click="moveWrItem(i, -1)" :disabled="i === 0"
-                          :title="t('invoice.wr_move_up')"
-                          class="block w-5 h-4 hover:text-neutral-700 disabled:opacity-30">▲</button>
-                  <button type="button" @click="moveWrItem(i, 1)" :disabled="i === wrItems.length - 1"
-                          :title="t('invoice.wr_move_down')"
-                          class="block w-5 h-4 hover:text-neutral-700 disabled:opacity-30">▼</button>
-                </td>
-                <td class="px-2 py-1.5">
-                  <input v-model="it.description" type="text" class="w-full h-9 px-2 border border-neutral-200 rounded text-sm" />
-                </td>
-                <td class="px-2 py-1.5">
-                  <input v-model="it.work_date" type="date" class="w-full h-9 px-2 border border-neutral-200 rounded text-sm font-mono" />
-                </td>
-                <td class="px-2 py-1.5">
-                  <input v-model.number="it.hours" type="number" step="0.25" min="0" class="w-full h-9 px-2 border border-neutral-200 rounded text-sm text-right font-mono" />
-                </td>
-                <td class="px-2 py-1.5">
-                  <input v-model.number="it.rate" type="number" step="1" min="0" class="w-full h-9 px-2 border border-neutral-200 rounded text-sm text-right font-mono" />
-                </td>
-                <td class="px-3 py-1.5 text-right font-mono text-neutral-700">
-                  {{ formatMoney((Number(it.hours) || 0) * (Number(it.rate) || 0), form.currency) }}
-                </td>
-                <td class="px-2 py-1.5 text-center">
-                  <button type="button" @click="removeWrItem(i)" :title="t('common.delete')"
-                          class="cursor-pointer text-danger-500 hover:text-danger-600 text-lg leading-none">×</button>
-                </td>
-              </tr>
-            </tbody>
-            <tfoot class="bg-neutral-50 font-semibold">
-              <tr>
-                <td colspan="3" class="p-2">
-                  <button type="button" @click="addWrItem"
-                    class="cursor-pointer px-3 h-8 text-sm border border-primary-500/40 text-primary-700 hover:bg-primary-50 font-medium rounded-md inline-flex items-center gap-1">
-                    <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6m0 0v6m0-6h6m-6 0H6"/></svg>
-                    {{ t('invoice.wr_add_row') }}
-                  </button>
-                </td>
-                <td v-if="wrItems.length > 0" class="px-3 py-2 text-right font-mono">
-                  <span class="text-neutral-400 font-normal mr-2">Σ</span>{{ wrTotalHours.toFixed(2) }} h
-                </td>
-                <td v-else></td>
-                <td></td>
-                <td v-if="wrItems.length > 0" class="px-3 py-2 text-right font-mono whitespace-nowrap" colspan="2">
-                  {{ formatMoney(wrTotalAmount, form.currency) }}
-                </td>
-                <td v-else colspan="2"></td>
-              </tr>
-            </tfoot>
-          </table>
-          </div>
-
-          <!-- Mobile: stack karet -->
-          <div class="md:hidden space-y-2">
-            <div v-for="(it, i) in wrItems" :key="`m-${i}`"
-              class="border border-neutral-200 rounded-md p-3 space-y-2 bg-neutral-50/30">
-              <div class="flex items-center justify-between text-xs text-neutral-500">
-                <span class="font-mono">#{{ i + 1 }}</span>
-                <div class="flex items-center gap-1">
-                  <button type="button" @click="moveWrItem(i, -1)" :disabled="i === 0"
-                          :title="t('invoice.wr_move_up')"
-                          class="cursor-pointer w-8 h-8 inline-flex items-center justify-center border border-neutral-300 text-neutral-600 hover:bg-neutral-50 rounded disabled:opacity-30 disabled:cursor-not-allowed">
-                    <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M5 15l7-7 7 7"/></svg>
-                  </button>
-                  <button type="button" @click="moveWrItem(i, 1)" :disabled="i === wrItems.length - 1"
-                          :title="t('invoice.wr_move_down')"
-                          class="cursor-pointer w-8 h-8 inline-flex items-center justify-center border border-neutral-300 text-neutral-600 hover:bg-neutral-50 rounded disabled:opacity-30 disabled:cursor-not-allowed">
-                    <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7"/></svg>
-                  </button>
-                  <button type="button" @click="removeWrItem(i)" class="cursor-pointer w-8 h-8 inline-flex items-center justify-center border border-danger-500/40 text-danger-500 hover:bg-danger-50 rounded text-lg leading-none">×</button>
-                </div>
-              </div>
-              <div>
-                <label class="block text-xs font-medium text-neutral-600 mb-1">{{ t('invoice.wr_description') }}</label>
-                <input v-model="it.description" type="text" class="w-full h-10 px-3 border border-neutral-200 rounded text-sm bg-white" />
-              </div>
-              <div class="grid grid-cols-2 gap-2">
-                <div>
-                  <label class="block text-xs font-medium text-neutral-600 mb-1">{{ t('invoice.wr_date') }}</label>
-                  <input v-model="it.work_date" type="date" class="w-full h-10 px-3 border border-neutral-200 rounded text-sm font-mono bg-white" />
-                </div>
-                <div>
-                  <label class="block text-xs font-medium text-neutral-600 mb-1">{{ t('invoice.wr_hours') }}</label>
-                  <input v-model.number="it.hours" type="number" inputmode="decimal" step="0.25" min="0" class="w-full h-10 px-3 border border-neutral-200 rounded text-right font-mono text-sm bg-white" />
-                </div>
-              </div>
-              <div class="grid grid-cols-2 gap-2 items-end">
-                <div>
-                  <label class="block text-xs font-medium text-neutral-600 mb-1">{{ t('invoice.wr_rate') }}</label>
-                  <input v-model.number="it.rate" type="number" inputmode="decimal" step="1" min="0" class="w-full h-10 px-3 border border-neutral-200 rounded text-right font-mono text-sm bg-white" />
-                </div>
-                <div class="text-right pb-2">
-                  <div class="text-xs font-medium text-neutral-500 uppercase tracking-wide">{{ t('invoice.wr_total') }}</div>
-                  <div class="font-mono text-sm font-semibold">
-                    {{ formatMoney((Number(it.hours) || 0) * (Number(it.rate) || 0), form.currency) }}
-                  </div>
-                </div>
-              </div>
-            </div>
-            <button type="button" @click="addWrItem"
-              class="cursor-pointer w-full h-10 text-sm border border-primary-500/40 text-primary-700 hover:bg-primary-50 font-medium rounded-md inline-flex items-center justify-center gap-1.5">
-              <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6m0 0v6m0-6h6m-6 0H6"/></svg>
-              {{ t('invoice.wr_add_row') }}
-            </button>
-            <div v-if="wrItems.length > 0" class="bg-neutral-50 rounded-md px-3 py-2 flex items-center justify-between font-semibold text-sm">
-              <span class="font-mono">Σ {{ wrTotalHours.toFixed(2) }} h</span>
-              <span class="font-mono">{{ formatMoney(wrTotalAmount, form.currency) }}</span>
-            </div>
-          </div>
-
-          <p class="text-xs text-neutral-500">
-            {{ t('invoice.wr_hint', { title: wrTitle, hours: wrTotalHours.toFixed(2), rate: wrItems[0]?.rate || 0, currency: form.currency }) }}
-          </p>
         </div>
       </div>
 

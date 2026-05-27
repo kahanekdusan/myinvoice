@@ -9,7 +9,6 @@ import { useAuthStore } from '@/stores/auth'
 import { useSupplierStore } from '@/stores/supplier'
 import { useHotkey } from '@/composables/useHotkey'
 import { useToast } from '@/composables/useToast'
-import WorkReportModal from '@/components/modals/WorkReportModal.vue'
 
 const { t, locale } = useI18n()
 const toast = useToast()
@@ -32,7 +31,6 @@ const listBasePath = computed(() => (quoteMode.value ? '/price-quotes' : '/invoi
 const editPath = (id: number) => `${listBasePath.value}/${id}/edit`
 
 const invoice = ref<Invoice | null>(null)
-const wrModalOpen = ref(false)
 const loading = ref(true)
 const busy = ref<string | null>(null)
 
@@ -46,9 +44,6 @@ const sendOpen = ref(false)
 const sendTo = ref('')
 const sendNote = ref('')
 
-// Reminder modal state
-const reminderOpen = ref(false)
-
 // Approval modals
 const approvalStatusOpen = ref(false)
 const approvalStatusDraft = ref<ApprovalStatus>('none')
@@ -61,7 +56,6 @@ const attachmentsBusy = ref(false)
 const attachmentsDragOver = ref(false)
 const attachmentInput = ref<HTMLInputElement | null>(null)
 const workReport = ref<WorkReport | null>(null)
-const wrHasDates = computed(() => !!workReport.value?.items.some(i => !!i.work_date))
 
 async function load() {
   loading.value = true
@@ -262,10 +256,10 @@ async function issue() {
     toast.error(t('invoice.amount_positive_required'))
     return
   }
-  if (!confirm(t('invoice.issue_confirm'))) return
+  if (!confirm(t('invoice.issue_confirm_quote'))) return
   busy.value = 'issue'
   try {
-    invoice.value = await invoicesApi.issue(invoice.value.id)
+    invoice.value = await invoicesApi.issue(invoice.value.id, { numbering_type: 'quote' })
     toast.success( t('invoice.issued_as', { varsymbol: invoice.value.varsymbol }))
     invoicesApi.activity(invoice.value.id).then(a => { activity.value = a }).catch(() => {})
     invoicesApi.listPdfs(invoice.value.id).then(items => { pdfHistory.value = items }).catch(() => {})
@@ -276,44 +270,11 @@ async function issue() {
   }
 }
 
-const paidAtInput = ref<string>(new Date().toISOString().slice(0, 10))
-const markPaidOpen = ref(false)
-
 useHotkey('escape', () => {
-  if (markPaidOpen.value)     markPaidOpen.value = false
-  else if (cancelOpen.value)  cancelOpen.value = false
+  if (cancelOpen.value)  cancelOpen.value = false
   else if (sendOpen.value)    sendOpen.value = false
-  else if (reminderOpen.value) reminderOpen.value = false
   else if (approvalStatusOpen.value) approvalStatusOpen.value = false
 })
-
-async function markPaid() {
-  if (!invoice.value) return
-  busy.value = 'paid'
-  try {
-    invoice.value = await invoicesApi.markPaid(invoice.value.id, paidAtInput.value)
-    markPaidOpen.value = false
-    toast.success( t('invoice.marked_paid_at', { date: paidAtInput.value }))
-  } catch (e: any) {
-    toast.error( e?.response?.data?.error?.message || t('invoice.operation_failed'))
-  } finally {
-    busy.value = null
-  }
-}
-
-async function unmarkPaid() {
-  if (!invoice.value) return
-  if (!window.confirm(t('invoice.unmark_paid_confirm', { varsymbol: invoice.value.varsymbol || '' }))) return
-  busy.value = 'unmark-paid'
-  try {
-    invoice.value = await invoicesApi.unmarkPaid(invoice.value.id)
-    toast.success(t('invoice.unmark_paid_done'))
-  } catch (e: any) {
-    toast.error(e?.response?.data?.error?.message || t('invoice.operation_failed'))
-  } finally {
-    busy.value = null
-  }
-}
 
 function openCancelModal() {
   // Dobropisu nelze vystavit další dobropis — default mode = internal.
@@ -348,24 +309,6 @@ async function cancel() {
   }
 }
 
-async function issueFinalFromProforma() {
-  if (!invoice.value) return
-  if (invoice.value.invoice_type !== 'proforma' || invoice.value.status !== 'paid') return
-  if (!confirm(t('invoice.issue_final_confirm', { varsymbol: invoice.value.varsymbol || `#${invoice.value.id}` }))) return
-  busy.value = 'issue-final'
-  try {
-    const r = await invoicesApi.issueFinal(invoice.value.id)
-    if (!r?.final_invoice_id) {
-      toast.error(t('invoice.invalid_response'))
-      return
-    }
-    router.push(r.edit_url || editPath(r.final_invoice_id))
-  } catch (e: any) {
-    toast.error(e?.response?.data?.error?.message || t('invoice.issue_final_failed'))
-  } finally {
-    busy.value = null
-  }
-}
 
 async function cloneInvoice() {
   if (!invoice.value) return
@@ -386,19 +329,23 @@ async function cloneInvoice() {
   }
 }
 
-function editIssued() {
+function editIssued(force = false) {
   if (!invoice.value) return
-  const ok = confirm(t('invoice.edit_issued_confirm', {
+  const ok = confirm(t('invoice.edit_issued_confirm_quote', {
     varsymbol: invoice.value.varsymbol || '',
     sent: invoice.value.sent_at ? t('invoice.edit_issued_confirm_sent') : '',
   }))
   if (!ok) return
-  router.push(`${editPath(invoice.value.id)}?force=1`)
+  const query = force ? '?force=1' : ''
+  router.push(`${editPath(invoice.value.id)}${query}`)
 }
 
 function downloadPdf() {
   if (!invoice.value) return
-  window.open(invoicesApi.pdfUrl(invoice.value.id, false), '_blank')
+  window.open(invoicesApi.pdfUrl(invoice.value.id, false, {
+    regenerate: true,
+    numbering_type: 'quote',
+  }), '_blank')
 }
 
 async function sendTest() {
@@ -485,13 +432,6 @@ async function send() {
 
 const isDraft = computed(() => invoice.value?.status === 'draft')
 const isProforma = computed(() => invoice.value?.invoice_type === 'proforma')
-const canIssueFinal = computed(() => isProforma.value && invoice.value?.status === 'paid')
-const isIssued = computed(() => invoice.value && ['issued', 'sent', 'reminded'].includes(invoice.value.status))
-const hasPositiveAmountToPay = computed(() => {
-  if (!invoice.value) return false
-  if (!['invoice', 'proforma'].includes(invoice.value.invoice_type)) return true
-  return Number(invoice.value.amount_to_pay ?? 0) > 0
-})
 const canCancel = computed(() => invoice.value && ['issued', 'sent', 'reminded', 'paid'].includes(invoice.value.status)
   && invoice.value.invoice_type !== 'cancellation')
 // Dobropisu nelze vystavit další dobropis — v modalu skryjeme tu volbu.
@@ -503,50 +443,6 @@ const canSendEmail = computed(() =>
   && invoice.value.invoice_type !== 'cancellation'
 )
 const canSendTest = computed(() => invoice.value && invoice.value.invoice_type !== 'cancellation')
-
-// Upomínka — jen pro běžnou fakturu (ne proforma/dobropis/storno) ve stavu issued/sent/reminded,
-// po splatnosti a placenou bankovním převodem (kartové/hotovostní úhrady se neupomínají).
-const canSendReminder = computed(() => {
-  if (!invoice.value) return false
-  if (invoice.value.invoice_type !== 'invoice') return false
-  if (!['issued', 'sent', 'reminded'].includes(invoice.value.status)) return false
-  if ((invoice.value.payment_method ?? 'bank_transfer') !== 'bank_transfer') return false
-  if (Number(invoice.value.amount_to_pay ?? 0) <= 0) return false
-  const due = new Date(invoice.value.due_date)
-  const today = new Date()
-  today.setHours(0, 0, 0, 0)
-  return due < today
-})
-
-const daysOverdue = computed(() => {
-  if (!invoice.value) return 0
-  const due = new Date(invoice.value.due_date)
-  const today = new Date()
-  today.setHours(0, 0, 0, 0)
-  due.setHours(0, 0, 0, 0)
-  return Math.max(0, Math.floor((today.getTime() - due.getTime()) / 86_400_000))
-})
-
-function openReminderModal() {
-  if (!invoice.value) return
-  reminderOpen.value = true
-}
-
-async function sendReminder() {
-  if (!invoice.value) return
-  busy.value = 'reminder'
-  try {
-    const r = await invoicesApi.sendReminder(invoice.value.id)
-    invoice.value = r.invoice
-    reminderOpen.value = false
-    toast.success( t('invoice.reminder_sent_ok', { recipients: r.sent_to.join(', '), days: r.days_overdue }))
-    invoicesApi.activity(invoice.value.id).then(a => { activity.value = a }).catch(() => {})
-  } catch (e: any) {
-    toast.error( e?.response?.data?.error?.message || t('invoice.reminder_failed'))
-  } finally {
-    busy.value = null
-  }
-}
 
 // ───── Schvalování výkazu zákazníkem ─────────────────────────────────
 const requiresApproval = computed(() =>
@@ -683,17 +579,6 @@ async function updateApprovalStatus() {
           <svg class="w-4 h-4 text-neutral-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M11 5H6a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2v-5m-1.414-9.414a2 2 0 1 1 2.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/></svg>
           {{ t('common.edit') }}
         </RouterLink>
-        <!-- Výkaz: button viditelný pokud:
-             - výkaz už existuje (libovolný status faktury — umožní view/edit, save validuje backend)
-             - nebo je faktura draft + projekt má workflow (umožní vytvořit nový výkaz)
-             Backend SaveWorkReportAction vrátí 409 pokud status != draft (kromě admin ?force=1). -->
-        <button v-if="(workReport || (isDraft && invoice.project_requires_approval)) && auth.canWrite"
-          @click="wrModalOpen = true"
-          class="cursor-pointer px-3 h-9 text-sm border border-primary-500/40 text-primary-700 hover:bg-primary-50 rounded-md inline-flex items-center gap-1.5"
-          :title="t('invoice.wr_btn')">
-          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 17v-6m3 6v-4m3 4v-2M5 21h14a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2z"/></svg>
-          {{ t('invoice.wr_btn') }}
-        </button>
         <button v-if="canRequestApproval && auth.canWrite" @click="requestApproval" :disabled="busy !== null"
           class="cursor-pointer px-3 h-9 text-sm bg-primary-600 hover:bg-primary-700 disabled:bg-neutral-300 text-white font-medium rounded-md inline-flex items-center gap-1.5">
           <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M3 8l7.89 5.26a2 2 0 0 0 2.22 0L21 8M5 19h14a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2z"/></svg>
@@ -732,22 +617,6 @@ async function updateApprovalStatus() {
           <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M3 8l7.89 5.26a2 2 0 0 0 2.22 0L21 8M5 19h14a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2z"/></svg>
           {{ t('invoice.send_to_client') }}
         </button>
-        <button v-if="canSendReminder && auth.canWrite" @click="openReminderModal" :disabled="busy !== null"
-          class="cursor-pointer px-3 h-9 text-sm bg-warning-500 hover:bg-warning-600 disabled:bg-neutral-300 text-white font-medium rounded-md inline-flex items-center gap-1.5"
-          :title="t('invoice.reminder_tooltip', { days: daysOverdue })">
-          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v2m0 4h.01M5.07 19h13.86c1.54 0 2.5-1.67 1.73-3L13.73 4a2 2 0 0 0-3.46 0L3.34 16c-.77 1.33.19 3 1.73 3z"/></svg>
-          {{ t('invoice.send_reminder') }}
-        </button>
-        <button v-if="isIssued && hasPositiveAmountToPay && auth.canWrite" @click="markPaidOpen = true" :disabled="busy !== null"
-          class="cursor-pointer px-3 h-9 text-sm border border-success-500/50 text-success-600 hover:bg-success-50 rounded-md inline-flex items-center gap-1.5">
-          <svg class="w-4 h-4 text-success-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 14l2 2 4-4m6 2a9 9 0 1 1-18 0 9 9 0 0 1 18 0z"/></svg>
-          {{ t('invoice.mark_paid') }}
-        </button>
-        <button v-if="canIssueFinal && auth.canWrite" @click="issueFinalFromProforma" :disabled="busy !== null"
-          class="cursor-pointer px-3 h-9 text-sm bg-primary-600 hover:bg-primary-700 disabled:bg-neutral-300 text-white font-medium rounded-md inline-flex items-center gap-1.5">
-          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12h6m-6 4h6m2 5H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5.586a1 1 0 0 1 .707.293l5.414 5.414a1 1 0 0 1 .293.707V19a2 2 0 0 1-2 2z"/></svg>
-          {{ busy === 'issue-final' ? '…' : t('invoice.issue_final') }}
-        </button>
       </div>
     </div>
 
@@ -774,22 +643,6 @@ async function updateApprovalStatus() {
         <span v-if="invoice.client_ic">{{ t('common.ic') }} {{ invoice.client_ic }}</span>
         <span v-if="invoice.client_ic && invoice.client_dic">, </span>
         <span v-if="invoice.client_dic">{{ t('common.dic') }} {{ invoice.client_dic }}</span>
-      </div>
-    </div>
-
-    <!-- Mark paid modal -->
-    <div v-if="markPaidOpen" class="fixed inset-0 bg-neutral-900/40 z-50 flex items-center justify-center p-4">
-      <div class="bg-white rounded-xl shadow-lg max-w-sm w-full p-5">
-        <h3 class="text-lg font-semibold mb-3">{{ t('invoice.modals.mark_paid_title') }}</h3>
-        <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('invoice.modals.mark_paid_date') }}</label>
-        <input v-model="paidAtInput" type="date" class="w-full h-10 px-3 border border-neutral-300 rounded-md mb-4" />
-        <div class="flex justify-end gap-2">
-          <button @click="markPaidOpen = false" class="cursor-pointer px-3 h-9 text-sm border border-neutral-300 rounded-md text-neutral-700 hover:bg-neutral-50">{{ t('common.cancel') }}</button>
-          <button @click="markPaid" :disabled="busy !== null"
-            class="cursor-pointer px-4 h-9 text-sm bg-success-500 hover:bg-success-600 disabled:bg-neutral-300 text-white font-medium rounded-md">
-            {{ busy === 'paid' ? '…' : t('common.confirm') }}
-          </button>
-        </div>
       </div>
     </div>
 
@@ -867,43 +720,17 @@ async function updateApprovalStatus() {
       </div>
     </div>
 
-    <!-- Reminder modal -->
-    <div v-if="reminderOpen" class="fixed inset-0 bg-neutral-900/40 z-50 flex items-center justify-center p-4">
-      <div class="bg-white rounded-xl shadow-lg max-w-md w-full p-5">
-        <h3 class="text-lg font-semibold mb-1">{{ t('invoice.modals.reminder_title') }}</h3>
-        <p class="text-sm text-warning-600 font-medium mb-3">{{ t('invoice.modals.reminder_overdue', { days: daysOverdue }) }}</p>
-        <p class="text-sm text-neutral-600 mb-3">{{ t('invoice.modals.reminder_body') }}</p>
-        <div v-if="invoice && (invoice.client_main_email || invoice.project_billing_emails?.length)" class="bg-neutral-50 border border-neutral-200 rounded-md px-3 py-2 mb-4 text-xs">
-          <div class="text-neutral-500 mb-0.5">{{ t('invoice.modals.reminder_recipients') }}</div>
-          <div v-if="invoice.client_main_email" class="font-mono">✉ {{ invoice.client_main_email }}</div>
-          <div v-for="b in (invoice.project_billing_emails || []).filter(b => b.email !== invoice!.client_main_email)" :key="b.email" class="font-mono">
-            ✉ {{ b.email }}<span v-if="b.label" class="text-neutral-400"> ({{ b.label }})</span>
-          </div>
-        </div>
-        <div v-if="invoice && invoice.reminder_count > 0" class="text-xs text-neutral-500 mb-4">
-          {{ t('invoice.reminder_at', { count: invoice.reminder_count, date: formatDate(invoice.last_reminder_at) }) }}
-        </div>
-        <div class="flex justify-end gap-2">
-          <button @click="reminderOpen = false" class="cursor-pointer px-3 h-9 text-sm border border-neutral-300 rounded-md text-neutral-700 hover:bg-neutral-50">{{ t('common.cancel') }}</button>
-          <button @click="sendReminder" :disabled="busy !== null"
-            class="cursor-pointer px-4 h-9 text-sm bg-warning-500 hover:bg-warning-600 disabled:bg-neutral-300 text-white font-medium rounded-md">
-            {{ busy === 'reminder' ? '…' : t('invoice.send_reminder') }}
-          </button>
-        </div>
-      </div>
-    </div>
-
     <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
       <div class="bg-white border border-neutral-200 rounded-lg p-5 shadow-sm">
         <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-500 mb-3">
           {{ t('invoice.issue_date') }}
           <template v-if="!isProforma"> / {{ t('invoice.tax_date') }}</template>
-          / {{ t('invoice.due_date') }}
+          / Platnost do
         </h3>
         <dl class="space-y-1.5 text-sm">
           <div class="flex justify-between"><dt class="text-neutral-500">{{ t('invoice.issue_date') }}</dt><dd>{{ formatDate(invoice.issue_date) }}</dd></div>
           <div v-if="invoice.tax_date && !isProforma" class="flex justify-between"><dt class="text-neutral-500">{{ t('invoice.tax_date') }}</dt><dd>{{ formatDate(invoice.tax_date) }}</dd></div>
-          <div class="flex justify-between"><dt class="text-neutral-500">{{ t('invoice.due_date') }}</dt><dd>{{ formatDate(invoice.due_date) }}</dd></div>
+          <div class="flex justify-between"><dt class="text-neutral-500">Platnost do</dt><dd>{{ formatDate(invoice.due_date) }}</dd></div>
           <div v-if="invoice.sent_at" class="flex justify-between"><dt class="text-neutral-500">{{ t('invoice.sent') }}</dt><dd>{{ formatDate(invoice.sent_at) }}</dd></div>
           <div v-if="invoice.public_first_opened_at" class="flex justify-between"><dt class="text-neutral-500">{{ t('invoice.link_opened_at') }}</dt><dd>{{ formatDate(invoice.public_first_opened_at) }}</dd></div>
           <div v-if="invoice.public_first_viewed_at" class="flex justify-between"><dt class="text-neutral-500">{{ t('invoice.viewed_at_label') }}</dt><dd>{{ formatDate(invoice.public_first_viewed_at) }}</dd></div>
@@ -917,16 +744,12 @@ async function updateApprovalStatus() {
           <div class="flex justify-between"><dt class="text-neutral-500">{{ t('common.currency') }}</dt><dd class="font-mono">{{ invoice.currency }}</dd></div>
           <div class="flex justify-between"><dt class="text-neutral-500">{{ t('invoice.language') }}</dt><dd>{{ invoice.language.toUpperCase() }}</dd></div>
           <div class="flex justify-between"><dt class="text-neutral-500">{{ t('invoice.reverse_charge') }}</dt><dd>{{ invoice.reverse_charge ? t('common.yes') : t('common.no') }}</dd></div>
-          <div class="flex justify-between">
-            <dt class="text-neutral-500">{{ t('payment_method.label') }}</dt>
-            <dd>{{ t('payment_method.' + (invoice.payment_method ?? 'bank_transfer')) }}</dd>
-          </div>
         </dl>
       </div>
 
       <div class="bg-white border border-neutral-200 rounded-lg p-5 shadow-sm">
         <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-500 mb-3">{{ t('settings.account_cz') }}</h3>
-        <dl v-if="(invoice.payment_method ?? 'bank_transfer') === 'bank_transfer'" class="space-y-1 text-sm">
+          <dl class="space-y-1 text-sm">
           <div v-if="invoice.bank_account_number" class="font-mono text-xs">
             {{ invoice.bank_account_number }} / {{ invoice.bank_code }}
           </div>
@@ -936,9 +759,6 @@ async function updateApprovalStatus() {
             {{ t('invoice.bank_not_set', { currency: invoice.currency }) }}
           </div>
         </dl>
-        <div v-else class="text-xs text-neutral-500">
-          {{ t('payment_method.hint') }}
-        </div>
       </div>
     </div>
 
@@ -1095,65 +915,6 @@ async function updateApprovalStatus() {
       <p class="text-sm text-neutral-700 whitespace-pre-wrap">{{ invoice.note_below_items }}</p>
     </div>
 
-
-    <!-- Výkaz víceprací -->
-    <div v-if="workReport" class="bg-white border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
-      <header class="px-5 py-3 border-b border-neutral-200 flex items-baseline justify-between gap-3">
-        <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-500">{{ t('invoice.work_report') }}</h3>
-        <span class="text-sm text-neutral-700">{{ workReport.title }}</span>
-      </header>
-      <!-- Desktop: tabulka -->
-      <div class="hidden md:block overflow-x-auto">
-      <table class="w-full text-sm table-sticky-first">
-        <thead class="bg-neutral-50 text-neutral-500 text-xs uppercase tracking-wide">
-          <tr>
-            <th class="text-left px-5 py-2 font-medium">{{ t('invoice.wr_description') }}</th>
-            <th v-if="wrHasDates" class="text-left px-4 py-2 font-medium w-32">{{ t('invoice.wr_date') }}</th>
-            <th class="text-right px-4 py-2 font-medium w-28">{{ t('invoice.wr_hours') }}</th>
-            <th class="text-right px-4 py-2 font-medium w-32">{{ t('invoice.wr_rate') }}</th>
-            <th class="text-right px-5 py-2 font-medium w-36">{{ t('invoice.wr_total') }}</th>
-          </tr>
-        </thead>
-        <tbody class="divide-y divide-neutral-100">
-          <tr v-for="(it, i) in workReport.items" :key="i">
-            <td class="px-5 py-2 text-neutral-800 whitespace-pre-wrap">{{ it.description }}</td>
-            <td v-if="wrHasDates" class="px-4 py-2 text-neutral-600 whitespace-nowrap">{{ formatDate(it.work_date) }}</td>
-            <td class="px-4 py-2 text-right font-mono">{{ Number(it.hours).toLocaleString('cs', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) }}</td>
-            <td class="px-4 py-2 text-right font-mono">{{ formatMoney(it.rate, invoice.currency) }}</td>
-            <td class="px-5 py-2 text-right font-mono">{{ formatMoney(Number(it.hours) * Number(it.rate), invoice.currency) }}</td>
-          </tr>
-          <tr class="bg-neutral-50 font-semibold">
-            <td class="px-5 py-2 text-right" :colspan="wrHasDates ? 2 : 1">{{ t('invoice.totals.total') }}</td>
-            <td class="px-4 py-2 text-right font-mono">{{ workReport.total_hours.toLocaleString('cs', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) }} h</td>
-            <td></td>
-            <td class="px-5 py-2 text-right font-mono">{{ formatMoney(workReport.total_amount, invoice.currency) }}</td>
-          </tr>
-        </tbody>
-      </table>
-      </div>
-
-      <!-- Mobile: stack karet -->
-      <div class="md:hidden divide-y divide-neutral-100">
-        <div v-for="(it, i) in workReport.items" :key="`m-${i}`" class="p-3 space-y-1">
-          <div class="text-sm whitespace-pre-wrap text-neutral-800">{{ it.description }}</div>
-          <div class="flex items-baseline justify-between text-xs text-neutral-500">
-            <span v-if="wrHasDates" class="font-mono">{{ formatDate(it.work_date) }}</span>
-            <span v-else></span>
-            <span>
-              <span class="font-mono text-neutral-700">{{ Number(it.hours).toLocaleString('cs', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) }} h</span>
-              <span class="text-neutral-400 mx-1.5">·</span>
-              <span class="font-mono">{{ formatMoney(it.rate, invoice.currency) }}</span>
-              <span class="text-neutral-400 mx-1.5">·</span>
-              <span class="font-mono font-semibold text-neutral-900">{{ formatMoney(Number(it.hours) * Number(it.rate), invoice.currency) }}</span>
-            </span>
-          </div>
-        </div>
-        <div class="bg-neutral-50 p-3 flex items-center justify-between font-semibold">
-          <span class="font-mono">Σ {{ workReport.total_hours.toLocaleString('cs', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) }} h</span>
-          <span class="font-mono">{{ formatMoney(workReport.total_amount, invoice.currency) }}</span>
-        </div>
-      </div>
-    </div>
 
     <!-- Stav schválení výkazu — viditelné jen pokud projekt vyžaduje + výkaz existuje -->
     <div v-if="requiresApproval" class="bg-white border border-neutral-200 rounded-lg shadow-sm">
@@ -1424,16 +1185,10 @@ async function updateApprovalStatus() {
           {{ t('recurring.create_from_invoice') }}
         </RouterLink>
 
-        <button v-if="isAdmin && !isDraft && !['cancellation'].includes(invoice.invoice_type)" @click="editIssued" :disabled="busy !== null"
+        <button v-if="!isDraft && !['cancellation'].includes(invoice.invoice_type) && (isAdmin || invoice.invoice_type === 'proforma')" @click="editIssued(isAdmin && invoice.invoice_type !== 'proforma')" :disabled="busy !== null"
           class="cursor-pointer px-3 h-9 text-sm border border-warning-500/50 text-warning-600 hover:bg-warning-50 rounded-md inline-flex items-center gap-1.5">
           <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v2m0 4h.01M5.07 19h13.86c1.54 0 2.5-1.67 1.73-3L13.73 4a2 2 0 0 0-3.46 0L3.34 16c-.77 1.33.19 3 1.73 3z"/></svg>
           {{ t('invoice.edit_admin') }}
-        </button>
-
-        <button v-if="isAdmin && invoice.status === 'paid'" @click="unmarkPaid" :disabled="busy !== null"
-          class="cursor-pointer px-3 h-9 text-sm border border-warning-500/50 text-warning-600 hover:bg-warning-50 rounded-md inline-flex items-center gap-1.5">
-          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M3 10h18M3 6h18M3 14h18M3 18h18"/><path stroke-linecap="round" stroke-linejoin="round" d="M8 4l8 16"/></svg>
-          {{ busy === 'unmark-paid' ? '…' : t('invoice.unmark_paid') }}
         </button>
 
         <button v-if="canCancel" @click="openCancelModal" :disabled="busy !== null"
@@ -1455,10 +1210,5 @@ async function updateApprovalStatus() {
       </div>
     </div>
 
-    <!-- Work report modal (jen pro draft + workflow projekty) -->
-    <WorkReportModal v-if="invoice"
-      v-model="wrModalOpen"
-      :invoice-id="invoice.id"
-      @saved="load" />
   </div>
 </template>

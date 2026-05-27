@@ -37,6 +37,7 @@ export interface Supplier {
   // *_format — template typu 'JD{YYYY}-{CC}', null = fallback na cfg.varsymbol.templates.{type}.
   // period — 'year' (1.1.) | 'month' (1. dne v měsíci) | 'none' (nikdy).
   invoice_number_format: string | null
+  quote_number_format: string | null
   proforma_number_format: string | null
   credit_note_number_format: string | null
   invoice_number_period: 'year' | 'month' | 'none'
@@ -67,6 +68,7 @@ export interface Supplier {
   // v prázdných polích per-supplier šablon. Hodnota přichází z cfg.varsymbol.templates.
   cfg_varsymbol_fallback?: {
     invoice: string
+    quote?: string
     proforma: string
     credit_note: string
   }

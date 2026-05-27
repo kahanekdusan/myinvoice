@@ -34,7 +34,7 @@ use PDO;
  */
 final class VarsymbolGenerator
 {
-    private const SUPPORTED_TYPES = ['invoice', 'proforma', 'credit_note'];
+    private const SUPPORTED_TYPES = ['invoice', 'proforma', 'credit_note', 'quote'];
     private const VALID_PERIODS   = ['year', 'month', 'none'];
     private const DEFAULT_PERIOD  = 'month';
 
@@ -166,19 +166,21 @@ final class VarsymbolGenerator
     private function resolveTemplateAndPeriod(int $supplierId, string $invoiceType): array
     {
         $stmt = $this->db->pdo()->prepare(
-            'SELECT invoice_number_format, proforma_number_format, credit_note_number_format,
+            'SELECT invoice_number_format, quote_number_format, proforma_number_format, credit_note_number_format,
                     invoice_number_period
                FROM supplier WHERE id = ? LIMIT 1'
         );
         $stmt->execute([$supplierId]);
         $row = $stmt->fetch(PDO::FETCH_ASSOC) ?: [];
 
-        $perSupplierColumn = match ($invoiceType) {
-            'invoice'     => 'invoice_number_format',
-            'proforma'    => 'proforma_number_format',
-            'credit_note' => 'credit_note_number_format',
+        $supplierTemplate = match ($invoiceType) {
+            'invoice' => trim((string) ($row['invoice_number_format'] ?? '')),
+            'proforma' => trim((string) ($row['quote_number_format'] ?? '')) !== ''
+                ? trim((string) ($row['quote_number_format'] ?? ''))
+                : trim((string) ($row['proforma_number_format'] ?? '')),
+            'credit_note' => trim((string) ($row['credit_note_number_format'] ?? '')),
+            'quote' => trim((string) ($row['quote_number_format'] ?? '')),
         };
-        $supplierTemplate = trim((string) ($row[$perSupplierColumn] ?? ''));
 
         // Per-supplier override má přednost; pokud je prázdný, fallback na global cfg.
         $template = $supplierTemplate !== ''
