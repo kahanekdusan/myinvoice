@@ -1052,6 +1052,55 @@ final class InvoiceRepository
     }
 
     /**
+     * Vygeneruje nový token pro veřejný odkaz na fakturu a resetuje tracking otevření.
+     */
+    public function rotatePublicViewToken(int $invoiceId): string
+    {
+        $token = bin2hex(random_bytes(32)); // 64 hex chars
+        $hash = hash('sha256', $token);
+
+        $this->db->pdo()->prepare(
+            'UPDATE invoices
+                SET public_view_token_hash = ?,
+                    public_view_token_created_at = NOW(),
+                    public_link_sent_at = NOW(),
+                    public_first_opened_at = NULL,
+                    public_last_opened_at = NULL,
+                    public_open_count = 0,
+                    public_first_viewed_at = NULL,
+                    public_last_viewed_at = NULL,
+                    public_view_count = 0,
+                    public_viewed_seconds = 0
+              WHERE id = ?'
+        )->execute([$hash, $invoiceId]);
+
+        return $token;
+    }
+
+    /**
+     * Najde fakturu podle public tokenu (porovnává se SHA-256 hash tokenu).
+     */
+    public function findByPublicViewToken(string $token): ?array
+    {
+        $hash = hash('sha256', $token);
+
+        $stmt = $this->db->pdo()->prepare(
+            'SELECT id
+               FROM invoices
+              WHERE public_view_token_hash = ?
+              LIMIT 1'
+        );
+        $stmt->execute([$hash]);
+
+        $id = $stmt->fetchColumn();
+        if ($id === false) {
+            return null;
+        }
+
+        return $this->find((int) $id);
+    }
+
+    /**
      * Tracking prvního/posledního otevření veřejného odkazu.
      */
     public function markPublicLinkOpened(int $invoiceId): void
