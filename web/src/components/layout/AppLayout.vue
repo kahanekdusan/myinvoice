@@ -94,8 +94,6 @@ const ICONS = {
 
 const navSections = computed<NavSection[]>(() => {
   const isAdmin = auth.user?.role === 'admin'
-  // Daňový optimalizátor (paušál vs standardní režim) je jen pro OSVČ (fyzická osoba).
-  const isOsvc = supplierStore.currentSupplier?.taxpayer_type === 'fo'
   const sections: NavSection[] = [
     { items: [{ to: '/', label: t('nav.dashboard'), icon: ICONS.dashboard }] },
     {
@@ -152,7 +150,7 @@ const navSections = computed<NavSection[]>(() => {
         { to: '/reports/dph-book',    label: t('nav.reports_dph_book'),    icon: ICONS.tax_book },
         { to: '/reports/shv',         label: t('nav.reports_shv'),         icon: ICONS.tax_shv },
         { to: '/reports/income-tax',  label: t('nav.reports_income_tax'),  icon: ICONS.tax_income },
-        ...(isOsvc ? [{ to: '/tax', label: t('nav.tax_optimizer'), icon: ICONS.tax_optimizer }] : []),
+        { to: '/tax', label: t('nav.tax_optimizer'), icon: ICONS.tax_optimizer },
         { to: '/reports/submissions', label: t('nav.reports_submissions'), icon: ICONS.tax_archive },
         { to: '/reports/monthly-export', label: t('nav.reports_monthly_export'), icon: ICONS.exports },
       ],

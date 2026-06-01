@@ -43,6 +43,8 @@ final class VarsymbolGenerator
     private const VALID_PERIODS   = ['year', 'month', 'none'];
     private const DEFAULT_PERIOD  = 'month';
 
+    private ?bool $supportsClientScopedCounters = null;
+
     public function __construct(
         private readonly Config $config,
         private readonly Connection $db,
@@ -97,11 +99,19 @@ final class VarsymbolGenerator
         $for       = $for ?? new \DateTimeImmutable('today');
         $periodKey = $this->makePeriodKey($period, $for);
 
-        $stmt = $this->db->pdo()->prepare(
-            'SELECT last_number FROM invoice_counters
-              WHERE supplier_id = ? AND client_id = ? AND invoice_type = ? AND period = ?'
-        );
-        $stmt->execute([$supplierId, $counterClientId, $invoiceType, $periodKey]);
+        if ($this->supportsClientCounters()) {
+            $stmt = $this->db->pdo()->prepare(
+                'SELECT last_number FROM invoice_counters
+                  WHERE supplier_id = ? AND client_id = ? AND invoice_type = ? AND period = ?'
+            );
+            $stmt->execute([$supplierId, $counterClientId, $invoiceType, $periodKey]);
+        } else {
+            $stmt = $this->db->pdo()->prepare(
+                'SELECT last_number FROM invoice_counters
+                  WHERE supplier_id = ? AND invoice_type = ? AND period = ?'
+            );
+            $stmt->execute([$supplierId, $invoiceType, $periodKey]);
+        }
         $current = (int) ($stmt->fetchColumn() ?: 0);
 
         return $this->render($template, $for, $current + 1);
@@ -131,11 +141,19 @@ final class VarsymbolGenerator
         $periodKey = $this->makePeriodKey($period, $for);
 
         $pdo = $this->db->pdo();
-        $stmt = $pdo->prepare(
-            'SELECT last_number FROM invoice_counters
-              WHERE supplier_id = ? AND client_id = ? AND invoice_type = ? AND period = ?'
-        );
-        $stmt->execute([$supplierId, $counterClientId, $invoiceType, $periodKey]);
+        if ($this->supportsClientCounters()) {
+            $stmt = $pdo->prepare(
+                'SELECT last_number FROM invoice_counters
+                  WHERE supplier_id = ? AND client_id = ? AND invoice_type = ? AND period = ?'
+            );
+            $stmt->execute([$supplierId, $counterClientId, $invoiceType, $periodKey]);
+        } else {
+            $stmt = $pdo->prepare(
+                'SELECT last_number FROM invoice_counters
+                  WHERE supplier_id = ? AND invoice_type = ? AND period = ?'
+            );
+            $stmt->execute([$supplierId, $invoiceType, $periodKey]);
+        }
         $current = (int) ($stmt->fetchColumn() ?: 0);
         if ($current <= 0) return false;
 
@@ -143,11 +161,19 @@ final class VarsymbolGenerator
             return false;
         }
 
-        $upd = $pdo->prepare(
-            'UPDATE invoice_counters SET last_number = last_number - 1
-              WHERE supplier_id = ? AND client_id = ? AND invoice_type = ? AND period = ? AND last_number = ?'
-        );
-        $upd->execute([$supplierId, $counterClientId, $invoiceType, $periodKey, $current]);
+        if ($this->supportsClientCounters()) {
+            $upd = $pdo->prepare(
+                'UPDATE invoice_counters SET last_number = last_number - 1
+                  WHERE supplier_id = ? AND client_id = ? AND invoice_type = ? AND period = ? AND last_number = ?'
+            );
+            $upd->execute([$supplierId, $counterClientId, $invoiceType, $periodKey, $current]);
+        } else {
+            $upd = $pdo->prepare(
+                'UPDATE invoice_counters SET last_number = last_number - 1
+                  WHERE supplier_id = ? AND invoice_type = ? AND period = ? AND last_number = ?'
+            );
+            $upd->execute([$supplierId, $invoiceType, $periodKey, $current]);
+        }
 
         return $upd->rowCount() > 0;
     }
@@ -184,7 +210,7 @@ final class VarsymbolGenerator
      */
     private function resolveTemplateAndPeriod(int $supplierId, string $invoiceType, int $clientId): array
     {
-        $stmt = $this->db->pdo()->prepare(
+        $supStmt = $this->db->pdo()->prepare(
             'SELECT invoice_number_format, quote_number_format, proforma_number_format, credit_note_number_format,
                     invoice_number_period
                FROM supplier WHERE id = ? LIMIT 1'
@@ -192,13 +218,11 @@ final class VarsymbolGenerator
         $supStmt->execute([$supplierId]);
         $supRow = $supStmt->fetch(PDO::FETCH_ASSOC) ?: [];
 
-        $supplierTemplate = match ($invoiceType) {
-            'invoice' => trim((string) ($row['invoice_number_format'] ?? '')),
-            'proforma' => trim((string) ($row['quote_number_format'] ?? '')) !== ''
-                ? trim((string) ($row['quote_number_format'] ?? ''))
-                : trim((string) ($row['proforma_number_format'] ?? '')),
-            'credit_note' => trim((string) ($row['credit_note_number_format'] ?? '')),
-            'quote' => trim((string) ($row['quote_number_format'] ?? '')),
+        $col = match ($invoiceType) {
+            'invoice' => 'invoice_number_format',
+            'proforma' => 'proforma_number_format',
+            'credit_note' => 'credit_note_number_format',
+            'quote' => 'quote_number_format',
         };
 
         $clientTemplate = '';
@@ -250,18 +274,49 @@ final class VarsymbolGenerator
     {
         $pdo = $this->db->pdo();
 
-        $stmt = $pdo->prepare(
-            'INSERT INTO invoice_counters (supplier_id, client_id, invoice_type, period, last_number)
-             VALUES (?, ?, ?, ?, 1)
-             ON DUPLICATE KEY UPDATE last_number = last_number + 1'
-        );
-        $stmt->execute([$supplierId, $clientId, $invoiceType, $periodKey]);
+        if ($this->supportsClientCounters()) {
+            $stmt = $pdo->prepare(
+                'INSERT INTO invoice_counters (supplier_id, client_id, invoice_type, period, last_number)
+                 VALUES (?, ?, ?, ?, 1)
+                 ON DUPLICATE KEY UPDATE last_number = last_number + 1'
+            );
+            $stmt->execute([$supplierId, $clientId, $invoiceType, $periodKey]);
 
-        $stmt = $pdo->prepare(
-            'SELECT last_number FROM invoice_counters
-              WHERE supplier_id = ? AND client_id = ? AND invoice_type = ? AND period = ?'
-        );
-        $stmt->execute([$supplierId, $clientId, $invoiceType, $periodKey]);
+            $stmt = $pdo->prepare(
+                'SELECT last_number FROM invoice_counters
+                  WHERE supplier_id = ? AND client_id = ? AND invoice_type = ? AND period = ?'
+            );
+            $stmt->execute([$supplierId, $clientId, $invoiceType, $periodKey]);
+        } else {
+            $stmt = $pdo->prepare(
+                'INSERT INTO invoice_counters (supplier_id, invoice_type, period, last_number)
+                 VALUES (?, ?, ?, 1)
+                 ON DUPLICATE KEY UPDATE last_number = last_number + 1'
+            );
+            $stmt->execute([$supplierId, $invoiceType, $periodKey]);
+
+            $stmt = $pdo->prepare(
+                'SELECT last_number FROM invoice_counters
+                  WHERE supplier_id = ? AND invoice_type = ? AND period = ?'
+            );
+            $stmt->execute([$supplierId, $invoiceType, $periodKey]);
+        }
         return (int) $stmt->fetchColumn();
+    }
+
+    private function supportsClientCounters(): bool
+    {
+        if ($this->supportsClientScopedCounters !== null) {
+            return $this->supportsClientScopedCounters;
+        }
+
+        try {
+            $stmt = $this->db->pdo()->query("SHOW COLUMNS FROM invoice_counters LIKE 'client_id'");
+            $this->supportsClientScopedCounters = $stmt !== false && $stmt->fetch(PDO::FETCH_ASSOC) !== false;
+        } catch (\Throwable) {
+            $this->supportsClientScopedCounters = false;
+        }
+
+        return $this->supportsClientScopedCounters;
     }
 }

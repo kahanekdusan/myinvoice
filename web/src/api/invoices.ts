@@ -335,7 +335,11 @@ export const invoicesApi = {
    * Vrátí náhled, jaké číslo faktura dostane při Vystavení (BEZ inkrementu counteru).
    * Používá se v editoru jako placeholder „automaticky: JD2026-01".
    */
-  previewVarsymbol: (type: 'invoice' | 'proforma' | 'credit_note' | 'quote', issueDate: string) =>
+  previewVarsymbol: (
+    type: 'invoice' | 'proforma' | 'credit_note' | 'quote',
+    issueDate: string,
+    clientId?: number,
+  ) =>
     api.get<{ varsymbol: string; has_template: boolean }>(
       `/invoices/preview-varsymbol`,
       { params: { type, issue_date: issueDate, ...(clientId ? { client_id: clientId } : {}) } },
@@ -353,8 +357,16 @@ export const invoicesApi = {
   // Akce nad fakturou
   issue:    (id: number, opts?: { numbering_type?: 'quote' }) =>
     api.post<Invoice>(`/invoices/${id}/issue`, opts || {}).then(r => r.data),
-  markPaid: (id: number, paidAt?: string) =>
-    api.post<Invoice>(`/invoices/${id}/mark-paid`, { paid_at: paidAt || new Date().toISOString().slice(0, 10) }).then(r => r.data),
+  markPaid: (
+    id: number,
+    paidAt?: string,
+    opts?: { sendThanks?: boolean; thanksTrigger?: 'manual' | 'bulk' },
+  ) =>
+    api.post<Invoice>(`/invoices/${id}/mark-paid`, {
+      paid_at: paidAt || new Date().toISOString().slice(0, 10),
+      ...(opts?.sendThanks ? { sendThanks: true } : {}),
+      ...(opts?.thanksTrigger ? { thanksTrigger: opts.thanksTrigger } : {}),
+    }).then(r => r.data),
   unmarkPaid: (id: number) =>
     api.post<Invoice>(`/invoices/${id}/unmark-paid`, {}).then(r => r.data),
   cancel: (id: number, mode: 'internal' | 'credit_note', reason: string = '') =>
