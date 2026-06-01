@@ -22,6 +22,24 @@ final class CrmAggregationService
     public function __construct(private readonly Connection $db) {}
 
     /**
+     * SQL predikát pro pohledávkové doklady (co nám klienti dluží), alias `i`.
+     * Kromě ostrých faktur a dobropisů zahrnuje i NEZAPLACENÉ NESPÁROVANÉ proformy
+     * (proforma bez dceřiného ostrého daňového dokladu) — ty jsou reálný dluh.
+     * Spárovaná proforma se vynechá, aby se dluh nepočítal dvakrát (nese ho ostrý doklad).
+     * Kombinuj VŽDY se statusem IN ('issued','sent','reminded') — vyřadí zaplacené/storno.
+     */
+    private function receivableDocTypeSql(): string
+    {
+        // Zachovej původní množinu (vše kromě proforem) a NAVÍC přidej nespárované
+        // proformy (bez dceřiného ostrého daňového dokladu) — ty jsou reálný dluh.
+        // Záměrně `!= 'proforma'` (ne IN-list), aby se nezahodily případné jiné typy
+        // (cancellation apod.), které sem padaly i dosud. Kombinuj se status filtrem.
+        return "(i.invoice_type != 'proforma'"
+             . " OR NOT EXISTS (SELECT 1 FROM invoices ch"
+             . " WHERE ch.parent_invoice_id = i.id AND ch.invoice_type = 'invoice'))";
+    }
+
+    /**
      * Volá sp_recompute_crm_monthly_summary pro daný tenant.
      * Manuálně z admin UI nebo z cron jobu.
      */
@@ -97,6 +115,7 @@ final class CrmAggregationService
         }
         $stmt = $this->db->pdo()->prepare(
             "SELECT period_ym, currency, revenue, revenue_net, costs, costs_net,
+                    revenue_czk, revenue_net_czk, costs_czk, costs_net_czk,
                     invoice_count, purchase_count, vat_output, vat_input
                FROM crm_monthly_summary
               WHERE supplier_id = ?{$where}
@@ -108,6 +127,8 @@ final class CrmAggregationService
         return array_map(function ($r) {
             $rev = (float) $r['revenue'];
             $costs = (float) $r['costs'];
+            $revCzk = (float) ($r['revenue_czk'] ?? 0);
+            $costsCzk = (float) ($r['costs_czk'] ?? 0);
             return [
                 'period'          => (string) $r['period_ym'],
                 'currency'        => (string) $r['currency'],
@@ -116,6 +137,11 @@ final class CrmAggregationService
                 'costs'           => $costs,
                 'costs_net'       => (float) $r['costs_net'],
                 'profit'          => $rev - $costs,
+                'revenue_czk'     => $revCzk,
+                'revenue_net_czk' => (float) ($r['revenue_net_czk'] ?? 0),
+                'costs_czk'       => $costsCzk,
+                'costs_net_czk'   => (float) ($r['costs_net_czk'] ?? 0),
+                'profit_czk'      => $revCzk - $costsCzk,
                 'invoice_count'   => (int) $r['invoice_count'],
                 'purchase_count'  => (int) $r['purchase_count'],
                 'vat_output'      => (float) $r['vat_output'],
@@ -238,6 +264,11 @@ final class CrmAggregationService
              WHERE pi.supplier_id = ?
                AND pi.issue_date >= ?
                AND pi.status NOT IN ('draft', 'cancelled')
+               -- Spárovaná/zaplacená záloha (advance) nese náklad finální faktura → vyřadit
+               AND NOT (COALESCE(pi.document_kind, '') = 'advance'
+                        AND (pi.status = 'paid'
+                             OR EXISTS (SELECT 1 FROM purchase_invoices adv_s
+                                         WHERE adv_s.advance_purchase_invoice_id = pi.id)))
           GROUP BY pi.vendor_id, c.company_name
           ORDER BY costs_czk DESC
              LIMIT " . (int) $limit;
@@ -267,6 +298,7 @@ final class CrmAggregationService
     {
         $stmt = $this->db->pdo()->prepare(
             "SELECT period_ym, currency, revenue, revenue_net, costs, costs_net,
+                    revenue_czk, revenue_net_czk, costs_czk, costs_net_czk,
                     invoice_count, purchase_count, vat_output, vat_input
                FROM crm_monthly_summary
               WHERE supplier_id = ? AND period_ym = ?
@@ -285,6 +317,8 @@ final class CrmAggregationService
             "SELECT currency,
                     SUM(revenue) AS revenue, SUM(revenue_net) AS revenue_net,
                     SUM(costs)   AS costs,   SUM(costs_net)   AS costs_net,
+                    SUM(revenue_czk) AS revenue_czk, SUM(revenue_net_czk) AS revenue_net_czk,
+                    SUM(costs_czk)   AS costs_czk,   SUM(costs_net_czk)   AS costs_net_czk,
                     SUM(invoice_count) AS invoice_count,
                     SUM(purchase_count) AS purchase_count,
                     SUM(vat_output) AS vat_output, SUM(vat_input) AS vat_input
@@ -307,6 +341,12 @@ final class CrmAggregationService
             'costs'          => (float) $r['costs'],
             'costs_net'      => (float) $r['costs_net'],
             'profit'         => (float) $r['revenue'] - (float) $r['costs'],
+            // CZK-přepočtené hodnoty (pro agregaci „Vše" napříč měnami)
+            'revenue_czk'     => (float) ($r['revenue_czk'] ?? 0),
+            'revenue_net_czk' => (float) ($r['revenue_net_czk'] ?? 0),
+            'costs_czk'       => (float) ($r['costs_czk'] ?? 0),
+            'costs_net_czk'   => (float) ($r['costs_net_czk'] ?? 0),
+            'profit_czk'      => (float) ($r['revenue_czk'] ?? 0) - (float) ($r['costs_czk'] ?? 0),
             'invoice_count'  => (int) $r['invoice_count'],
             'purchase_count' => (int) $r['purchase_count'],
             'vat_output'     => (float) $r['vat_output'],
@@ -351,7 +391,7 @@ final class CrmAggregationService
          LEFT JOIN currencies c ON c.id = i.currency_id
              WHERE i.supplier_id = ?
                AND i.status IN ('issued', 'sent', 'reminded')
-               AND i.invoice_type != 'proforma'
+               AND " . $this->receivableDocTypeSql() . "
           GROUP BY bucket, currency
           ORDER BY currency, FIELD(bucket, 'not_due', 'overdue_30', 'overdue_60', 'overdue_90', 'overdue_90_plus')
         ";
@@ -499,6 +539,75 @@ final class CrmAggregationService
     }
 
     /**
+     * Vendor concentration risk — % nákladů z top dodavatele.
+     * Analogie clientConcentration(), ale nad přijatými fakturami (závislost na dodavateli).
+     *
+     * @return array{top1_share: float, top3_share: float, top5_share: float, total_vendors: int,
+     *               pareto_80_count: int, risk_level: string, currency: string}
+     */
+    public function vendorConcentration(int $supplierId, int $monthsBack = 12, ?string $currency = null): array
+    {
+        $vendors = $this->topVendors($supplierId, $monthsBack, 50, $currency);
+        if (empty($vendors)) {
+            return ['top1_share' => 0, 'top3_share' => 0, 'top5_share' => 0, 'total_vendors' => 0,
+                    'pareto_80_count' => 0, 'risk_level' => 'low', 'currency' => 'CZK'];
+        }
+        $cur = $vendors[0]['currency'];
+
+        $top1 = $vendors[0]['percent_share'] ?? 0;
+        $top3 = array_sum(array_slice(array_column($vendors, 'percent_share'), 0, 3));
+        $top5 = array_sum(array_slice(array_column($vendors, 'percent_share'), 0, 5));
+
+        // Pareto — kolik dodavatelů dělá 80 % nákladů
+        $pareto80 = 0;
+        $cumul = 0;
+        foreach ($vendors as $v) {
+            $cumul += $v['percent_share'];
+            $pareto80++;
+            if ($cumul >= 80) break;
+        }
+
+        $riskLevel = $top1 > 40 ? 'high' : ($top1 > 25 ? 'medium' : 'low');
+
+        return [
+            'top1_share'      => round($top1, 1),
+            'top3_share'      => round($top3, 1),
+            'top5_share'      => round($top5, 1),
+            'total_vendors'   => count($vendors),
+            'pareto_80_count' => $pareto80,
+            'risk_level'      => $riskLevel,
+            'currency'        => $cur,
+        ];
+    }
+
+    /**
+     * DPO (Days Payable Outstanding) za posledních N měsíců.
+     * Průměrný počet dní mezi vystavením přijaté faktury a její úhradou dodavateli.
+     * Doplněk k DSO — spolu dávají pracovní kapitálový cyklus (DSO − DPO).
+     *
+     * @return array{avg_days: float, sample_size: int, period_months: int}
+     */
+    public function daysPayableOutstanding(int $supplierId, int $monthsBack = 12): array
+    {
+        $start = (new \DateTimeImmutable())->modify('-' . $monthsBack . ' months')->format('Y-m-d');
+        $stmt = $this->db->pdo()->prepare(
+            "SELECT AVG(DATEDIFF(paid_at, issue_date)) AS avg_days, COUNT(*) AS sample
+               FROM purchase_invoices
+              WHERE supplier_id = ?
+                AND status = 'paid'
+                AND paid_at IS NOT NULL
+                AND issue_date >= ?"
+        );
+        $stmt->execute([$supplierId, $start]);
+        $row = $stmt->fetch(\PDO::FETCH_ASSOC) ?: [];
+        return [
+            'avg_days'      => round((float) ($row['avg_days'] ?? 0), 1),
+            'sample_size'   => (int) ($row['sample'] ?? 0),
+            'period_months' => $monthsBack,
+        ];
+    }
+
+    /**
      * Expense breakdown po kategoriích (vyžaduje expense_categories assignment).
      *
      * @return list<array{category_id:?int, code:?string, label:?string, total:float, count:int, percent:float}>
@@ -520,6 +629,11 @@ final class CrmAggregationService
              WHERE pi.supplier_id = ?
                AND pi.issue_date >= ?
                AND pi.status NOT IN ('draft', 'cancelled')
+               -- Spárovaná/zaplacená záloha (advance) nese náklad finální faktura → vyřadit (jako topVendors)
+               AND NOT (COALESCE(pi.document_kind, '') = 'advance'
+                        AND (pi.status = 'paid'
+                             OR EXISTS (SELECT 1 FROM purchase_invoices adv_s
+                                         WHERE adv_s.advance_purchase_invoice_id = pi.id)))
           GROUP BY pi.expense_category_id, ec.code, ec.label
           ORDER BY total DESC
         ";
@@ -529,6 +643,47 @@ final class CrmAggregationService
         $sum = array_sum(array_column($rows, 'total'));
         return array_map(fn ($r) => [
             'category_id' => $r['expense_category_id'] !== null ? (int) $r['expense_category_id'] : null,
+            'code'        => $r['code'] !== null ? (string) $r['code'] : null,
+            'label'       => $r['label'] !== null ? (string) $r['label'] : null,
+            'total'       => (float) $r['total'],
+            'count'       => (int) $r['cnt'],
+            'percent'     => $sum > 0 ? round(((float) $r['total'] / $sum) * 100, 1) : 0.0,
+        ], $rows);
+    }
+
+    /**
+     * Revenue breakdown po kategoriích tržeb (vyžaduje revenue_categories assignment).
+     * Symetrie k {@see expenseBreakdown} pro vydané faktury.
+     *
+     * @return list<array{category_id:?int, code:?string, label:?string, total:float, count:int, percent:float}>
+     */
+    public function revenueBreakdown(int $supplierId, int $monthsBack = 12, ?string $currency = null): array
+    {
+        // CZK přepočet — bez něj sumace EUR+CZK ve stejné kategorii dává nesmysl.
+        // Parametr $currency BC, vždy CZK (jako expenseBreakdown).
+        unset($currency);
+        $start = (new \DateTimeImmutable())->modify('-' . $monthsBack . ' months')->format('Y-m-d');
+        $params = [$supplierId, $start];
+        $sql = "
+            SELECT i.revenue_category_id, rc.code, rc.label,
+                   SUM(COALESCE(i.total_with_vat, 0) * COALESCE(IF(cur.code = 'CZK', 1, i.exchange_rate), 1)) AS total,
+                   COUNT(*) AS cnt
+              FROM invoices i
+         LEFT JOIN revenue_categories rc ON rc.id = i.revenue_category_id
+         LEFT JOIN currencies cur ON cur.id = i.currency_id
+             WHERE i.supplier_id = ?
+               AND i.issue_date >= ?
+               AND i.status NOT IN ('draft', 'cancelled')
+               AND i.invoice_type != 'proforma'  -- proformy vynechat (nejsou daňový doklad)
+          GROUP BY i.revenue_category_id, rc.code, rc.label
+          ORDER BY total DESC
+        ";
+        $stmt = $this->db->pdo()->prepare($sql);
+        $stmt->execute($params);
+        $rows = $stmt->fetchAll(\PDO::FETCH_ASSOC);
+        $sum = array_sum(array_column($rows, 'total'));
+        return array_map(fn ($r) => [
+            'category_id' => $r['revenue_category_id'] !== null ? (int) $r['revenue_category_id'] : null,
             'code'        => $r['code'] !== null ? (string) $r['code'] : null,
             'label'       => $r['label'] !== null ? (string) $r['label'] : null,
             'total'       => (float) $r['total'],

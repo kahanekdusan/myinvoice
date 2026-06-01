@@ -41,6 +41,8 @@ Nad formulářem je **drag & drop zóna**. Pokud máš PDF od dodavatele:
   - **Pokud ne** (běžné PDF bez přílohy) → ve fázi 1 musíš vyplnit ručně. Ve fázi 2c (plánováno) doplníme AI extrakci přes Anthropic Claude — viz `source/09-fork-integration-plan.md`.
 - Originál PDF se po prvním uložení faktury automaticky **archivuje** mimo webroot a v detailu si ho můžeš kdykoli stáhnout zpět.
 
+> 💡 *Od v4.9.0:* doklad jde nahrát **už při zakládání nové faktury** (po přetažení se ukáže kartička „soubor připraven, nahraje se po uložení") i **z detailu** faktury, která zatím doklad nemá — dřív to šlo jen v editaci. Kromě PDF lze přetáhnout i **fotku** (JPG/PNG/WEBP/HEIC), systém ji převede na PDF.
+
 Limity:
 - Max 20 MiB per soubor
 - Akceptujeme pouze application/pdf (magic bytes `%PDF-` se ověřují server-side)
@@ -75,6 +77,15 @@ Tlačítkem **+ Přidat položku** přidej řádek. Per řádek:
 
 Souhrn dole se přepočítá automaticky po každé změně.
 
+> 💡 **Ceny „s DPH" (brutto režim)** *(od v4.7.0)* — přepínačem **Ceny zadávám
+> s DPH** (u DPH v hlavičce) lze zadat položky **včetně DPH** (typicky účtenka /
+> paragon), takže celková částka sedí na haléř. DPH se pak počítá „shora"
+> koeficientovou metodou (§37 ZDP). Zadání ceny do sloupce „Celkem s DPH" respektuje
+> aktuální režim (nepřepíná ho); jednotková cena se v detailu i PDF zobrazuje jako
+> netto. Funguje stejně jako u vystavených faktur — viz
+> [§ 11.2.6](11_Faktura_editor.md#1126-ceny-s-dph-vs-bez-dph-brutto--netto-režim).
+> AI import účtenek režim nastaví sám.
+
 ### 10.2.4 Daňová uznatelnost a nárok na odpočet
 
 V boxu **Klasifikace** jsou dva nezávislé příznaky řídící, jak faktura vstupuje do daňových výkazů:
@@ -91,6 +102,49 @@ V boxu **Klasifikace** jsou dva nezávislé příznaky řídící, jak faktura v
 - **Daňově uznatelný náklad** — řídí pouze daň z příjmů: když je vypnuto, náklad se nezahrne do orientačního hospodářského výsledku (DPFO/DPPO). S DPH to nesouvisí (faktura může mít odpočitatelné DPH a být daňově neuznatelná, i naopak).
 
 Oba příznaky jsou vidět i v **detailu** přijaté faktury (box Měna/DPH).
+
+#### Rekapitulace DPH dle dokladu (§ 73 ZDPH)
+
+> Přidáno ve v4.9.0.
+
+Pod položkami je box **Rekapitulace DPH** se základem a daní **za každou sazbu**. Hodnoty se dopočítají ze řádků, ale pokud doklad dodavatele uvádí kvůli zaokrouhlení jiný **základ** nebo **DPH**, můžeš je **přepsat** přesně podle dokladu. Důvod je daňový: nárok na odpočet je svázaný s **částkou daně uvedenou na dokladu** (§ 73 odst. 6 ZDPH), proto je primární shoda s dokladem, ne náš přepočet.
+
+- Přepsat lze základ i DPH, samostatně pro každou sazbu. Ručně upravené pole je zvýrazněné; odkaz **Spočítat automaticky** vrátí vypočtenou hodnotu.
+- Override se uloží do faktury a promítne se konzistentně do **DPH přiznání, kontrolního hlášení, knihy DPH** i do **daně z příjmů** a daňového optimalizátoru.
+- Při **AI importu** se rekapitulace předvyplní automaticky dle dokladu (pro jednu i více sazeb), pokud sedí v toleranci.
+- Box se nezobrazuje u **reverse-charge** (na dokladu zahraničního dodavatele není česká DPH).
+
+#### Dodavatel neplátce DPH → bez nároku na odpočet
+
+> Přidáno v4.7.0.
+
+Pokud je dodavatel **neplátce DPH**, na jeho dokladu žádná DPH není a **není co
+odpočítat** — uplatnit odpočet by byla daňová chyba (neoprávněný odpočet v ř. 40
+přiznání / sekci B kontrolního hlášení). MyInvoice proto plátcovství dodavatele
+**sleduje a vynucuje**:
+
+- **Zjištění plátcovství** — autoritativně z **ARES** podle IČO (CZ), u
+  zahraničních EU subjektů z **VIES** podle DIČ. Ověří se online při výběru /
+  editaci dodavatele ve formuláři (výsledek se cachuje 24 h).
+- **Volba v editoru** — pod checkboxem „Reverse charge" je přepínač **„Dodavatel
+  je plátce DPH"**. Nastaví se automaticky podle ARES/VIES, ale můžeš ho vědomě
+  přepsat.
+- **Vynucení u neplátce** — když je dodavatel neplátce, faktura se automaticky
+  nastaví na **Nárok na odpočet = Bez nároku** (`vat_deduction='none'`), sazby
+  řádků se vynulují na 0 % a zobrazí se varování. Doklad pak do DPH evidence
+  nevstupuje (je to jen účetní náklad). Override je možný.
+- **AI import** — extraktor plátcovství ověří a u neplátce (signál „DIČ:
+  Neplátce DPH" / žádné DIČ + žádná DPH na řádcích, případně ARES) odpočet
+  automaticky zakáže a doplní varování (viz [§ 10.7](#107-ai-extrakce--kontrola-výsledků)).
+
+Plátcovství dodavatele je vidět i ve **výpisu klientů/dodavatelů** jako badge
+*Plátce DPH* (viz [§ 7.1](07_Klienti.md#71-seznam-klientů)).
+
+> 🛠️ **Zpětná oprava existujících dodavatelů** — po upgradu na v4.7.0 jednorázově
+> spusť `php api/bin/backfill-vendor-vat-payer.php`. Skript podle ARES/VIES doplní příznak
+> plátcovství a u neplátců opraví už zaevidované přijaté faktury (zakáže odpočet,
+> sazby na 0 %, **celková částka beze změny**). Výchozí běh je **dry-run** (jen
+> náhled); zápis až s `--apply`.
 
 ### 10.2.5 Platba v jiné měně (multi-currency)
 
@@ -122,6 +176,43 @@ Po uložení / přechodu na detail:
   - Z booked: Označit jako uhrazené / Stornovat
 - Tlačítko **Upravit** je dostupné jen u draft. Po označení jako přijatá je doklad immutable (kromě admin override `?force=1` u received).
 - Tlačítko **Smazat** je dostupné jen u draft. Pro pozdější stavy použij Stornovat.
+
+### 10.3.1 Propojení zálohy s vyúčtovací fakturou (proti dvojímu započtení)
+
+> Přidáno v4.3.11.
+
+Když ti dodavatel pošle nejdřív **zálohovou fakturu** (typ dokladu *Záloha* / proforma)
+a po zaplacení samostatnou **vyúčtovací (finální) fakturu**, máš v systému dva doklady
+na tentýž náklad. Bez propojení by se náklad počítal **dvakrát** (Náklady, CRM, daň
+z příjmů). Proto je lze spárovat.
+
+**Jak na to** — v detailu **finální** faktury je box **Zálohová faktura**:
+
+- Pokud vazba není, klikni **Spárovat se zálohou** a vyber zálohu od stejného
+  dodavatele. Nabídka řadí napřed zálohy ve **stejné měně** a s **nejbližší částkou**
+  (porovnává hrubou částku faktury *před* odečtem zálohy, takže i faktura uhrazená
+  zálohou „na 0 Kč" se napáruje správně).
+- Po spárování se zobrazí odkaz na zálohu a tlačítko **Zrušit propojení**. Na finální
+  fakturu se zároveň doplní odečet zálohy (`advance_paid_amount`), pokud byl nulový.
+- V detailu **zálohy** vidíš reverzně, kterou fakturou je vyúčtována. Nevyúčtovanou
+  zálohu lze spárovat i **odtud** — tlačítkem **Spárovat s fakturou** (nabídne
+  nepropojené vyúčtovací faktury téhož dodavatele). *(Obousměrné párování přidáno ve v4.8.0; tlačítka se zobrazí jen když existuje vhodný protějšek.)*
+
+Jedna záloha může být navázaná **jen na jednu** finální fakturu.
+
+**Co propojení (a zaplacení) ovlivní:**
+
+| Oblast | Chování zálohy |
+|---|---|
+| **Náklady, CRM statistiky** | Spárovaná **nebo zaplacená** záloha se nepočítá (náklad nese vyúčtovací faktura). Nezaplacená a nespárovaná záloha se počítá jako očekávaný náklad. |
+| **Daň z příjmů (DPFO/DPPO)** | Záloha **nikdy** není uznatelný náklad (není daňový doklad) — bez ohledu na zaplacení/párování. |
+| **Výkazy DPH** (Kniha DPH, DPHDP3, KH, souhrnné hlášení) | Záloha do nich **nevstupuje vůbec** (není daňový doklad; tím je až vyúčtovací faktura). |
+| **Závazky / cashflow** | Nezaplacená záloha zůstává jako reálný závazek k úhradě. |
+
+**AI návrh propojení** — když naimportuješ vyúčtovací fakturu přes AI extrakci z PDF
+(viz 10.7) a ta odkazuje na zálohu (text typu *„zaplaceno zálohou č. X"*), systém
+zkusí najít odpovídající zálohu a v detailu nabídne **návrh propojení**. Stačí ho
+**Potvrdit** (nebo **Zamítnout**) — nic se nepáruje automaticky.
 
 ## 10.4 Scan inbox — automatický import z adresáře
 
@@ -255,6 +346,15 @@ php api/bin/recheck-ai-extracted-invoices.php --supplier-id=1
 php api/bin/recheck-ai-extracted-invoices.php --threshold=0.05
 ```
 
+### Dodavatel neplátce DPH
+
+> Přidáno v4.7.0.
+
+Při AI importu se ověří **plátcovství dodavatele** (ARES/VIES, případně signál
+z dokladu „DIČ: Neplátce DPH"). U neplátce se automaticky nastaví **Bez nároku
+na odpočet**, vynulují sazby a doplní varování — aby se neoprávněný odpočet
+nedostal do přiznání. Detail viz [§ 10.2.4](#1024-daňová-uznatelnost-a-nárok-na-odpočet).
+
 ## 10.8 Audit log
 
 Akce s přijatými fakturami jsou logované v aktivním logu (Systém → Log):
@@ -265,6 +365,8 @@ Akce s přijatými fakturami jsou logované v aktivním logu (Systém → Log):
 - `purchase_invoice.exchange_rate_set`
 - `purchase_invoice.transitioned` (s payloadem `{from, to}`)
 - `purchase_invoice.extraction_warning_dismissed`
+- `purchase_invoice.advance_linked` / `advance_unlinked` (propojení se zálohou)
+- `purchase_invoice.advance_suggestion_dismissed` (zamítnutý AI návrh propojení)
 - `purchase_invoice.deleted`
 - `purchase_invoice.pdf_uploaded` / `pdf_downloaded`
 - `purchase_invoice.our_pdf_downloaded`

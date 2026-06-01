@@ -73,6 +73,40 @@ V hlavičce konceptu je pole **Číslo faktury** (resp. „Číslo zálohové fa
 Šablonu pro automatické generování nastavuješ v **Systém → Dodavatelé →
 [tvůj dodavatel] → Číslování faktur** — viz [§ 18.5.3](18_Multi_supplier.md#1853-číslování-faktur).
 
+### 11.2.6 Ceny „s DPH" vs „bez DPH" (brutto / netto režim)
+
+> Přidáno v4.7.0.
+
+Přepínač **Ceny zadávám s DPH / bez DPH** (v hlavičce u DPH) určuje, jak se na
+faktuře počítá daň:
+
+| Režim | Co je vstupem | Jak se počítá DPH | Typické použití |
+|---|---|---|---|
+| **bez DPH (netto)** *(výchozí)* | cena bez DPH | „zdola": `DPH = základ × sazba` | běžné B2B faktury |
+| **s DPH (brutto)** | cena včetně DPH | „shora" koeficientem (§37 ZDP): `DPH = round(brutto × sazba/(100+sazba))`, `základ = brutto − DPH` | účtenky, paragony, B2C, kde má sedět **celková částka** |
+
+V režimu **s DPH** se zadává cena do sloupce **„Celkem s DPH"** a celková částka
+faktury **sedí na haléř** — např. 33 Kč s DPH @ 21 % → základ **27,27** / DPH
+**5,73** / celkem **33,00** (ne 32,9967, které by vyšlo přepočtem zdola). U více
+řádků stejné sazby se haléřové reziduum dorovná na nejsilnějším řádku, takže
+součet daně přesně odpovídá dani z celkového brutto — **detail faktury, PDF i
+DPH výkazy (přiznání, kontrolní hlášení, kniha DPH) ukazují stejné číslo.**
+
+- **Zadání „Celkem s DPH":** editor **respektuje aktuální režim** dokladu (nepřepíná
+  ho za tebe). V běžném režimu „bez DPH" se z brutto **dopočítá jednotková cena bez
+  DPH** (odečtením DPH shora); v režimu „s DPH" se uloží brutto. Režim přepínáš jen
+  ručně přepínačem nahoře.
+- **Zobrazení jednotkové ceny:** v detailu, PDF i exportech (ISDOC, Pohoda) se „Cena/MJ"
+  vždy ukazuje jako **netto** (bez DPH) — i v režimu „s DPH", kde se netto dopočítá z
+  řádkového základu.
+- **Předvyplnění per dodavatel:** výchozí režim nové faktury nastavíš v
+  **Nastavení → Můj dodavatel → Ceny s DPH** (viz [§ 18.3](18_Multi_supplier.md#183-co-je-per-dodavatel-izolované)).
+- **Zpětná kompatibilita:** výchozí stav je „bez DPH" a všechny existující
+  faktury zůstávají beze změny.
+
+> 💡 Režim „s DPH" funguje stejně i u **přijatých faktur** (viz [§ 10.2.3](10_Prijate_faktury.md#1023-položky))
+> a u **šablon pravidelné fakturace** (viz [§ 15.2.2](15_Pravidelne_fakturace.md#1522-sekce-faktura)).
+
 ## 11.3 Položky
 
 Tabulka řádků faktury. Tlačítko **+ Přidat položku** přidá nový řádek.
@@ -82,9 +116,10 @@ Tabulka řádků faktury. Tlačítko **+ Přidat položku** přidá nový řáde
 | Popis | Co fakturuješ. Lze multiline. **Tip:** pokud je v popisu měsíc (`Konzultace 3/2026`), klonování faktury automaticky inkrementuje. |
 | Množství | Počet jednotek (kusy / hodiny / …) |
 | Jednotka | Z číselníku (default `h` / hodina). Číselník spravuješ v **Systém → Číselníky → Jednotky** — viz [§ 19.1.4](19_Nastaveni.md#1914-jednotky). |
-| Cena/jed. | Jednotková cena (bez DPH pokud máš DPH na konci, jinak včetně) |
+| Cena/jed. | Jednotková cena (v režimu „bez DPH" netto, v režimu „s DPH" brutto — viz [§ 11.2.6](#1126-ceny-s-dph-vs-bez-dph-brutto--netto-režim)) |
 | DPH | Sazba — `21 %`, `12 %`, `0 %` (osvobozeno), `RC` (reverse charge) |
 | Celkem | Auto-počítáno (množství × cena/jed.) |
+| Celkem s DPH | Cena řádku včetně DPH. Zadání respektuje aktuální režim: v režimu „bez DPH" se z brutto zpětně dopočte cena bez DPH, v režimu „s DPH" se uloží brutto — viz [§ 11.2.6](#1126-ceny-s-dph-vs-bez-dph-brutto--netto-režim). |
 
 ### 11.3.1 Drag & drop pořadí
 
@@ -311,6 +346,24 @@ Workflow:
 3. Klikneš **Vystavit daňový doklad** (tlačítko v detailu zálohové).
 4. Vytvoří se **daňový doklad** typu „Faktura" s automatickým **odečtem
    zaplacené zálohy** (záporná položka „Odpočet zálohy 92605001").
+
+### 11.8.1 Zpětné propojení už existujících dokladů
+
+> Přidáno ve v4.8.0.
+
+Pokud už máš v systému **oba doklady samostatně** (typicky po importu) — zálohovou
+i daňovou fakturu — lze je spárovat zpětně, z **kterékoli** strany:
+
+- **V detailu daňového dokladu** (bez vazby): tlačítko **Spárovat se zálohou** → vyber
+  zálohovou fakturu téhož odběratele.
+- **V detailu zálohové faktury** (bez navázaného dokladu): tlačítko **Spárovat
+  s daňovým dokladem** → vyber daňový doklad.
+
+Tlačítko se nabídne jen tehdy, když u daného odběratele existuje vhodný **nespárovaný
+protějšek**. Po propojení se na obou dokladech zobrazí křížový odkaz a tlačítko **Zrušit
+propojení**; na daňový doklad se doplní **odečet zálohy** (`advance_paid_amount`), pokud
+byl nulový — nejvýše však do výše částky dokladu (aby „K úhradě" nešlo do mínusu).
+Zaplacení se nemění. Propojená záloha (proforma) zároveň vypadne z pohledávek/po splatnosti.
 
 ## 11.9 Storno vs. dobropis
 

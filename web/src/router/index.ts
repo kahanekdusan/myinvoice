@@ -26,7 +26,11 @@ const routes: RouteRecordRaw[] = [
       { path: 'purchase-invoices/new',             name: 'purchase-invoice-new',     component: () => import('@/pages/purchase-invoices/InvoiceEditor.vue'), meta: { requiresWrite: true } },
       { path: 'purchase-invoices/:id(\\d+)',       name: 'purchase-invoice-detail',  component: () => import('@/pages/purchase-invoices/InvoiceDetail.vue') },
       { path: 'purchase-invoices/:id(\\d+)/edit',  name: 'purchase-invoice-edit',    component: () => import('@/pages/purchase-invoices/InvoiceEditor.vue'), meta: { requiresWrite: true } },
+      // Dokumenty (sekce Dokumenty — plán source/11)
+      { path: 'documents',              name: 'documents',        component: () => import('@/pages/documents/DocumentsBrowser.vue') },
+      { path: 'documents/:id(\\d+)',    name: 'document-detail',  component: () => import('@/pages/documents/DocumentDetail.vue') },
       { path: 'stats',                  name: 'stats',           component: () => import('@/pages/Stats.vue') },
+      { path: 'purchase-stats',         name: 'purchase-stats',  component: () => import('@/pages/PurchaseStats.vue') },
       { path: 'bank',                   name: 'bank-statements', component: () => import('@/pages/bank/StatementList.vue') },
       { path: 'bank/:id(\\d+)',         name: 'bank-detail',     component: () => import('@/pages/bank/StatementDetail.vue') },
       // Admin (M6)
@@ -48,6 +52,8 @@ const routes: RouteRecordRaw[] = [
       { path: 'reports/shv',            name: 'reports-shv',        component: () => import('@/pages/reports/SouhrnneHlaseniReport.vue') },
       { path: 'reports/income-tax',     name: 'reports-income-tax', component: () => import('@/pages/reports/IncomeTaxReport.vue') },
       { path: 'reports/submissions',    name: 'reports-submissions', component: () => import('@/pages/reports/TaxSubmissions.vue') },
+      { path: 'reports/monthly-export', name: 'reports-monthly-export', component: () => import('@/pages/reports/MonthlyExportReport.vue') },
+      { path: 'tax',                    name: 'tax-optimizer',      component: () => import('@/pages/tax/TaxOptimizer.vue') },
       { path: 'admin/email-templates',  name: 'admin-email-templates', component: () => import('@/pages/admin/EmailTemplates.vue'), meta: { adminOnly: true } },
       { path: 'admin/approvals',        name: 'admin-approvals', component: () => import('@/pages/admin/Approvals.vue'), meta: { adminOnly: true } },
       { path: 'recurring',              name: 'recurring',        component: () => import('@/pages/recurring/RecurringList.vue') },

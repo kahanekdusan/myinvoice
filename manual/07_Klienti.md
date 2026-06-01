@@ -20,6 +20,7 @@ Tabulka ukazuje:
 | Stát | 2-písmenný kód (CZ, SK, DE, …) |
 | Měna | Výchozí měna pro nové faktury |
 | Hlavní e-mail | Kontakt pro odesílání faktur |
+| Plátce DPH | Badge **Ano / Ne** (od v4.7.0) — zda je subjekt plátce DPH. Užitečné hlavně u **dodavatelů**: u neplátce nemá přijatá faktura nárok na odpočet (viz [§ 10.2.4](10_Prijate_faktury.md#1024-daňová-uznatelnost-a-nárok-na-odpočet)). Příznak se plní z ARES (CZ) / VIES (EU). |
 | Obrat letos | Suma vystavených faktur v aktuálním roce, v měně klienta |
 
 Nad tabulkou je vyhledávač (jméno / IČO) a filtr stavu (`Aktivní` / `Archivovaní`).
@@ -64,7 +65,7 @@ Doporučený postup pro českého klienta:
 | Výchozí měna | Pro nové faktury (lze přepsat per faktura) |
 | Výchozí DPH | Volitelný override (jinak se použije systémový default) |
 | Reverse charge | Zatrhni pro EU B2B klienty s DIČ — DPH 0 % + text „Daň přiznává odběratel" |
-| Splatnost (dny) | Volitelný override (jinak default 7 dní) |
+| Splatnost | Preset **7 dnů / 14 dnů / Měsíc / Vlastní**, nebo **Použít výchozí** = dědit z dodavatele. „Měsíc" = kalendářní měsíc (1. 2. → 1. 3., 31. 1. → 28. 2.), ne fixních 30 dní |
 | Poznámka | Interní text — nezobrazí se na faktuře |
 
 ## 7.3 Detail klienta

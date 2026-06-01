@@ -5,7 +5,452 @@ All notable changes to MyInvoice.cz are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [4.9.3] — 2026-06-01
+
+Per-faktura příznak „Osvobozeno od daně z příjmů" pro doklady mimo základ daně z příjmů (§ 4 ZDP / přefakturace) a sada vylepšení navigace — rychlé vytváření dokladů z horní lišty i bočního menu, předvyplnění zálohové faktury z odkazu a zpřehlednění dashboardu.
+
+### Added
+
+- **Příznak „Osvobozeno od daně z příjmů" na vydané faktuře ([#77](https://github.com/radekhulan/myinvoice/issues/77)).** Pro doklady, které nejsou základem daně z příjmů, ale pro DPH zůstávají běžným zdanitelným plněním — typicky prodej movité věci osvobozený dle § 4 odst. 1 písm. c) ZDP (vozidlo > 1 rok od nabytí) nebo přefakturace / průběžné položky (§ 23 odst. 4 ZDP). Příznak vyloučí částku ze základu daně z příjmů (výkaz DPFO/DPPO i daňový optimalizátor) a u OSVČ tím i z vyměřovacího základu SP/ZP (odvozen z dílčího základu § 7); ve výkazu se ukáže řádek „z toho osvobozeno". **DPH, kontrolní hlášení ani tržby/obrat nejsou dotčeny** (osvobození od daně z příjmů ≠ od DPH). Checkbox se v editoru nabízí jen u OSVČ — u s.r.o. § 4 neplatí a prodej majetku je vždy zdanitelný výnos.
+- **Rychlé vytváření z navigace.** V horní liště přibylo decentní tlačítko „+ Vytvořit" s menu (vydaná i zálohová faktura, pravidelná fakturace, klient, dodavatel, přijatá faktura) a v bočním menu nenápadné „+" u příslušných položek (objeví se po najetí myší). Dostupné jen pro uživatele s právem zápisu.
+- **Předvyplnění zálohové faktury z odkazu.** `/invoices/new?type=proforma` otevře editor rovnou jako zálohovou fakturu (lze kombinovat s `&client_id=`).
+
+### Changed
+
+- **Zpřehlednění dashboardu.** Odebrána redundantní akční tlačítka (přesunuta do „+ Vytvořit" v liště) i uvítací text a nadpis, aby stránka začínala rovnou daty.
+
+### Fixed
+
+- **ISDOC export — odběratel bez IČO.** Když klient nemá vyplněné IČO (typicky B2C / fyzická osoba), posílal se fiktivní `<ID>0</ID>`. Nově se vyzařuje prázdný `<ID></ID>` (XSD validní), takže účetní software nedostává neexistující identifikátor.
+- **Přepínání role Klient ⇄ Dodavatel při zakládání.** Přechod mezi „Nový klient" a „Nový dodavatel" (stejná stránka, jen jiný parametr) nepřeklopil roli formuláře, takže záznam mohl vzniknout se špatnou rolí. Role se nyní správně mění i bez znovunačtení stránky.
+
+## [4.9.2] — 2026-05-31
+
+Rekapitulace DPH se nově automaticky seedne z importovaného dokladu napříč všemi zdroji a oprava ISDOC exportu/importu dle oficiálního standardu 6.0.2 (typy dokladů a nedaňové doklady).
+
+### Added
+
+- **Automatická rekapitulace DPH z importovaného dokladu (§ 73 ZDPH).** Při importu přijaté faktury se rozpad DPH po sazbách nově převezme přímo z dokladu dodavatele a zapeče do uložené rekapitulace — sjednoceně ze všech zdrojů: ISDOC (`TaxTotal`), Pohoda (`invoiceSummary`), iDoklad (řádkové `Prices`) i AI extrakce z PDF. Nárok na odpočet tak sedí na částku daně uvedenou na dokladu. Drobné rozdíly se zapečou dle dokladu, větší se jen ohlásí jako varování (Fakturoid rozpad neposkytuje, proto se neseeduje).
+
+### Fixed
+
+- **ISDOC export — špatné typy dokladů.** `DocumentType` neodpovídal číselníku ISDOC 6.0.2: zálohová faktura se exportovala jako `2` (správně `4` — nedaňový zálohový list) a dobropis jako `5` (správně `2` — opravný daňový doklad). Účetní software tím dostával chybně zařazené doklady. Import čte typy reverzně shodně.
+- **ISDOC export — nedaňový doklad měl daňové řádky (pravidlo 4.1.5).** Zálohová faktura je nedaňový doklad (`VATApplicable=false`); nově se `VATApplicable=false` propisuje i do každé řádkové položky (`ClassifiedTaxCategory`), jak vyžaduje standard.
+- **ISDOC import — DPH z nedaňového dokladu.** Doklad či položka označené `VATApplicable=false` (neplátce DPH, nedaňový zálohový list) se nově importují s nulovou sazbou a prázdnou rekapitulací, takže se z nedaňového dokladu neeviduje DPH k odpočtu.
+
+## [4.9.1] — 2026-05-31
+
+Kompletní oprava importu z iDokladu po auditu celého mapování proti oficiálnímu iDoklad v3 API (Solitea SDK) — částky, přílohy, měny, země, kurzy i čísla dokladů. Řeší [#80](https://github.com/radekhulan/myinvoice/issues/80).
+
+### Fixed
+
+- **Importované faktury měly nulové částky (#80).** iDoklad v3 nevrací jednotkovou cenu položky v poli `UnitPrice`, ale vnořeně v `Prices` (autoritativní netto `Prices.TotalWithoutVat`); navíc cena může být včetně DPH dle `PriceType`. Import četl neexistující pole, takže **všechny** vydané i přijaté faktury (i dobropisy) skončily s částkou 0 Kč. Nově se čte správné netto a převádí dle režimu ceny.
+- **U přijatých faktur chyběly PDF přílohy.** Používal se neexistující endpoint (`/ReceivedInvoices/{id}/Attachments`) vracející 404. Opraveno na `/v3/Attachments/{id}/ReceivedInvoice/…`, který vrací bajty přílohy přímo v odpovědi.
+- **Měna se ignorovala — vše se importovalo v CZK.** Seznamové endpointy vrací jen číselné `CurrencyId`, ne kód měny. Doplněn převod přes číselník měn iDokladu, takže se zachová reálná měna dokladu (EUR, USD, …).
+- **Země kontaktu se ignorovala — vše CZ.** Stejná příčina (`CountryId` místo kódu); to navíc rozbíjelo automatickou detekci přenesené daňové povinnosti (reverse charge) u zahraničních dodavatelů. Doplněn převod přes číselník zemí.
+- **Kurz cizí měny mohl být 100× špatně.** iDoklad drží kurz na `ExchangeRateAmount` jednotek (u měn jako HUF/JPY = 100); nově se přepočítává na jednu jednotku.
+- **Číslo přijaté faktury a jméno kontaktu.** U přijatých faktur se nově bere číslo dodavatele (`ReceivedDocumentNumber`) místo interního čísla iDokladu; opraveno i čtení křestního jména kontaktu (`Firstname`).
+
+## [4.9.0] — 2026-05-31
+
+Přijaté faktury: nahrání originálního dokladu už při zakládání i z detailu, ruční rekapitulace DPH přesně dle dokladu dodavatele (§ 73 ZDPH) a sjednocené, matematicky správné zaokrouhlení DPH. Řeší [#82](https://github.com/radekhulan/myinvoice/issues/82).
+
+### Added
+
+- **Nahrání dokladu dodavatele už u nové faktury i z detailu.** Drag&drop zóna pro PDF/fotku se nově ukáže hned při zakládání nové přijaté faktury (soubor se nahraje po prvním uložení) a také v detailu faktury, která zatím doklad nemá — dosud šlo přiložit jen v editaci. Po přetažení se u nové faktury zobrazí zelená kartička „soubor připraven, nahraje se po uložení" s možností odebrání.
+- **Ruční rekapitulace DPH dle dokladu (§ 73 ZDPH).** U přijaté faktury lze v boxu **Rekapitulace DPH** přepsat základ i daň **per sazba** přesně tak, jak je uvedeno na dokladu dodavatele (nárok na odpočet je svázaný s částkou daně na dokladu — § 73 odst. 6). Override se zapeče do uložených řádkových součtů, takže se konzistentně promítne do DPH přiznání, kontrolního hlášení, knihy DPH i do daně z příjmů a daňového optimalizátoru. Reverse-charge a režim „ceny s DPH" zůstávají beze změny.
+- **AI import předvyplní rekapitulaci DPH dle dokladu.** Při AI extrakci se nově čte i rekapitulace DPH po sazbách; pokud sedí v toleranci na vypočtené hodnoty, předvyplní se override tak, aby základ a daň seděly přesně na doklad — pro jednu i více sazeb.
+
+### Fixed
+
+- **Nekonzistentní zaokrouhlení DPH (#82).** Editor u přijaté faktury ukazoval jinou cenu s DPH, než nakonec uložil backend (151,50 × 21 % → 31,82 vs 31,81). Příčinou bylo pořadí operací u koeficientu sazby; sjednoceno **všude** (frontend i backend, vydané i přijaté faktury) na matematicky správné zaokrouhlení (`základ × sazba / 100`). Uložená historická data se nemění.
+- **Neviditelná chyba při uložení faktury.** Když validace selhala (např. prázdný popis položky) a uživatel byl odscrollovaný dole u tlačítka Uložit, nezobrazilo se žádné upozornění (jen tiché 422). Nově se ukáže **toast** a stránka odscrolluje k chybové hlášce — ve všech editorech (vydané, přijaté i pravidelné faktury); u přijatých faktur navíc inline chyba u popisu položky.
+
+## [4.8.0] — 2026-05-31
+
+Zpětné a **obousměrné** párování záloh u vydaných i přijatých faktur, otevírání řádků seznamů v novém panelu a čitelnější ohraničení v tmavém režimu.
+
+### Added
+
+- **Zpětné propojení zálohy ⇄ daňového dokladu (vydané faktury)** — pokud už máš oba doklady samostatně (typicky po importu), spáruješ je zpětně z **kterékoli** strany: v detailu daňového dokladu tlačítkem **Spárovat se zálohou**, v detailu proformy tlačítkem **Spárovat s daňovým dokladem**. Vazba se ukládá na daňový doklad (`parent_invoice_id`); doplní se odečet zálohy (`advance_paid_amount`), pokud byl nulový, nejvýše do výše částky dokladu (aby „K úhradě" nešlo do mínusu). Zaplacení se nemění, propojená proforma vypadne z pohledávek. Tlačítka se zobrazí jen když u odběratele existuje vhodný nespárovaný protějšek.
+- **Obousměrné párování zálohy ⇄ vyúčtovací faktury (přijaté faktury)** — dosud šlo propojit jen z vyúčtovací faktury; nově i z detailu **zálohy** tlačítkem **Spárovat s fakturou**. Odpojení z obou stran. Tlačítka opět gated dle existence protějšku.
+- **Otevření řádku seznamu v novém panelu** — Ctrl/⌘+klik a kliknutí **prostředním tlačítkem** myši nyní otevřou detail v novém panelu (vydané faktury, přijaté faktury, klienti/dodavatelé, pravidelné fakturace). Běžný klik funguje beze změny, akční tlačítka v řádku zůstávají funkční.
+
+### Fixed
+
+- **Tmavý režim — nezřetelné ohraničení položek.** Políčka položek (vydané, přijaté i pravidelné faktury) používala slabší ohraničení než běžná pole formuláře (neutral-200 vs neutral-300) — sjednoceno na úroveň běžných inputů. Řádkové oddělovače položkových tabulek (včetně editoru a popupu **výkazu práce**) zvýšeny z prakticky neviditelné `neutral-100` na `neutral-200`.
+
+## [4.7.5] — 2026-05-31
+
+Oprava importu z iDokladu — naimportovaly se vždy jen 3 záznamy od každé entity.
+
+### Fixed
+
+- **iDoklad import našel jen 3 doklady od všeho (#80)** — iDoklad v3 API balí stránkované seznamy do envelope `{ "Data": { "Items": [...], "TotalItems": N, "TotalPages": M } }`, kde `Data` je objekt `Page` s **přesně třemi** klíči. Klient `Data` envelope nerozbaloval a omylem za seznam položek bral celý `Page` wrapper, takže import iteroval jeho 3 klíče (`Items`/`TotalItems`/`TotalPages`) — žádný nemá `Id`, takže se vše přeskočilo. Výsledkem bylo uniformní **„z 3, vytvořeno 0"** u kontaktů, vydaných i přijatých faktur a import se ani nestránkoval. Nyní se envelope správně rozbalí a stáhnou se všechny stránky. *(Oprava ruší dřívější domněnku z 4.7.2 o „špatné/demo agendě" — šlo o tuto chybu v parsování odpovědi.)*
+
+## [4.7.4] — 2026-05-31
+
+Sjednocení akčních tlačítek v detailech a čitelnější výkaz práce.
+
+### Changed
+
+- **Jednotná akční lišta v detailech** (vydané i přijaté faktury, klient, zakázka, pravidelná fakturace) — tlačítko **„Upravit"** je vždy **první** a jednotně **zeleně (outline)**; hlavní akce (Vystavit, Vystavit konečnou, Odeslat, Označit jako přijaté/zaúčtováno/zaplaceno, Nová faktura) jsou plné fialové (primary). Méně významné akce (Klonovat, PDF, Exporty, Výkaz) následují až za hlavními, Smazat zůstává poslední. Zelená je v tmavém režimu doladěná pro čitelnost.
+- **Výkaz práce (PDF)** — sloupce **Hodiny / Sazba / Celkem** skryjí nadbytečná desetinná „,00", ale jen pokud jsou **všechny hodnoty v daném sloupci celé** (jediný necelý řádek ponechá u celého sloupce 2 desetinná místa). Platí pro samostatný výkaz i výkaz vložený ve faktuře.
+
+## [4.7.3] — 2026-05-31
+
+Daňový audit režimu cen „s DPH": opraveny případy, kdy kopírované doklady nedědily režim a totály se nafoukly o DPH.
+
+### Fixed
+
+- **Daňový doklad k záloze, dobropis a kopie faktury** nedědily příznak **„ceny s DPH"** z původního dokladu. U dokladu vytvořeného v tomto režimu (kde řádková cena nese brutto) se pak zkopírovaná brutto cena přepočítala jako cena **bez DPH** a celková částka se **nafoukla o DPH** (např. 1 210 → ~1 464). Opraveno: `FinalFromProformaCreator` (daňový doklad k proformě), `CancelInvoiceAction` (dobropis) i `BulkReissueAction` (kopie/přefakturace) nyní režim přebírají.
+- **Souhrn v seznamu pravidelných fakturací** počítal u šablon v režimu „ceny s DPH" daň zdola (jako by ceny byly bez DPH), takže zobrazený součet byl nafouknutý. Nově respektuje, že brutto už DPH obsahuje.
+
+### Poznámka k daním
+
+Do přiznání DPH, kontrolního hlášení ani knihy DPH `unit_price_without_vat` nevstupuje — daňové výkazy sčítají uložené řádkové základy a DPH (`VatLedgerService`), které byly po celou dobu počítané správně koeficientem. Výše uvedené chyby se týkaly pouze kopírovacích cest, kde se přepočítával celý doklad. Přidána rozsáhlá testová matice (výpočet zhora/zdola, reverse charge v ČR i do zahraničí, plátce/neplátce, dobropis, kopie, generování z pravidelné fakturace).
+
+## [4.7.2] — 2026-05-31
+
+Oprava importu dobropisů z iDokladu a čitelnější PDF přijaté faktury v režimu cen s DPH.
+
+### Fixed
+
+- **iDoklad import dobropisů padal na HTTP 404 (#80)** — volal se neexistující endpoint `IssuedInvoiceCorrections`, takže celý import vydaných dokladů spadl. Dle oficiálního iDoklad SDK je správný endpoint **`/v3/CreditNotes`** a odkaz na původní fakturu je **`CreditedInvoiceId`** (ne `ParentDocumentId`). Opraveno volání i mapování vazby na původní fakturu. *(Pozn.: pokud import nachází jen pár dokladů, jsou API credentials pravděpodobně vytvořené pod jinou/demo agendou iDokladu — ověř ve firmě, ke které patří.)*
+
+### Changed
+
+- **PDF přijaté faktury v režimu cen s DPH** ukazuje na řádku „Celkem s DPH" (brutto) místo „Celkem bez DPH". Jednotková cena (Cena/j) zůstává **bez DPH** (netto). Řádek je tak standardní a bez redundance dvou stejných netto čísel: *cena/j bez DPH + sazba + celkem s DPH*. Spodní rekapitulace (bez DPH / DPH / k úhradě) i běžný režim a PDF vydané faktury beze změny.
+
+## [4.7.1] — 2026-05-31
+
+Doladění režimu cen „s DPH": jednotková cena se všude zobrazuje jako skutečné netto a editor už nepřepíná režim faktury za zády uživatele.
+
+### Changed
+
+- **Zadání ceny „Celkem s DPH" už nepřepíná celou fakturu do režimu „ceny s DPH"** — v editoru vydaných i přijatých faktur se po vyplnění částky do sloupce „Celkem s DPH" respektuje **aktuální režim dokladu**: v běžném režimu se z brutto dopočítá jednotková cena **bez DPH** (odečtením DPH shora), v režimu „ceny s DPH" se uloží brutto jako dosud. Dřív se tím režim faktury automaticky zapínal, což bylo matoucí.
+
+### Fixed
+
+- **Jednotková cena „bez DPH" se v režimu cen s DPH zobrazovala jako brutto** — v tomto režimu nese pole `unit_price_without_vat` z technických důvodů cenu **s DPH** (aby DPH koeficientem seděla na haléř), takže se pod hlavičkou „Cena/MJ bez DPH" ukazovala částka s DPH. Nově se **všude** dopočítává a zobrazuje skutečné **netto** (z uloženého řádkového základu): detail vydané i přijaté faktury (desktop i mobil), **PDF** vydané i přijaté faktury, exporty **ISDOC** (`UnitPrice`/`UnitPriceTaxInclusive`) a **Pohoda XML** (`unitPrice`) i souhrn na detailu **pravidelné fakturace**. Daňové částky (základ, DPH, celkem) byly po celou dobu správné — šlo čistě o zobrazení jednotkové ceny; do přiznání DPH / kontrolního hlášení `unit_price_without_vat` nevstupuje (daň jede z uložených řádkových totálů).
+- **Souhrn na detailu pravidelné fakturace v režimu cen s DPH** počítal základ a DPH zdola (jako by ceny byly bez DPH), takže přepočítával celkovou částku. Nově respektuje koeficient (shora), stejně jako generovaná faktura.
+
+## [4.7.0] — 2026-05-31
+
+Import faktur a účtenek z fotek, režim cen „s DPH" (brutto) napříč doklady a daňově korektní zacházení s dodavateli neplátci DPH.
+
+### Added
+
+- **Import faktur/účtenek z fotky (#75)** — do importu (drag&drop i nahrání) lze nově dát **obrázek** dokladu, ne jen PDF. Podporované formáty **JPG, PNG, WEBP a HEIC/HEIF** (fotky z mobilu) se na vstupu automaticky převedou na PDF (`ImageToPdfConverter`) a dál projdou stejnou AI extrakcí jako PDF. HEIC se zpracuje, pokud má prostředí Imagick; jinak appka srozumitelně poradí převést na JPG/PNG. Vše ostatní (rozpoznání dodavatele, položek, DPH) zůstává beze změny.
+- **Režim cen „s DPH" (brutto) na dokladech** — u **vystavených i přijatých faktur** a u **šablon pravidelné fakturace** lze přepnout, že ceny položek jsou uvedené **včetně DPH** (účtenky, paragony, B2C). DPH se pak počítá „shora" koeficientovou metodou (§37 ZDP) a **celková částka sedí na haléř** (33 Kč s DPH @ 21 % → základ 27,27 / DPH 5,73, ne 32,9967). U více řádků stejné sazby se haléřové reziduum dorovná tak, aby součet daně přesně odpovídal dani z celkového brutto (KH i přiznání ukážou stejné číslo jako detail faktury). Přepínač lze **předvyplnit per dodavatel** (výchozí *Ceny s DPH* v nastavení) a v editoru se **automaticky zapne**, jakmile zadáš cenu do sloupce „Celkem s DPH". Výchozí stav i všechny existující doklady zůstávají v dosavadním režimu „zdola" (beze změny). AI import účtenek nově ukládá ceny tak, jak jsou na účtence (s DPH), a nastaví režim sám.
+- **Dodavatel neplátce DPH → bez nároku na odpočet** — u dodavatelů se sleduje **plátcovství DPH** (autoritativně z ARES dle IČO, u zahraničních EU subjektů z VIES dle DIČ; online při výběru/editaci dodavatele, cache 24 h) a zobrazuje se i ve **výpisu klientů** (badge *Plátce DPH*) a v **editoru přijaté faktury** (volba pod *Reverse charge*). U **neplátce** se automaticky vynutí `vat_deduction='none'`, vynulují sazby a zobrazí varování — do přiznání DPH (ř. 40) ani kontrolního hlášení (sekce B) se tak nedostane neoprávněný odpočet z dokladu, na kterém žádná DPH není. Příznak lze v editoru vědomě přepsat.
+
+### Fixed
+
+- **AI import od neplátce nesprávně nárokoval odpočet DPH** — doklad od dodavatele neplátce (např. „DIČ: Neplátce DPH") se importoval s `vat_deduction='full'` a dostával se do ř. 40 přiznání. Nově se plátcovství ověří a u neplátce se odpočet automaticky zakáže.
+
+### Upgrade
+
+- **Zpětný backfill plátcovství dodavatelů** — po nasazení doporučeno jednorázově spustit `php api/bin/backfill-vendor-vat-payer.php`. Skript projde stávající dodavatele, podle ARES/VIES doplní `clients.is_vat_payer` a u **neplátců** opraví už zaevidované přijaté faktury (nastaví `vat_deduction='none'`, sazby na 0 %, základ = zaúčtovaná částka, **celková částka beze změny**) + přečísluje variabilní symboly. **Výchozí běh je dry-run** (jen náhled, nic nezapisuje) — zápis provede až s přepínačem `--apply`. Migrace `0083` a `0084` se aplikují přes `php api/bin/migrate.php`.
+
+## [4.6.4] — 2026-05-30
+
+Další automatické načítání údajů z veřejných registrů (ARES + registr plátců DPH), děkovný e-mail za úhradu faktury a drobné opravy.
+
+### Added
+
+- **Auto-nastavení typu poplatníka z ARES** — při načtení dodavatele z ARES (setup wizard i *Číselníky → Nový dodavatel*) se z právní formy automaticky odvodí **Typ poplatníka**: OSVČ (fyzická osoba) → **FO/DPFO**, firma (s.r.o./a.s./…) → **PO/DPPO**. Lze ručně přepsat v Nastavení.
+- **Auto-doplnění EPO údajů z registrů při vytvoření dodavatele** — při založení dodavatele (setup i *Nový dodavatel*) se „na pozadí" (bez polí ve formuláři) doplní: z **ARES** číslo popisné/orientační, spisová značka a typ poplatníka; z **registru plátců DPH** kód finančního úřadu (autoritativní `cisloFu`, ne kód územního pracoviště). **CZ-NACE** jen pokud je jednoznačná (subjekt má jediný kód) — jinak prázdné, aby se do přiznání nedostala špatná převažující činnost. Doplní jen prázdná pole (nepřepisuje ruční vstup); výpadek registru vytvoření nezablokuje. ID datové schránky z ARES nelze (je v samostatném registru ISDS).
+- **Děkovný e-mail za úhradu faktury (#57)** — po označení faktury jako uhrazené lze zákazníkovi poslat krátké poděkování. **Volitelné a ve výchozím stavu vypnuté** (per dodavatel: zapnutí, automatické odeslání při bankovním párování, předzaškrtnutí v ručním označení, volitelná příloha PDF). Funguje při **ručním** označení (checkbox v modalu), **hromadném** označení (volba + souhrn odesláno/selhalo) i **automaticky při spárování platby z banky**. Vlastní e-mailová šablona `invoice_payment_thanks` (CS/EN, editovatelná v *Admin → E-mailové šablony*) s variantou pro zálohu (proforma). Idempotentní (auto odeslání jen jednou), neposílá pro storno ani bez příjemce; vše v activity logu (`invoice.payment_thanks_sent/skipped/failed`). Selhání e-mailu nikdy nerozbije označení/párování.
+- **Sample data — pravidelné fakturace** — generátor ukázkových dat (setup wizard i `bin/sample.php`) nově vytvoří i **2 pravidelné fakturace** (měsíční CZK hosting/údržba + čtvrtletní EUR reverse-charge retainer).
+
+### Fixed
+
+- **Dark theme — stav „Odesláno" zářil** — badge používal nepřemapovaný světlý odstín; nově má vlastní tlumenou tyrkysovou paletu (laděnou k zelené ikoně e-mailu, ale odlišitelnou od „Zaplaceno"). Sladěn i badge „Proforma".
+- **„Načíst z ARES" u OSVČ hlásilo chybu (#76)** — chybějící spisová značka u fyzické osoby (OSVČ není v OR) se hlásila jako červená chyba. Nově se podle `taxpayer_type` u OSVČ zobrazí neutrální info, červená chyba zůstává jen tam, kde zápis v OR opravdu chybět nemá.
+
+## [4.6.3] — 2026-05-30
+
+Automatické načítání bankovního účtu a zápisu v obchodním rejstříku z veřejných registrů + drobná vylepšení a opravy.
+
+### Added
+
+- **Bankovní účet z DIČ (registr plátců DPH / CRPDPH)** — kdekoli zadáváš dodavatele lze účet načíst z oficiálního registru plátců DPH (MFČR) podle DIČ: v **setup wizardu**, v **Nastavení** (editor měny/účtu) i v **Číselníky → Nový dodavatel** tlačítkem „Načíst účet z registru DPH". Vrací zveřejněné účty (vč. IBAN) a zároveň hlídá příznak **nespolehlivého plátce**. Funguje jen pro zveřejněné účty plátců DPH (orientační předvyplnění). Výsledky se cachují 24 h.
+- **Spisová značka (zápis v OR) z ARES** — u právnických osob se při načtení z ARES (podle IČ) automaticky doplní pole „Zápis v obchodním rejstříku" (např. „Spisová značka C 45039 vedená u Krajského soudu v Plzni") — v setup wizardu, Nastavení i u nového dodavatele. Tiskne se v patičce faktury.
+- **Detaily plátce DPH u klienta/dodavatele** — v detailu klienta (pokud má DIČ) tlačítko „Detaily plátce DPH" na vyžádání zobrazí spolehlivost plátce a jeho zveřejněné bankovní účty (užitečné při ověření protistrany před platbou — ručení za DPH). Pouze informativní, nic se neukládá.
+- **Přidání nového roku v Daňových konstantách** — *Číselníky → Daňové konstanty* mají tlačítko „Přidat rok": předvyplní hodnotami nejnovějšího roku, po úpravě a uložení vznikne override.
+
+### Fixed
+
+- **Dark theme — neviditelný text v přepínači roku** v Daňových konstantách (select neměl tmavé pozadí jako ostatní; doplněno `bg-surface`).
+- **Docker — varování při startu** `docker-compose.production.yml` hlásil „variable is not set" pro `MYINVOICE_SMTP_*`; doplněny prázdné defaulty (`${VAR:-}`), chování beze změny.
+
+### Docs
+
+- Manuál — přečíslování kapitol: *Daňový optimalizátor* 25a → **26**, *Dokumenty* 26 → **27**.
+
+## [4.6.2] — 2026-05-30
+
+Daňový optimalizátor pro OSVČ (#68) a oprava ukládání nastavení podpisu PDF.
+
+### Added
+
+- **Daňový optimalizátor (OSVČ)** — nová stránka *Daně → Daňový optimalizátor* (jen pro OSVČ) pomáhá rozhodnout, který daňový režim se vyplatí (#68, #71). **Retrospektiva** uzavřeného roku porovná paušální daň vs standardní režim na reálném vyfakturovaném příjmu, s rozpadem *příjem → výdaje → základ → daň → pojistné → čistý příjem + efektivní sazba* a meziročním (YoY) srovnáním. **Predikce** běžícího roku projektuje příjem z tempa a hlídá limity (strop pásma, 2 M paušál/DPH, 2,54 M okamžitý plátce DPH) s radou „odlož fakturu do ledna". Výdaje lze zadat **paušálem (40/60/80 %)** nebo jako **skutečné** (daňová evidence); zohledněny slevy (poplatník, manžel/ka, děti vč. daňového bonusu) i sociální (55 %) a zdravotní (50 %) pojistné s ročními minimy a rozlišením hlavní/vedlejší činnosti. Na dashboardu má OSVČ widget **„čistý příjem"**, podklady jdou exportovat do **CSV**. Roční daňové konstanty jsou ověřené (Finanční správa / ČSSZ / VZP, k 5/2026) a admin je může upravit v *Číselníky → Daňové konstanty* bez nového nasazení. Engine je pokrytý unit testy. Jde o orientační pomůcku, ne daňové přiznání (manuál kap. 25a).
+- **Typ poplatníka u Daně z příjmů** (`Daně → Daň z příjmů`) se nově odvozuje z dodavatele (OSVČ → DPFO, s.r.o. → DPPO) místo ručního přepínače; přidán CSV export podkladů.
+
+### Fixed
+
+- **Uložení nastavení podpisu PDF vracelo 500** — `PUT /api/settings/supplier` s vypnutým podpisem (`pdf_signing_enabled=false`) selhal na strict-mode MariaDB (`''` místo `0` na `tinyint` sloupci). `pdf_signing_enabled` doplněn do bool→int castu (#72, regrese 4.6.1).
+
+## [4.6.1] — 2026-05-30
+
+Elektronický podpis PDF faktur certifikátem (PAdES) a drobná vylepšení UX.
+
+### Added
+
+- **Podpis PDF faktur certifikátem (PAdES)** — volitelný elektronický podpis PDF vydaných faktur a výkazů víceprací certifikátem, zapínatelný **per dodavatel** (#44). Úroveň **PAdES-B**, volitelně **PAdES-T** s důvěryhodným časovým razítkem (RFC 3161 TSA, vč. HTTP Basic auth k TSA serveru). Implementováno čistě v PHP (`openssl_cms_sign` / CMS RFC 5652, PDF incremental update) bez nové composer závislosti — funguje i na Windows/IIS. V *Nastavení → Podpis PDF* se certifikát **P12/PFX** (vč. řetězce CA) nahrává dvoukrokově (vybrat soubor → heslo → nahrát; přepínač „Podepisovat PDF" je zamčený s upozorněním, dokud certifikát chybí); heslo se uloží šifrovaně přes `SecretEncryption`, soubor leží mimo web root (0600), volitelně TSA URL + přihlášení a důvod podpisu; zobrazí se metadata certu (CN, vydavatel, platnost, SHA-256 fingerprint). Podpis se aplikuje při generování PDF (download, e-mail, vystavení, ZIP export), ověřeno v Adobe Acrobat (platný, důvěra z EU Trusted Lists, vložené časové razítko). **Měkký fallback** — selhání podpisu (chybějící/expirovaný cert, výpadek TSA) fakturu nezablokuje, vygeneruje se nepodepsané PDF a událost se zaloguje. Cesta k certifikátu se ukládá nezávisle na umístění data-dir (přesun / Docker volume podpis nevypne) a audit (`signing.pdf_signed`) loguje skutečně dosaženou úroveň (PAdES-B/T). Veškerá správa i použití certifikátu se auditují do `activity_log` (`signing.cert_uploaded/removed`, `signing.pdf_signed`, `signing.failed`) bez úniku hesla/klíče.
+
+### Changed
+
+- **Tlačítko „Výkaz"** v přehledu i detailu faktury — zjednodušená podmínka zobrazení: nově se ukáže u **každého konceptu**, pokud má uživatel právo editace (`auth.canWrite`). Dříve bylo vázáno na workflow projekt / existující výkaz / pravidelnou šablonu; readonly role tlačítko nevidí.
+
+## [4.6.0] — 2026-05-29
+
+Kategorie tržeb (symetrie ke kategoriím nákladů) s rozpadem v CRM/Tržbách, přepočet všech měn na CZK v CRM dashboardu a sjednocené propojení souvisejících dokladů.
+
+### Added
+
+- **Kategorie tržeb** — nový číselník (Nastavení → Číselníky → Kategorie tržeb) symetrický ke kategoriím nákladů. Vydaná faktura má volbu kategorie tržby, výchozí kategorii lze přednastavit na **zákazníkovi** i na **zakázce** (zakázka má přednost před zákazníkem). Při nastavení/změně výchozí kategorie se doplní do všech existujících faktur daného zákazníka/zakázky, které kategorii nemají vyplněnou (backfill). Výchozí kategorie se aplikuje **konzistentně napříč všemi cestami vzniku faktury** — ruční zadání, importy (iDoklad, Fakturoid, ISDOC/ZIP), pravidelná fakturace i vyúčtování zálohy/proformy (tam se kategorie dědí ze zdrojového dokladu).
+- **Rozpad tržeb po kategoriích** — tabulka v CRM dashboardu a koláčový graf na stránce Tržby (rolling 12 měsíců, přepočet na CZK).
+- **CRM dashboard — volba „Vše (CZK)"** v přepínači měn: boxy Přehled (tento měsíc / od začátku roku) i měsíční graf sečtou všechny měny přepočtené na CZK. „Vše" je výchozí volbou, pokud má firma víc měn.
+- **Propojení souvisejících dokladů — banner v detailu faktury.** U proformy odkaz na vystavený daňový doklad a u daňového dokladu zpět na zálohovou fakturu; sjednocený vzhled (fialový banner) i u přijatých faktur (zálohová ↔ vyúčtovací faktura).
+- **Vestavěný cron v Docker image** — app kontejner volitelně spouští plánované úlohy sám (přepínač `MYINVOICE_ENABLE_CRON`, default zapnuto), takže základní Docker nasazení nevyžaduje externí scheduler. Crontab se generuje z `CronCatalog` (stejné úlohy i frekvence jako UI „Plánované úlohy", takže nechybí žádná úloha), úlohy běží jako `www-data` s logy v `${MYINVOICE_DATA_DIR}/log/cron`. Při více replikách app je nutné nastavit `MYINVOICE_ENABLE_CRON=0`, aby úlohy neběžely vícenásobně. (#64)
+- **Tenký scrollbar laděný do palety** v postranním menu (reusable utilita `.scrollbar-slim`, light/dark aware). (#69)
+
+### Fixed
+
+- **CRM dashboard — nesmyslné částky u cizí měny.** Při výběru měny (např. USD), která za dané období neměla žádný doklad, dlaždice „Přehled" ukazovaly částku jiné měny (typicky CZK) pod cizím labelem (např. „579 481,93 USD"). Nově se u chybějících dat zobrazí 0 ve zvolené měně. Stejný mislabel opraven u rozpadu nákladů (je vždy v CZK).
+- **Importy přijatých faktur nenastavovaly výchozí kategorii nákladů dodavatele** (AI extrakce, ISDOC, iDoklad, Fakturoid, bankovní párování) — doplňovalo se jen ručně v UI. Nově se výchozí kategorie nákladu aplikuje centrálně při zakládání přijaté faktury, takže ji dostanou všechny importní cesty.
+- **Popisky u zálohových přijatých faktur** — jeden nadpis „Zálohová faktura" se používal pro oba směry vazby. Vyúčtovací faktura má nově odlišný nadpis „Vyúčtování zálohy".
+
+### Changed
+
+- **Pole „Kategorie tržby" na vydané faktuře** je nově výběr z číselníku (dříve volný text). Stávající textové hodnoty se při migraci převedly na kategorie.
+
+## [4.5.4] — 2026-05-29
+
+Oprava režimu přenesení daňové povinnosti (reverse charge) na vystavených fakturách.
+
+### Fixed
+
+- **Reverse charge – sazba na faktuře** ukazovala „DPH 0 %" místo nominální sazby. Nově se na RC faktuře zobrazí **nominální sazba (21 %) s daní 0 Kč** a automatická poznámka „Daň odvede zákazník". RC je nově jen hlavičkový příznak (položka drží svou sazbu, daň vynuluje příznak); volba „Reverse charge" zmizela z výběru sazby na řádku (dělá se zaškrtnutím RC).
+- **Reverse charge – zařazení do DPH přiznání.** Tuzemský RC prodej se vykazoval na DPHDP3 ř.20 (dodání zboží do JČS) místo ř.25 (tuzemský režim přenesení §92). Klasifikace je nově **podle země odběratele**: tuzemský → ř.25 + KH A.1, zahraniční z EU → ř.20. (migrace `0072`)
+
+## [4.5.3] — 2026-05-29
+
+Server-side našeptávač klienta/dodavatele, oprava přepnutí typu nevystavené faktury a čitelný kalendář v tmavém režimu.
+
+### Fixed
+
+- **Přepnutí typu nevystavené faktury** (faktura ↔ proforma ↔ dobropis) se v editaci neuložilo — update vždy zachoval původní typ a `updateDraft` sloupec `invoice_type` neměnil. Nově lze typ u draftu změnit; vystavená faktura zůstává neměnná (číslo + auditní stopa).
+- **Tmavý režim** — nativní kalendář u výběru data (a další nativní prvky) byl černý na tmavém pozadí; přidán `color-scheme: dark`.
+
+### Changed
+
+- **Výběr klienta / dodavatele ve fakturách** — našeptávač nově hledá **server-side přímo v databázi** (název / IČO / DIČ) místo filtrování jen prvních 50 načtených. Týká se nové i editované vydané faktury, přijaté faktury (dodavatelé) a pravidelné fakturace. Řeší případ, kdy klient za první stránkou nešel ve faktuře vybrat, a škáluje nad 200 klientů.
+## [4.5.2] — 2026-05-29
+
+Opravy u přijatých faktur uhrazených zálohou a přenačtení detailu faktury při prokliku.
+
+### Fixed
+
+- **„K úhradě" u přijaté faktury uhrazené zálohou** ukazovalo celou částku místo 0 (nula v JS propadala přes `||` na celkovou částku). Hodnota v datech (`amount_to_pay`, generated column) byla správná, chyba byla jen v zobrazení detailu.
+- **Proklik mezi doklady nepřenačítal detail** (přijatá i vydaná faktura) — navigace `/…/:id → :id` recyklovala komponentu a `onMounted` se znovu nespustil; doplněn `watch` na změnu id.
+
+### Changed
+
+- **Seznam přijatých faktur** — sloupec „K úhradě" přejmenován na **„Celkem s DPH"** a řádky nově ukazují celkovou částku dokladu (dřív 0 u faktur uhrazených zálohou); řádky teď odpovídají měsíčnímu součtu.
+- **Editor přijaté faktury** — přidáno editovatelné pole **„Uhrazená záloha"** s dopočtem „K úhradě".
+
+## [4.5.1] — 2026-05-29
+
+Přílohy přímo v editoru faktury, robustní predikce ročního obratu, vyšší kontrast tmavého režimu a vylepšení statistik.
+
+### Added
+
+- **Přílohy v editoru faktury** — přílohy lze přidat už při tvorbě **nové** faktury (drží se v prohlížeči a nahrají se hned po vytvoření) i přidávat/mazat u **existující** faktury přímo v editoru, nejen v detailu. Sekce je pod Výkazem víceprací. Limity 10 MiB/soubor, 20 MiB celkem.
+- **Robustní predikce ročního obratu** — místo growth-adjusted seasonality nově **medián tří nezávislých projekcí** (run-rate, sezonalita × krátkodobý růst, sezonalita × dlouhodobý CAGR trend) + rozpětí min–max. Odolnější vůči zkreslení z krátkého YTD okna na začátku roku, kdy starý model přestřeloval. (#66)
+
+### Changed
+
+- **Tmavý režim** — vyšší kontrast tlumeného textu (popisky, placeholdery): `neutral-500` a `-400` zesvětleny, muted text z ~4.3 na ~5.5:1 (WCAG AA). Hlavní text beze změny (záměrně mírně odbílá, aby nezářil).
+- **Statistiky** — dlaždice „Top klienti" a „Top zakázky" se při chybějících loňských datech zobrazí **vedle sebe** (jinak pod sebou); „Forecast" přejmenován na **„Predikce"**; bez loňského roku se místo růstu YoY ukáže run-rate poznámka (žádné „NaN").
+
+## [4.5.0] — 2026-05-29
+
+Tmavý režim (dark mode) s přepínačem **Systém / Světlý / Tmavý** a úpravy dashboardu.
+
+### Added
+
+- **Tmavý režim (dark mode)** — přepínač **Systém / Světlý / Tmavý** v horní liště, na mobilu v rozbalovacím menu vedle přepínače jazyka. Výchozí *Systém* sleduje nastavení operačního systému (`prefers-color-scheme`), ruční volba se ukládá do prohlížeče (per zařízení). Řešeno token-driven — třída `.dark` přepisuje hodnoty CSS proměnných, takže se přepne celá aplikace včetně grafů; při načtení nebliká. Světlý režim zůstává beze změny. (#65)
+
+### Changed
+
+- **Dashboard** — homepage zobrazuje jen **aktivní měny** (neaktivní měny se v přehledu tržeb už neukazují). Při jediné aktivní měně je graf tržeb vyšší (vlevo) a KPI boxy jsou v matici 2×2 vpravo; při více měnách beze změny. V sekci nákladů je box „CRM" nahrazen **mini grafem nákladů** za posledních 12 měsíců.
+
+## [4.4.0] — 2026-05-29
+
+Nová sekce **Dokumenty** (souborové úložiště), presety výchozí splatnosti a výchozí kategorie nákladu.
+
+### Added
+
+- **Sekce Dokumenty** — souborové úložiště s hybridní organizací: strom složek + vazby na entity (klient, vydaná/přijatá faktura, zakázka) + tagy + fulltextové hledání. Automatické rozbalení datových zpráv **ZFO** (PKCS#7, kompletní metadata ISDS) a **ZIP** (dvojí režim: rozbalit a kategorizovat / nahrát jako jeden archiv). Nahrávání jednotlivých souborů, celých složek (drag&drop i přes dialog) i velkých souborů po částech (obchází PHP `post_max_size`) — vše na pozadí přes joby s průběhem. Náhledy (první strana PDF / obrázky), inline PDF preview, koš (soft-delete + vysypání). Oboustranné vazby v detailu klienta, faktury i zakázky. (migrace `0067`–`0069`)
+- **Hromadné akce nad Dokumenty** — výběr **souborů i složek současně** s hromadným exportem do ZIP (se zachováním stromové struktury), přesunem přes stromový picker a smazáním. Velikost složek přímo v dlaždici. Na mobilu se akce složky odkryjí dvojím ťuknutím (ochrana proti nechtěnému smazání).
+- **Presety výchozí splatnosti** — v nastavení dodavatele, u klienta i u zakázky lze místo prostého počtu dnů zvolit `7 dnů / 14 dnů / Měsíc / Vlastní`. **Měsíc** je skutečný kalendářní měsíc (1. 2. → 1. 3., 31. 1. → 28. 2.), ne fixních 30 dnů. Klient i zakázka mohou dědit z dodavatele; v editoru faktury platí priorita zakázka → klient → dodavatel, každá úroveň s vlastní jednotkou. (#61, migrace `0070`, `0071`)
+- **Výchozí kategorie nákladu** na dodavateli (firmě) s propagací do přijatých faktur, zobrazení kategorie v detailu přijaté faktury a filtr dodavatelů podle výchozí kategorie.
+- **Plně ENV-konfigurovatelné SMTP** v Docker Compose + guard proti přepisu prázdnými ENV hodnotami. (#60)
+
+### Fixed
+
+- **Klasifikace plnění na řádcích vydané faktury** — `GET /api/invoices/{id}` nevracel `vat_classification_code` na položkách (jen na hlavičce), takže `GET → úprava → PUT` tiše zahodil ručně nastavenou klasifikaci řádku. (#62)
+- **Zaplacená nespárovaná přijatá záloha** se nezapočítávala do nákladů (cash sémantika).
+
+## [4.3.12] — 2026-05-28
+
+Globální vyhledávání v postranním panelu.
+
+### Added
+
+- **Vyhledávací pole v sidebaru** (nad „Přehled") — našeptává **položky menu** (klientsky, skočí přímo na danou stránku) a od dvou znaků hledá v **klientech/dodavatelích** (název + e-mail) a ve **vydaných i přijatých fakturách** (číslo dokladu). Výsledky jsou seskupené (Menu / Klienti / Vydané / Přijaté), ovladatelné klávesnicí (↑/↓, Enter, Esc) a kliknutím otevřou detail. Hledání je scoped na aktuálního dodavatele (multi-tenant). (endpoint `GET /api/search`)
+
+## [4.3.11] — 2026-05-28
+
+Propojení přijatých záloh s vyúčtovací fakturou (proti dvojímu započtení nákladu) a dotažení daňového auditu výkazů DPH.
+
+### Added
+
+- **Propojení přijaté zálohy s finální fakturou** — v detailu přijaté faktury lze zálohovou fakturu (zálohu / proformu) spárovat s vyúčtovací fakturou od stejného dodavatele (*Zálohová faktura → Spárovat se zálohou*). Nabídka kandidátů řadí napřed zálohy ve stejné měně a s nejbližší částkou (porovnává hrubou částku před odečtem zálohy, ne částku k úhradě). Spárovaná — nebo už zaplacená — záloha přestane vstupovat do Nákladů, CRM statistik i daně z příjmů, takže se stejný náklad nepočítá dvakrát. (migrace `0064`, `0065`)
+- **AI návrh propojení zálohy** — když AI extrakce přijaté faktury najde odkaz na zaplacenou zálohu („zaplaceno zálohou č. X"), dohledá odpovídající zálohu a v detailu ji nabídne k potvrzení (návrh, nic se nepáruje automaticky).
+
+### Fixed
+
+- **Přijatá zálohová faktura (proforma) ve výkazech DPH** — záloha (`advance`) není daňový doklad, přesto vstupovala do Knihy DPH, DPH přiznání, kontrolního i souhrnného hlášení. Nově je z DPH evidence vyloučená (symetricky k vystavené proformě), NULL-safe (legacy doklady bez vyplněného druhu zůstávají).
+- **Samovyměření daně u dovozu služby/zboží** — kódy `24` (přijetí služby z EU / dovoz služby) a `25` (dovoz zboží ze 3. země) neměly příznak reverse-charge, takže se daň samovyměřila jen při ručním zaškrtnutí RC na dokladu. Nově se samovyměří z klasifikačního kódu (jako kódy 5/23), včetně zrcadlového odpočtu na ř. 43. (migrace `0063`)
+- **„Bez nároku na odpočet" (kód 42) nárokoval odpočet** — kód byl chybně mapován na ř. 42 DPHDP3 (odpočet při dovozu přes celní úřad). Plnění bez nároku správně nevstupuje do žádného odpočtového řádku ani do KH / Knihy DPH.
+- **Osvobozené tuzemské plnění (kód 3) korumpovalo ř. 3** — bylo mapováno na ř. 3 DPHDP3 (pořízení zboží z JČS, vstup), takže osvobozené vystavené plnění nadhodnocovalo pořízení z EU. Nově se do výkazu nezahrnuje (osvobozená plnění / koeficient § 76 se řeší ručně).
+- **Daň z příjmů — zálohy v nákladech** — přijatá záloha (`advance`) se napevno vylučuje z uznatelných nákladů DPFO/DPPO (není daňový doklad; nákladem je až vyúčtovací faktura).
+
+### Changed
+
+- **DPH přiznání (DPHDP3) — rekapitulace (Veta6)** — generuje se i souhrnný oddíl ř. 62–66 (daň na výstupu, odpočet, vlastní daň / nadměrný odpočet), sčítaný ze zaokrouhlených řádků kvůli konzistenci s detailem (EPO).
+- **Náklady / CRM — vyloučení spárovaných/zaplacených záloh** — nákladové souhrny, top dodavatelé a měsíční/roční přehledy nepočítají zálohy, které jsou zaplacené nebo spárované s finální fakturou; cashflow a závazky je ponechávají (nezaplacená záloha je reálný závazek).
+
+## [4.3.10] — 2026-05-28
+
+Zadávání částek s DPH na řádku faktury a oprava pádu Přehledu při neúplné odpovědi.
+
+### Added
+
+- **Zadání částky s DPH na řádku** (vydaná i přijatá faktura) — řádkové „Celkem s DPH" je nově editovatelné pole. Po zadání částky včetně DPH se zpětně dopočítá jednotková cena bez DPH (`částka / (1 + sazba) / množství`). Funguje i s výrazy (`1000*1.21`, desetinná čárka). U neplátce / reverse-charge je sazba 0.
+
+### Fixed
+
+- **Přehled (Dashboard) padal při neúplné odpovědi summary** (`TypeError … issued_count_ytd`) — přístup k `summary.kpi` je nově null-safe a stránka při chybové/neúplné odpovědi ukáže uvítací stav místo bílé obrazovky. Backendový souhrn navíc nespadne, pokud ještě neproběhla migrace `0062` (sloupec `flat_tax_band`).
+
+## [4.3.9] — 2026-05-28
+
+Sjednocení hlavičky PDF výkazu víceprací s fakturou.
+
+### Changed
+
+- **PDF výkazu víceprací — hlavička jako faktura:** logo už není přerostlé (omezeno na 72 × 20 mm jako u faktury) a respektuje **3 varianty** podle brandingu — bez brandingu textový název firmy / jen logo / logo + název (přepínač *Zobrazit i název firmy vedle loga*). Do výkazu se nově propisuje i **akcentová barva** brandingu.
+
+### Added
+
+- **Číslo projektu a smlouvy v PDF výkazu** — pokud jsou u zakázky vyplněny, zobrazí se v záhlaví výkazu (Vaše číslo / Vaše smlouva).
+
+## [4.3.8] — 2026-05-28
+
+Per-client číselné řady faktur, sledování paušální daně, konzistentní `MYINVOICE_DATA_DIR` a opravy importu z Fakturoidu.
+
+### Added
+
+- **Vlastní číselná řada faktury per klient** (*Klienti → detail klienta → Vlastní číslování faktur*) — volitelný formát čísla (vydaná / proforma / dobropis) a období counteru pro jednotlivé klienty; prázdné pole dědí nastavení dodavatele. Vhodné po migraci z Fakturoidu / iDokladu, kde měl každý klient vlastní řadu. Editor faktury ukazuje náhled čísla podle zvoleného klienta. Hlídá kolize formátů mezi klienty. (migrace `0061`, PR #55 — @Hermanik)
+- **Sledování paušální daně (§ 7a)** — v *Nastavení* lze u neplátce DPH zvolit pásmo (1./2./3., limit příjmů 1 / 1,5 / 2 mil. Kč). Na stránce *Tržby* se pak zobrazí dlaždice s využitím ročního limitu příjmů zvoleného pásma (zaplacené příjmy v kalendářním roce), barevně dle blízkosti stropu. (migrace `0062`)
+- **Oprava stavů importovaných faktur z Fakturoidu** — CLI nástroj `api/bin/fix-fakturoid-imported-statuses.php` dorovná u importovaných faktur stav (odesláno / zaplaceno / stornováno) podle Fakturoidu; idempotentní, neptřepisuje ručně změněné. (PR #54 — @Hermanik)
+
+### Fixed
+
+- **Import z Fakturoidu stahoval jen prvních 40 dokladů** — Fakturoid API v3 neposílá `Link` hlavičku pro stránkování (oproti dokumentaci); import nově projde všechny stránky. (PR #52 — @Hermanik)
+- **`MYINVOICE_DATA_DIR` nebyl konzistentně respektován** (#53) — PDF (cache i archiv), přílohy faktur, loga dodavatelů, importovaná PDF, zálohy, reset i cronové logy se nově ukládají pod zvolený data-dir (centrální resolver `RuntimePaths`). Dříve část souborů končila v adresáři aplikace i při nastaveném `MYINVOICE_DATA_DIR` (problém pro Docker single-volume / read-only root). Relativní cesty v DB zůstávají kompatibilní.
+- **Nastavení: zapnutí „Plátce DPH" vynuluje pásmo paušální daně** — paušál je neslučitelný s plátcovstvím DPH (§ 7a), uložení kombinace dříve skončilo chybou.
+- **CRM: nadpis „Přehled" zasahoval do KPI karet** — opraveno odsazení.
+
+## [4.3.7] — 2026-05-28
+
+Daňový audit (opravy DPH/KH/SHV výkazů a daně z příjmů), zpřehlednění CRM, samočinné odblokování aktualizace a řádkové „Celkem s DPH" u vydaných faktur.
+
+### Fixed
+
+- **Souhrnné hlášení — kód plnění:** poskytnutí služby do EU (`§ 9/1`) se hlásilo s chybným kódem plnění `2` (třístranný obchod) místo správného **`3`**. Opraveno dle DPHSHV XSD (`0` zboží, `2` třístranný, `3` služba).
+- **Daň z příjmů — vypadávání nákladů:** přijaté faktury **bez vyplněného DUZP** (`tax_date` NULL) vypadávaly z nákladů DPFO/DPPO (`GREATEST(NULL, …) = NULL`). Opraveno na NULL-safe variantu.
+- **Kontrolní hlášení — poměrný odpočet (§ 75):** u dokladů s poměrným odpočtem nad 10 000 Kč se v sekci B.2 nově nastavuje atribut `pomer='A'` (dříve napevno `'A'`/`'N'` nekonzistentně).
+- **Náklady — DPH na vstupu = nárok na odpočet:** graf „Rozpad DPH na vstupu" nově vyřazuje faktury bez nároku a krátí poměrný odpočet, takže odpovídá Knize DPH / DPHDP3 (ř. 40/41). Přejmenováno na „Nárok na odpočet DPH podle sazby".
+- **Aktualizace se zasekávala na „Upgrade probíhá…":** stav se nyní sám odblokuje, pokud je cílová verze už nasazená (např. update přes terminál) nebo příznak vypršel (watcher neběží). Přidáno tlačítko **„Zrušit / odblokovat"**.
+
+### Added
+
+- **Třístranný obchod (§ 17):** nové klasifikační kódy `30` (pořízení prostřední osobou → DPHDP3 ř. 30) a `31` (dodání prostřední osobou → ř. 31 + souhrnné hlášení kód 2). DPHDP3 nově generuje oddíl C (Veta3). (migrace `0060`)
+- **Registrace k DPH dle novely 2025:** indikátor obratu na stránce *Tržby* nově testuje **kalendářní rok** se dvěma prahy — `2 000 000 Kč` (plátcem od 1. 1. následujícího roku) a `2 536 500 Kč` (plátcem ze zákona ihned). Dříve klamavě „plovoucích 12 měsíců".
+- **Náklady — sjednocení období:** náklady se řadí dle pozdějšího z DUZP / vystavení (shodně se základem daně z příjmů).
+
+### Changed
+
+- **CRM dashboard — přehlednější filtr období:** přepínač období přesunut z horní lišty k analytické části, kterou skutečně řídí; KPI karty nahoře jsou označené jako „tento měsíc / od začátku roku" (na období nereagují) a sekce řízené obdobím nesou štítek `(N m)`.
+- **Vydané faktury — řádkové „Celkem s DPH":** u plátce DPH řádkové „Celkem" nově zobrazuje částku včetně DPH (mění se podle zvolené sazby), aby byl efekt sazby DPH viditelný; rozpad bez DPH / DPH zůstává v souhrnu.
+
+## [4.3.6] — 2026-05-28
+
+Nová sekce **Náklady** ve Financích (statistiky a analýzy přijatých faktur, obdoba Tržeb) a rozšíření CRM o závazkové metriky.
+
+### Added
+
+- **Náklady** (*Finance → Náklady*) — přehled a analýzy nad přijatými fakturami, zrcadlí sekci *Tržby* pro stranu nákladů: plovoucí 12měsíční náklady, náklady letos/loni s meziročním srovnáním, odhad nákladů za aktuální rok (sezonalita + meziroční změna), počet přijatých faktur, aktivní dodavatelé, Ø doba úhrady dodavatelům, náklady za posledních 30 dní a nezaplacené závazky. Dále měsíční náklady (graf + loňská řada), kumulativní platby dodavatelům, top dodavatelé (koláč i tabulka za 12 měsíců), rozpad stavů přijatých faktur, rozpad DPH na vstupu podle sazby, náklady po rocích a měsících, rozpad nákladů podle kategorií, **riziko koncentrace dodavatelů**, distribuce doby úhrady, **plán plateb dodavatelům** (splatné závazky do 30 / 60 / 90 dní), aging závazků a distribuce velikosti přijatých faktur. Respektuje plátcovství DPH (náklad bez / s DPH) a řadí podle pozdějšího z dat DUZP / vystavení.
+- **CRM — závazkové metriky:** **DPO** (průměrná doba úhrady dodavatelům, protějšek DSO), **koncentrace dodavatelů** (závislost na top dodavatelích) a **pracovní kapitálový cyklus** (DSO − DPO — zda financujete provoz, nebo vás financují dodavatelé).
+
+## [4.3.5] — 2026-05-27
+
+Měsíční daňový export do jednoho ZIPu, oprava zařazení přijatých faktur do období DPH a doladění filtrů v seznamech.
+
+### Added
+
+- **Měsíční export** (*Daně → Měsíční export*) — stáhne jeden ZIP za zvolený měsíc s vystavenými i přijatými fakturami (PDF + ISDOC), bankovními výpisy (PDF + GPC) a Knihou DPH, roztříděné do pojmenovaných složek. U přijatých faktur bez originálního PDF se přiloží naše rekonstrukce. Vybíráte zaškrtnutím, u každé části vidíte počet dostupných dokladů. Běží jako **úloha na pozadí** (průběh, stažení výsledku, historie posledních exportů, automatický úklid po 7 dnech) — nespadne na timeout u velkého počtu faktur. (migrace `0059`)
+- **Filtr dodavatele** v seznamu přijatých faktur (za filtrem typu dokladu).
+
+### Changed
+
+- **Zařazení přijatých faktur do období DPH** (přiznání, kontrolní hlášení, kniha DPH) nově respektuje **pozdější z dat DUZP / vystavení** — nárok na odpočet nelze uplatnit dříve, než plátce drží daňový doklad (§ 73 ZDPH). Vystavené faktury se nadále řadí podle DUZP (daň na výstupu). Dříve se přijaté řadily jen podle DUZP, což u faktury se zpětným DUZP vystavené v pozdějším měsíci zařadilo odpočet do nesprávného (dřívějšího) období.
+
+### Fixed
+
+- Filtry „Všichni klienti" v seznamech **zakázek** a **faktur** nabízely i dodavatele bez vystavených faktur — nově nabízejí jen zákazníky.
+
+## [4.3.4] — 2026-05-27
+
+Doladění brandingu faktur a e-mailů (issue #43): akcentová barva se propisuje konzistentně i do dosud napevno fialových prvků a přibyl přepínač pro zobrazení názvu firmy vedle loga v PDF.
+
+### Added
+
+- **Přepínač „Zobrazit i název firmy vedle loga"** (*Nastavení → Branding*, výchozí vypnuto, aktivní jen když je nahrané logo). Vhodné pro malá/symbolová loga bez názvu — vedle loga se v PDF faktuře vykreslí obchodní (nebo firemní) název. Varianty „jen logo" a „jen nadpis" zůstávají beze změny. (migrace `0058`)
+- **Světlé pozadí e-mailu dle akcentu** — hlavička i box s částkou v odchozích e-mailech (odeslání, schválení) přebírají světlou variantu akcentové barvy dodavatele (mix s bílou); bez brandingu zůstává původní odstín.
+
+### Changed
+
+- **Akcentová barva v PDF se propisuje i do světlých ploch a linek** — dosud napevno fialové prvky (pilulka ISDOC, podbarvení „K úhradě", tenké linky mezisoučtů/banky/QR) i levý okraj poznámek nyní respektují zvolený akcent. Sémantické barvy (dobropis červená, storno šedá, reverse-charge amber, „uhrazeno" zelená, šedý CZK přepočet) zůstávají záměrně neutrální.
+
+### Fixed
+
+- **Levý okraj poznámek v PDF** nedržel akcentovou barvu (zůstával fialový i při vlastním brandingu).
 
 ## [4.3.3] — 2026-05-27
 

@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace MyInvoice\Service\Mail;
 
 use MyInvoice\Infrastructure\Database\Connection;
+use MyInvoice\Service\Branding\AccentColor;
 use MyInvoice\Service\Qr\QrPaymentGenerator;
 
 /**
@@ -243,6 +244,10 @@ final class InvoiceEmailVarsBuilder
                 $row['email_branding_enabled'] = (bool) $br['email_branding_enabled'];
                 $row['email_accent_color']     = (string) ($br['email_accent_color'] ?: '#3B2D83');
                 $row['logo_path']              = $br['logo_path'] ?: null;
+                $row['accent_soft']            = AccentColor::emailBackground(
+                    $row['email_branding_enabled'],
+                    $row['email_accent_color'],
+                );
             }
         }
 

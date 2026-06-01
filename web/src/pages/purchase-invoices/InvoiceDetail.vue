@@ -1,8 +1,10 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import LinkedDocumentsPanel from '@/components/documents/LinkedDocumentsPanel.vue'
+import PdfDropzone from '@/components/purchase/PdfDropzone.vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { useRoute, useRouter, RouterLink } from 'vue-router'
 import { useI18n } from 'vue-i18n'
-import { purchaseInvoicesApi, type PurchaseInvoice, type PurchaseInvoiceStatus } from '@/api/purchaseInvoices'
+import { purchaseInvoicesApi, type PurchaseInvoice, type PurchaseInvoiceStatus, type PurchaseInvoiceBrief } from '@/api/purchaseInvoices'
 import { formatMoney, formatDate } from '@/composables/useFormat'
 import { useToast } from '@/composables/useToast'
 import { useAuthStore } from '@/stores/auth'
@@ -18,6 +20,17 @@ const invoice = ref<PurchaseInvoice | null>(null)
 const loading = ref(true)
 const error = ref('')
 const acting = ref(false)
+
+// V režimu „ceny s DPH" nese unit_price_without_vat brutto (kvůli haléřově přesnému
+// výpočtu DPH koeficientem). Pro zobrazení proto ukazujeme skutečné NETTO dopočtené
+// z uloženého řádkového základu (total_without_vat / množství). V běžném režimu je
+// unit_price_without_vat už netto → vracíme ho beze změny.
+function displayUnitPriceNet(it: { quantity: number; unit_price_without_vat: number; total_without_vat?: number }): number {
+  if (invoice.value?.prices_include_vat && Number(it.quantity)) {
+    return Math.round(((it.total_without_vat ?? 0) / Number(it.quantity)) * 100) / 100
+  }
+  return it.unit_price_without_vat
+}
 const pdfPreviewOpen = ref(false) // default collapsed — user explicitně otevře (Edge blokuje attachment inline)
 const dismissingWarning = ref(false)
 
@@ -33,6 +46,101 @@ async function dismissWarning() {
   }
 }
 
+// ── Propojení se zálohovou fakturou (advance) — proti dvojímu započtení nákladu ──
+// Párování jde z obou stran. 'advance' = jsem na vyúčtovací faktuře, vybírám zálohu;
+// 'final' = jsem na záloze, vybírám vyúčtovací fakturu. Vazba se vždy ukládá na
+// vyúčtovací fakturu (advance_purchase_invoice_id).
+const advanceModalOpen = ref(false)
+const pairMode = ref<'advance' | 'final'>('advance')
+const advanceCandidates = ref<PurchaseInvoiceBrief[]>([])
+const loadingCandidates = ref(false)
+const linkingAdvance = ref(false)
+
+async function openPairModal(mode: 'advance' | 'final') {
+  if (!invoice.value) return
+  pairMode.value = mode
+  advanceModalOpen.value = true
+  loadingCandidates.value = true
+  try {
+    advanceCandidates.value = mode === 'advance'
+      ? await purchaseInvoicesApi.advanceCandidates(invoice.value.id)
+      : await purchaseInvoicesApi.settlementCandidates(invoice.value.id)
+  } catch (e) {
+    toast.error(apiErrorMessage(e))
+  } finally {
+    loadingCandidates.value = false
+  }
+}
+
+// Jsem na vyúčtovací faktuře, advanceId = záloha → vazba na current (i AI návrh).
+async function linkAdvance(advanceId: number) {
+  if (!invoice.value || linkingAdvance.value) return
+  linkingAdvance.value = true
+  try {
+    invoice.value = await purchaseInvoicesApi.linkAdvance(invoice.value.id, advanceId)
+    advanceModalOpen.value = false
+    toast.success(t('purchase_invoice.advance_link.linked'))
+    purchaseInvoicesApi.activity(id.value).then(a => { activity.value = a }).catch(() => {})
+  } catch (e) {
+    toast.error(apiErrorMessage(e))
+  } finally {
+    linkingAdvance.value = false
+  }
+}
+
+// Z modalu — význam candId závisí na pairMode.
+async function pickCandidate(candId: number) {
+  if (!invoice.value || linkingAdvance.value) return
+  if (pairMode.value === 'advance') { await linkAdvance(candId); return }
+  // 'final': jsem na záloze, candId = vyúčtovací faktura → vazba na ni, pak reload zálohy.
+  linkingAdvance.value = true
+  try {
+    await purchaseInvoicesApi.linkAdvance(candId, invoice.value.id)
+    advanceModalOpen.value = false
+    toast.success(t('purchase_invoice.advance_link.linked'))
+    await load()
+    purchaseInvoicesApi.activity(id.value).then(a => { activity.value = a }).catch(() => {})
+  } catch (e) {
+    toast.error(apiErrorMessage(e))
+  } finally {
+    linkingAdvance.value = false
+  }
+}
+
+// targetId = id vyúčtovací faktury, jejíž vazbu rušíme. Default = aktuální doklad
+// (jsem na vyúčtovací). Z detailu zálohy předáme id navázané faktury → reload.
+async function unlinkAdvance(targetId?: number) {
+  if (!invoice.value || linkingAdvance.value) return
+  if (!confirm(t('purchase_invoice.advance_link.unlink_confirm'))) return
+  linkingAdvance.value = true
+  try {
+    if (targetId && targetId !== invoice.value.id) {
+      await purchaseInvoicesApi.unlinkAdvance(targetId)
+      await load()
+    } else {
+      invoice.value = await purchaseInvoicesApi.unlinkAdvance(invoice.value.id)
+    }
+    toast.success(t('purchase_invoice.advance_link.unlinked'))
+    purchaseInvoicesApi.activity(id.value).then(a => { activity.value = a }).catch(() => {})
+  } catch (e) {
+    toast.error(apiErrorMessage(e))
+  } finally {
+    linkingAdvance.value = false
+  }
+}
+
+async function dismissAdvanceSuggestion() {
+  if (!invoice.value || linkingAdvance.value) return
+  linkingAdvance.value = true
+  try {
+    invoice.value = await purchaseInvoicesApi.dismissAdvanceSuggestion(invoice.value.id)
+  } catch (e) {
+    toast.error(apiErrorMessage(e))
+  } finally {
+    linkingAdvance.value = false
+  }
+}
+
 // Activity log — paralel s /invoices/{id}/activity
 const activity = ref<Array<{
   id: number
@@ -44,10 +152,14 @@ const activity = ref<Array<{
   ip: string | null
   created_at: string
 }>>([])
+const activityOpen = ref(false)
 
 const id = computed(() => Number(route.params.id))
 
 onMounted(load)
+// Detail se recykluje při navigaci /purchase-invoices/:id → :id (např. proklik na zálohu/vyúčtování),
+// onMounted se znovu nespustí → bez tohoto watch by se obsah nepřenačetl (vypadalo to jako „self / nic se neděje").
+watch(id, load)
 
 async function load() {
   loading.value = true
@@ -76,6 +188,28 @@ async function deletePdf() {
   }
 }
 
+// Nahrání PDF přímo z detailu, když u faktury žádné archivované není.
+// Faktura už má ID → upload jde rovnou (na rozdíl od editoru u nové faktury).
+const pdfUploading = ref(false)
+
+async function onPdfDropped(file: File) {
+  if (!invoice.value || pdfUploading.value) return
+  pdfUploading.value = true
+  try {
+    await purchaseInvoicesApi.uploadPdf(invoice.value.id, file)
+    toast.success(t('purchase_invoice.pdf.uploaded'))
+    await load()
+  } catch (e) {
+    toast.error(apiErrorMessage(e))
+  } finally {
+    pdfUploading.value = false
+  }
+}
+
+function onPdfError(_code: string, message: string) {
+  toast.error(message)
+}
+
 async function transition(target: PurchaseInvoiceStatus) {
   if (!invoice.value) return
   if (target === 'cancelled' && !confirm(t('purchase_invoice.confirm.cancel'))) return
@@ -83,6 +217,7 @@ async function transition(target: PurchaseInvoiceStatus) {
   try {
     invoice.value = await purchaseInvoicesApi.transition(invoice.value.id, target)
     toast.success(t(`purchase_invoice.transition.success_${target}`))
+    purchaseInvoicesApi.activity(id.value).then(a => { activity.value = a }).catch(() => {})
   } catch (e) {
     toast.error(apiErrorMessage(e))
   } finally {
@@ -181,6 +316,13 @@ function actionBadgeClass(action: string): string {
   return 'bg-neutral-100 text-neutral-600 border border-neutral-200'
 }
 
+function payloadText(payload: Record<string, unknown> | null): string {
+  if (!payload) return ''
+  return Object.entries(payload)
+    .map(([k, v]) => k + '=' + (typeof v === 'object' ? JSON.stringify(v) : String(v)))
+    .join(' · ')
+}
+
 /**
  * Context-aware label pro transition tlačítko.
  * Pro reverse transitions (paid→received, cancelled→received) labelovat výmluvněji
@@ -238,10 +380,37 @@ function transitionLabel(target: PurchaseInvoiceStatus): string {
       </h1>
       <div class="flex flex-wrap gap-2 md:justify-end">
         <RouterLink v-if="canEdit && auth.canWrite" :to="`/purchase-invoices/${invoice.id}/edit`"
-          class="cursor-pointer px-3 h-9 text-sm border border-neutral-300 rounded-md text-neutral-700 hover:bg-neutral-50 inline-flex items-center gap-1.5">
-          <svg class="w-4 h-4 text-neutral-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M11 5H6a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2v-5m-1.414-9.414a2 2 0 1 1 2.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/></svg>
+          class="cursor-pointer px-3 h-9 text-sm border border-success-500 text-success-600 hover:bg-success-50 font-medium rounded-md inline-flex items-center gap-1.5">
+          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M11 5H6a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2v-5m-1.414-9.414a2 2 0 1 1 2.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/></svg>
           {{ t('common.edit') }}
         </RouterLink>
+        <!-- Stavové akce (hlavní) hned za Upravit; utility (PDF/Export) až za nimi. -->
+        <template v-if="auth.canWrite">
+        <template v-for="target in allowedTransitions" :key="target">
+          <!-- Reverse: paid→received (unmark paid) NEBO cancelled→received (un-cancel) — neutral styl -->
+          <button v-if="target === 'received' && (invoice.status === 'paid' || invoice.status === 'cancelled')"
+            type="button" @click="transition('received')" :disabled="acting"
+            class="cursor-pointer px-3 h-9 text-sm border border-neutral-300 text-neutral-700 hover:bg-neutral-50 rounded-md inline-flex items-center gap-1.5">
+            <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M3 10h10a8 8 0 0 1 8 8v2M3 10l6 6m-6-6l6-6"/></svg>
+            {{ transitionLabel('received') }}
+          </button>
+          <!-- Cancel: danger styl -->
+          <button v-else-if="target === 'cancelled'" type="button" @click="transition('cancelled')" :disabled="acting"
+            class="cursor-pointer px-3 h-9 text-sm border border-danger-500/50 text-danger-500 hover:bg-danger-50 rounded-md inline-flex items-center gap-1.5">
+            <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
+            {{ t('purchase_invoice.actions.mark_cancelled') }}
+          </button>
+          <!-- Forward transitions — hlavní akce (fialová primary, za zeleným Upravit) -->
+          <button v-else type="button" @click="transition(target)" :disabled="acting"
+            :title="target === 'booked' ? t('purchase_invoice.actions.mark_booked_hint') : ''"
+            class="cursor-pointer px-3 h-9 text-sm bg-primary-600 hover:bg-primary-700 disabled:bg-neutral-300 text-white font-medium rounded-md inline-flex items-center gap-1.5">
+            <svg v-if="target === 'paid'" class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 14l2 2 4-4m6 2a9 9 0 1 1-18 0 9 9 0 0 1 18 0z"/></svg>
+            <svg v-else-if="target === 'received'" class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
+            <svg v-else class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M19 11H5m14 0a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-6a2 2 0 0 1 2-2"/></svg>
+            {{ transitionLabel(target) }}
+          </button>
+        </template>
+        </template>
         <a v-if="invoice.pdf_path" :href="purchaseInvoicesApi.pdfUrl(invoice.id)" target="_blank"
           class="cursor-pointer px-3 h-9 text-sm border border-primary-500/40 rounded-md text-primary-700 hover:bg-primary-50 inline-flex items-center gap-1.5">
           <svg class="w-4 h-4 text-primary-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12h6m-6 4h6m2 5H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5.586a1 1 0 0 1 .707.293l5.414 5.414a1 1 0 0 1 .293.707V19a2 2 0 0 1-2 2z"/></svg>
@@ -254,7 +423,7 @@ function transitionLabel(target: PurchaseInvoiceStatus): string {
             {{ t('purchase_invoice.export.menu') }}
             <svg class="w-3 h-3 text-neutral-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7"/></svg>
           </summary>
-          <div class="absolute right-0 top-full mt-1 z-20 bg-white border border-neutral-200 rounded-md shadow-lg min-w-[220px]">
+          <div class="absolute right-0 top-full mt-1 z-20 bg-surface border border-neutral-200 rounded-md shadow-lg min-w-[220px]">
             <a :href="purchaseInvoicesApi.ourPdfUrl(invoice.id)" target="_blank"
               class="cursor-pointer block px-4 py-2 text-sm hover:bg-neutral-50 text-neutral-700">
               <svg class="inline w-4 h-4 mr-1" viewBox="0 0 32 36"><path fill="#dc2626" d="M4 2h16l8 8v22a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2z"/><text x="16" y="26" fill="#fff" font-size="8" font-weight="700" text-anchor="middle">PDF</text></svg>
@@ -272,32 +441,6 @@ function transitionLabel(target: PurchaseInvoiceStatus): string {
             </a>
           </div>
         </details>
-        <template v-if="auth.canWrite">
-        <template v-for="target in allowedTransitions" :key="target">
-          <!-- Reverse: paid→received (unmark paid) NEBO cancelled→received (un-cancel) — neutral styl -->
-          <button v-if="target === 'received' && (invoice.status === 'paid' || invoice.status === 'cancelled')"
-            type="button" @click="transition('received')" :disabled="acting"
-            class="cursor-pointer px-3 h-9 text-sm border border-neutral-300 text-neutral-700 hover:bg-neutral-50 rounded-md inline-flex items-center gap-1.5">
-            <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M3 10h10a8 8 0 0 1 8 8v2M3 10l6 6m-6-6l6-6"/></svg>
-            {{ transitionLabel('received') }}
-          </button>
-          <!-- Cancel: danger styl -->
-          <button v-else-if="target === 'cancelled'" type="button" @click="transition('cancelled')" :disabled="acting"
-            class="cursor-pointer px-3 h-9 text-sm border border-danger-500/50 text-danger-500 hover:bg-danger-50 rounded-md inline-flex items-center gap-1.5">
-            <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
-            {{ t('purchase_invoice.actions.mark_cancelled') }}
-          </button>
-          <!-- Forward transitions — primary -->
-          <button v-else type="button" @click="transition(target)" :disabled="acting"
-            :title="target === 'booked' ? t('purchase_invoice.actions.mark_booked_hint') : ''"
-            class="cursor-pointer px-3 h-9 text-sm bg-primary-600 hover:bg-primary-700 disabled:bg-neutral-300 text-white font-medium rounded-md inline-flex items-center gap-1.5">
-            <svg v-if="target === 'paid'" class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 14l2 2 4-4m6 2a9 9 0 1 1-18 0 9 9 0 0 1 18 0z"/></svg>
-            <svg v-else-if="target === 'received'" class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
-            <svg v-else class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M19 11H5m14 0a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-6a2 2 0 0 1 2-2"/></svg>
-            {{ transitionLabel(target) }}
-          </button>
-        </template>
-        </template>
         <button v-if="canDelete && auth.canWrite" type="button" @click="remove"
           class="cursor-pointer px-3 h-9 text-sm border border-danger-500/50 text-danger-500 hover:bg-danger-50 rounded-md inline-flex items-center gap-1.5">
           <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M19 7l-.867 12.142A2 2 0 0 1 16.138 21H7.862a2 2 0 0 1-1.995-1.858L5 7m5 4v6m4-6v6M1 7h22M9 7V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v3"/></svg>
@@ -321,10 +464,41 @@ function transitionLabel(target: PurchaseInvoiceStatus): string {
       </div>
     </div>
 
+    <!-- ═══ Propojení se zálohou — banner pod headerem (sjednoceno s vydanou fakturou) ═══ -->
+    <!-- Tento doklad JE záloha → odkaz na vyúčtovací fakturu (+ odpojení) -->
+    <div v-if="invoice.settled_by"
+      class="flex items-center justify-between gap-3 bg-primary-50 border border-primary-200 rounded-lg px-4 py-2.5 text-sm">
+      <span class="text-primary-700 min-w-0">
+        {{ t('purchase_invoice.advance_link.settled_by') }}
+        <RouterLink :to="`/purchase-invoices/${invoice.settled_by.id}`" class="font-mono font-medium hover:underline">
+          {{ invoice.settled_by.varsymbol || invoice.settled_by.vendor_invoice_number || ('#' + invoice.settled_by.id) }}
+        </RouterLink>
+      </span>
+      <button v-if="auth.canWrite" type="button" @click="unlinkAdvance(invoice.settled_by.id)" :disabled="linkingAdvance"
+        class="cursor-pointer text-xs px-2 py-1 border border-neutral-300 rounded text-neutral-600 hover:bg-neutral-50 disabled:opacity-50 shrink-0 bg-surface">
+        {{ t('purchase_invoice.advance_link.unlink') }}
+      </button>
+    </div>
+    <!-- Vyúčtovací faktura → odkaz na započtenou zálohu (+ odpojení) -->
+    <div v-else-if="invoice.linked_advance"
+      class="flex items-center justify-between gap-3 bg-primary-50 border border-primary-200 rounded-lg px-4 py-2.5 text-sm">
+      <span class="text-primary-700 min-w-0">
+        {{ t('purchase_invoice.advance_link.linked_to') }}
+        <RouterLink :to="`/purchase-invoices/${invoice.linked_advance.id}`" class="font-mono font-medium hover:underline">
+          {{ invoice.linked_advance.varsymbol || invoice.linked_advance.vendor_invoice_number || ('#' + invoice.linked_advance.id) }}
+        </RouterLink>
+        <span class="text-primary-700/70 font-mono">(−{{ formatMoney(invoice.linked_advance.total_with_vat, invoice.linked_advance.currency) }})</span>
+      </span>
+      <button v-if="auth.canWrite" type="button" @click="unlinkAdvance()" :disabled="linkingAdvance"
+        class="cursor-pointer text-xs px-2 py-1 border border-neutral-300 rounded text-neutral-600 hover:bg-neutral-50 disabled:opacity-50 shrink-0 bg-surface">
+        {{ t('purchase_invoice.advance_link.unlink') }}
+      </button>
+    </div>
+
     <!-- ═══ Datumy & metadata (3 sloupce ala vystavená InvoiceDetail) ═══ -->
     <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
       <!-- Datumy -->
-      <div class="bg-white border border-neutral-200 rounded-lg p-5 shadow-sm">
+      <div class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
         <h3 class="text-sm font-medium text-neutral-700 mb-3">{{ t('purchase_invoice.fields.issue_date') }} / {{ t('purchase_invoice.fields.tax_date') }} / {{ t('purchase_invoice.fields.due_date') }}</h3>
         <dl class="space-y-2 text-sm">
           <div class="flex justify-between"><dt class="text-neutral-500">{{ t('purchase_invoice.fields.issue_date') }}</dt><dd class="font-mono">{{ formatDate(invoice.issue_date) }}</dd></div>
@@ -336,7 +510,7 @@ function transitionLabel(target: PurchaseInvoiceStatus): string {
       </div>
 
       <!-- Měna & kurz -->
-      <div class="bg-white border border-neutral-200 rounded-lg p-5 shadow-sm">
+      <div class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
         <h3 class="text-sm font-medium text-neutral-700 mb-3">{{ t('purchase_invoice.fields.currency') }}</h3>
         <dl class="space-y-2 text-sm">
           <div class="flex justify-between"><dt class="text-neutral-500">{{ t('purchase_invoice.fields.currency') }}</dt><dd class="font-mono">{{ invoice.currency }}</dd></div>
@@ -355,11 +529,21 @@ function transitionLabel(target: PurchaseInvoiceStatus): string {
               {{ invoice.tax_deductible === false ? t('common.no') : t('common.yes') }}
             </dd>
           </div>
+          <div class="flex justify-between">
+            <dt class="text-neutral-500">{{ t('purchase_invoice.classification.expense_category') }}</dt>
+            <dd class="font-medium text-right text-neutral-700">
+              <template v-if="invoice.expense_category_label">
+                {{ invoice.expense_category_label }}
+                <span class="text-neutral-400">({{ invoice.expense_category_code }})</span>
+              </template>
+              <span v-else class="text-neutral-400">—</span>
+            </dd>
+          </div>
         </dl>
       </div>
 
       <!-- Platba v jiné měně -->
-      <div v-if="invoice.payment_currency_id" class="bg-white border border-neutral-200 rounded-lg p-5 shadow-sm">
+      <div v-if="invoice.payment_currency_id" class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
         <h3 class="text-sm font-medium text-neutral-700 mb-3">{{ t('purchase_invoice.payment_currency.toggle') }}</h3>
         <dl class="space-y-2 text-sm">
           <div class="flex justify-between"><dt class="text-neutral-500">{{ t('purchase_invoice.payment_currency.currency') }}</dt><dd class="font-mono">{{ invoice.payment_currency || '—' }}</dd></div>
@@ -371,7 +555,7 @@ function transitionLabel(target: PurchaseInvoiceStatus): string {
     </div>
 
     <!-- ═══ Položky ═══ -->
-    <div class="bg-white border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
+    <div class="bg-surface border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
       <h3 class="text-sm font-medium text-neutral-700 px-5 py-3 border-b border-neutral-100">{{ t('purchase_invoice.items.title') }}</h3>
       <table class="w-full text-sm">
         <thead class="bg-neutral-50 text-neutral-500 text-xs uppercase tracking-wide">
@@ -389,7 +573,7 @@ function transitionLabel(target: PurchaseInvoiceStatus): string {
             <td class="py-2 px-5">{{ it.description }}</td>
             <td class="py-2 px-2 text-right font-mono">{{ it.quantity }}</td>
             <td class="py-2 px-2">{{ it.unit }}</td>
-            <td class="py-2 px-2 text-right font-mono">{{ formatMoney(it.unit_price_without_vat, invoice.currency) }}</td>
+            <td class="py-2 px-2 text-right font-mono">{{ formatMoney(displayUnitPriceNet(it), invoice.currency) }}</td>
             <td class="py-2 px-2 text-right">{{ it.vat_rate_snapshot }}%</td>
             <td class="py-2 px-5 text-right font-mono">{{ formatMoney(it.total_with_vat, invoice.currency) }}</td>
           </tr>
@@ -399,8 +583,15 @@ function transitionLabel(target: PurchaseInvoiceStatus): string {
 
     <!-- ═══ Totals + VAT breakdown ═══ -->
     <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-      <div class="bg-white border border-neutral-200 rounded-lg p-5 shadow-sm">
-        <h3 class="text-sm font-medium text-neutral-700 mb-3">{{ t('purchase_invoice.vat_breakdown.title') }}</h3>
+      <div class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
+        <h3 class="text-sm font-medium text-neutral-700 mb-3 flex items-center gap-2">
+          {{ t('purchase_invoice.vat_breakdown.title') }}
+          <span v-if="invoice.vat_overrides && invoice.vat_overrides.length"
+            class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-warning-50 text-warning-700 border border-warning-500/40"
+            :title="t('purchase_invoice.vat_recap.overridden_note')">
+            {{ t('purchase_invoice.vat_breakdown.per_document') }}
+          </span>
+        </h3>
         <table class="w-full text-sm">
           <thead>
             <tr class="text-xs uppercase tracking-wide text-neutral-500 border-b border-neutral-100">
@@ -420,7 +611,7 @@ function transitionLabel(target: PurchaseInvoiceStatus): string {
           </tbody>
         </table>
       </div>
-      <div class="bg-white border border-neutral-200 rounded-lg p-5 shadow-sm">
+      <div class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
         <h3 class="text-sm font-medium text-neutral-700 mb-3">{{ t('purchase_invoice.totals.with_vat') }}</h3>
         <dl class="space-y-2 text-sm">
           <div class="flex justify-between"><dt class="text-neutral-600">{{ t('purchase_invoice.totals.without_vat') }}</dt><dd class="font-mono">{{ formatMoney(invoice.total_without_vat, invoice.currency) }}</dd></div>
@@ -431,7 +622,7 @@ function transitionLabel(target: PurchaseInvoiceStatus): string {
             <div class="flex justify-between font-semibold border-t border-neutral-100 pt-2"><dt>{{ t('purchase_invoice.totals.with_vat_rounded') }}</dt><dd class="font-mono">{{ formatMoney(invoice.total_with_vat + invoice.rounding, invoice.currency) }}</dd></div>
           </template>
           <div v-if="invoice.advance_paid_amount > 0" class="flex justify-between text-neutral-500"><dt>{{ t('purchase_invoice.totals.advance_paid') }}</dt><dd class="font-mono">−{{ formatMoney(invoice.advance_paid_amount, invoice.currency) }}</dd></div>
-          <div class="flex justify-between font-semibold text-lg border-t border-neutral-200 pt-2"><dt>{{ t('purchase_invoice.totals.to_pay') }}</dt><dd class="font-mono">{{ formatMoney((invoice.amount_to_pay || invoice.total_with_vat) + (invoice.rounding || 0), invoice.currency) }}</dd></div>
+          <div class="flex justify-between font-semibold text-lg border-t border-neutral-200 pt-2"><dt>{{ t('purchase_invoice.totals.to_pay') }}</dt><dd class="font-mono">{{ formatMoney((invoice.amount_to_pay ?? invoice.total_with_vat) + (invoice.rounding || 0), invoice.currency) }}</dd></div>
           <!-- CZK přepočet (jen pokud faktura není CZK + má exchange_rate) -->
           <template v-if="invoice.currency !== 'CZK' && invoice.exchange_rate">
             <div class="border-t border-neutral-200 pt-3 mt-3">
@@ -452,8 +643,82 @@ function transitionLabel(target: PurchaseInvoiceStatus): string {
       </div>
     </div>
 
+    <!-- ═══ Správa propojení se zálohou — jen nelinkované stavy (linkované jsou v banneru pod headerem) ═══ -->
+    <div v-if="!invoice.settled_by && !invoice.linked_advance"
+      class="bg-surface border border-neutral-200 rounded-lg shadow-sm p-5">
+      <h3 class="text-sm font-medium text-neutral-700 mb-3">
+        {{ invoice.document_kind === 'advance'
+            ? t('purchase_invoice.advance_link.title')
+            : t('purchase_invoice.advance_link.title_settlement') }}
+      </h3>
+
+      <!-- Záloha zatím nevyúčtovaná → nabídka spárovat s fakturou (opačný směr) -->
+      <div v-if="invoice.document_kind === 'advance'" class="flex items-center justify-between gap-3">
+        <p class="text-sm text-neutral-500">{{ t('purchase_invoice.advance_link.not_settled') }}</p>
+        <button v-if="auth.canWrite && invoice.has_settlement_candidates" type="button" @click="openPairModal('final')"
+          class="cursor-pointer text-sm px-3 h-9 border border-primary-500/40 text-primary-700 hover:bg-primary-50 rounded-md shrink-0">
+          {{ t('purchase_invoice.advance_link.pair_settlement') }}
+        </button>
+      </div>
+
+      <!-- Vyúčtovací faktura bez propojení → AI návrh / spárovat -->
+      <template v-else>
+        <div v-if="invoice.advance_link_suggestion" class="p-3 bg-primary-50 border border-primary-500/30 rounded-md flex gap-3 items-start">
+          <div class="text-sm flex-1 min-w-0">
+            <div class="font-medium text-primary-700">{{ t('purchase_invoice.advance_link.ai_suggestion_title') }}</div>
+            <div class="text-neutral-600 mt-1">
+              {{ t('purchase_invoice.advance_link.ai_suggestion_body') }}
+              <span class="font-mono">{{ invoice.advance_link_suggestion.varsymbol || invoice.advance_link_suggestion.vendor_invoice_number || ('#' + invoice.advance_link_suggestion.id) }}</span>
+              <span class="text-neutral-500 font-mono">({{ formatMoney(invoice.advance_link_suggestion.total_with_vat, invoice.advance_link_suggestion.currency) }})</span>
+            </div>
+          </div>
+          <div v-if="auth.canWrite" class="flex gap-2 shrink-0">
+            <button type="button" @click="linkAdvance(invoice.advance_link_suggestion.id)" :disabled="linkingAdvance"
+              class="cursor-pointer text-xs px-2 py-1 bg-primary-600 text-white rounded hover:bg-primary-700 disabled:opacity-50">
+              {{ t('purchase_invoice.advance_link.confirm') }}
+            </button>
+            <button type="button" @click="dismissAdvanceSuggestion" :disabled="linkingAdvance"
+              class="cursor-pointer text-xs px-2 py-1 border border-neutral-300 rounded text-neutral-600 hover:bg-neutral-50 disabled:opacity-50">
+              {{ t('purchase_invoice.advance_link.dismiss') }}
+            </button>
+          </div>
+        </div>
+
+        <div v-else class="flex items-center justify-between gap-3">
+          <p class="text-sm text-neutral-500">{{ t('purchase_invoice.advance_link.none') }}</p>
+          <button v-if="auth.canWrite && invoice.has_advance_candidates" type="button" @click="openPairModal('advance')"
+            class="cursor-pointer text-sm px-3 h-9 border border-primary-500/40 text-primary-700 hover:bg-primary-50 rounded-md shrink-0">
+            {{ t('purchase_invoice.advance_link.pair') }}
+          </button>
+        </div>
+      </template>
+    </div>
+
+    <!-- Modal výběru zálohy k propojení -->
+    <div v-if="advanceModalOpen" class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" @click.self="advanceModalOpen = false">
+      <div class="bg-surface rounded-lg shadow-xl max-w-lg w-full max-h-[80vh] overflow-hidden flex flex-col">
+        <div class="px-5 py-3 border-b border-neutral-100 flex items-center justify-between">
+          <h3 class="font-medium">{{ pairMode === 'advance' ? t('purchase_invoice.advance_link.modal_title') : t('purchase_invoice.advance_link.modal_title_settlement') }}</h3>
+          <button type="button" @click="advanceModalOpen = false" class="cursor-pointer text-neutral-400 hover:text-neutral-600">✕</button>
+        </div>
+        <div class="p-4 overflow-y-auto">
+          <div v-if="loadingCandidates" class="text-sm text-neutral-500">{{ t('common.loading') }}</div>
+          <div v-else-if="advanceCandidates.length === 0" class="text-sm text-neutral-500">{{ pairMode === 'advance' ? t('purchase_invoice.advance_link.no_candidates') : t('purchase_invoice.advance_link.no_candidates_settlement') }}</div>
+          <ul v-else class="space-y-2">
+            <li v-for="cand in advanceCandidates" :key="cand.id">
+              <button type="button" @click="pickCandidate(cand.id)" :disabled="linkingAdvance"
+                class="cursor-pointer w-full text-left px-3 py-2 border border-neutral-200 rounded-md hover:border-primary-400 hover:bg-primary-50 disabled:opacity-50 flex justify-between items-center gap-3">
+                <span class="font-mono text-sm">{{ cand.varsymbol || cand.vendor_invoice_number || ('#' + cand.id) }}</span>
+                <span class="text-sm text-neutral-500">{{ cand.issue_date ? formatDate(cand.issue_date) : '' }} · {{ formatMoney(cand.total_with_vat, cand.currency) }}</span>
+              </button>
+            </li>
+          </ul>
+        </div>
+      </div>
+    </div>
+
     <!-- ═══ Originální PDF od dodavatele ═══ -->
-    <div v-if="invoice.pdf_path" class="bg-white border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
+    <div v-if="invoice.pdf_path" class="bg-surface border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
       <div class="flex items-center justify-between px-5 py-3 border-b border-neutral-100">
         <div class="flex items-center gap-3">
           <svg class="w-7 h-8 shrink-0" viewBox="0 0 32 36" xmlns="http://www.w3.org/2000/svg">
@@ -497,13 +762,14 @@ function transitionLabel(target: PurchaseInvoiceStatus): string {
         ></iframe>
       </div>
     </div>
-    <div v-else class="bg-white border border-neutral-200 rounded-lg p-5 shadow-sm">
+    <div v-else class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
       <h3 class="text-sm font-medium text-neutral-700 mb-3">{{ t('purchase_invoice.pdf.title') }}</h3>
-      <p class="text-sm text-neutral-500">{{ t('purchase_invoice.pdf.no_pdf') }}</p>
+      <PdfDropzone v-if="auth.canWrite" :uploading="pdfUploading" @file-dropped="onPdfDropped" @error="onPdfError" />
+      <p v-else class="text-sm text-neutral-500">{{ t('purchase_invoice.pdf.no_pdf') }}</p>
     </div>
 
     <!-- ═══ Poznámky (jen pokud existují) ═══ -->
-    <div v-if="invoice.note_above_items || invoice.note_below_items" class="bg-white border border-neutral-200 rounded-lg p-5 shadow-sm">
+    <div v-if="invoice.note_above_items || invoice.note_below_items" class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
       <h3 class="text-sm font-medium text-neutral-700 mb-3">{{ t('purchase_invoice.fields.note_above_items') }} / {{ t('purchase_invoice.fields.note_below_items') }}</h3>
       <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm">
         <div v-if="invoice.note_above_items">
@@ -518,7 +784,7 @@ function transitionLabel(target: PurchaseInvoiceStatus): string {
     </div>
 
     <!-- ═══ More actions (vendor detail link, paralel s vystavenou InvoiceDetail) ═══ -->
-    <div v-if="invoice && (invoice.vendor_id || canForceEdit || canForceDelete)" class="bg-white border border-neutral-200 rounded-lg p-5 shadow-sm">
+    <div v-if="invoice && (invoice.vendor_id || canForceEdit || canForceDelete)" class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
       <h3 class="text-xs font-semibold uppercase tracking-wide text-neutral-500 mb-3">{{ t('invoice.more_actions') }}</h3>
       <div class="flex flex-wrap gap-2">
         <RouterLink v-if="invoice.vendor_id" :to="`/clients/${invoice.vendor_id}`"
@@ -544,28 +810,48 @@ function transitionLabel(target: PurchaseInvoiceStatus): string {
     </div>
 
     <!-- ═══ Activity log (paralel s /invoices) ═══ -->
-    <div v-if="activity.length > 0" class="bg-white border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
-      <header class="px-5 py-3 border-b border-neutral-200">
-        <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-500">{{ t('invoice.activity') }}</h3>
-      </header>
-      <div class="overflow-x-auto">
-        <table class="w-full text-sm">
-          <tbody class="divide-y divide-neutral-100">
-            <tr v-for="a in activity" :key="a.id" class="hover:bg-neutral-50 align-top">
-              <td class="px-5 py-2 whitespace-nowrap">
-                <span class="text-xs px-2 py-0.5 rounded font-medium" :class="actionBadgeClass(a.action)">{{ actionShortLabel(a.action) }}</span>
-              </td>
-              <td class="px-3 py-2 text-xs text-neutral-500 whitespace-nowrap">{{ a.user_name || a.user_email || '—' }}</td>
-              <td class="px-3 py-2 font-mono text-xs text-neutral-400 whitespace-nowrap">{{ a.created_at.replace('T', ' ').slice(0, 19) }}</td>
-              <td class="px-3 py-2 text-xs text-neutral-600 break-all whitespace-pre-wrap leading-snug">
-                <template v-if="a.payload">
-                  {{ Object.entries(a.payload).map(([k, v]) => k + '=' + (typeof v === 'object' ? JSON.stringify(v) : String(v))).join(' · ') }}
-                </template>
-              </td>
-            </tr>
-          </tbody>
-        </table>
+    <div v-if="activity.length > 0" class="bg-surface border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
+      <button type="button" @click="activityOpen = !activityOpen"
+        class="w-full px-5 py-3 flex items-center justify-between text-left hover:bg-neutral-50 cursor-pointer"
+        :class="activityOpen ? 'border-b border-neutral-200' : ''">
+        <span class="flex items-center gap-2">
+          <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-500">{{ t('invoice.activity') }}</h3>
+          <span class="text-xs text-neutral-400">{{ activity.length }}</span>
+        </span>
+        <svg class="w-4 h-4 text-neutral-400 transition-transform" :class="activityOpen ? 'rotate-180' : ''" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7" />
+        </svg>
+      </button>
+      <div v-show="activityOpen">
+        <!-- Desktop: tabulka -->
+        <div class="hidden md:block overflow-x-auto">
+          <table class="w-full text-sm">
+            <tbody class="divide-y divide-neutral-100">
+              <tr v-for="a in activity" :key="a.id" class="hover:bg-neutral-50 align-top">
+                <td class="px-5 py-2 whitespace-nowrap">
+                  <span class="text-xs px-2 py-0.5 rounded font-medium" :class="actionBadgeClass(a.action)">{{ actionShortLabel(a.action) }}</span>
+                </td>
+                <td class="px-3 py-2 text-xs text-neutral-500 whitespace-nowrap">{{ a.user_name || a.user_email || '—' }}</td>
+                <td class="px-3 py-2 font-mono text-xs text-neutral-400 whitespace-nowrap">{{ a.created_at.replace('T', ' ').slice(0, 19) }}</td>
+                <td class="px-3 py-2 text-xs text-neutral-600 break-all whitespace-pre-wrap leading-snug">{{ payloadText(a.payload) }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <!-- Mobil: karty (payload na plnou šířku, jinak se zmáčkne do úzkého sloupce) -->
+        <ul class="md:hidden divide-y divide-neutral-100">
+          <li v-for="a in activity" :key="`m-${a.id}`" class="px-4 py-3 space-y-1.5">
+            <div class="flex items-center justify-between gap-2">
+              <span class="text-xs px-2 py-0.5 rounded font-medium" :class="actionBadgeClass(a.action)">{{ actionShortLabel(a.action) }}</span>
+              <span class="font-mono text-xs text-neutral-400 whitespace-nowrap">{{ a.created_at.replace('T', ' ').slice(0, 19) }}</span>
+            </div>
+            <div class="text-xs text-neutral-500">{{ a.user_name || a.user_email || '—' }}</div>
+            <div v-if="a.payload" class="text-xs text-neutral-600 break-all whitespace-pre-wrap leading-snug">{{ payloadText(a.payload) }}</div>
+          </li>
+        </ul>
       </div>
     </div>
+
+    <LinkedDocumentsPanel v-if="invoice" class="mt-4 block" entity-type="purchase_invoice" :entity-id="invoice.id" />
   </div>
 </template>

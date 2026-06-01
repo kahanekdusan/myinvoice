@@ -1,8 +1,9 @@
 <script setup lang="ts">
+import LinkedDocumentsPanel from '@/components/documents/LinkedDocumentsPanel.vue'
 import { ref, onMounted, computed } from 'vue'
 import { useRoute, useRouter, RouterLink } from 'vue-router'
 import { useI18n } from 'vue-i18n'
-import { clientsApi, type Client } from '@/api/clients'
+import { clientsApi, type Client, type BankLookupResult } from '@/api/clients'
 import { invoicesApi, type InvoiceListItem } from '@/api/invoices'
 import { purchaseInvoicesApi, type PurchaseInvoice } from '@/api/purchaseInvoices'
 import { recurringApi, type RecurringTemplate } from '@/api/recurring'
@@ -31,6 +32,27 @@ const recurringTemplates = ref<RecurringTemplate[]>([])
 const purchaseInvoices = ref<PurchaseInvoice[]>([])
 const purchaseInvoicesLoading = ref(false)
 
+// Detaily plátce DPH (registr plátců DPH / CRPDPH) — načítají se až na vyžádání.
+const vatInfoOpen = ref(false)
+const vatInfoLoading = ref(false)
+const vatInfo = ref<BankLookupResult | null>(null)
+const vatInfoError = ref('')
+
+async function loadVatPayerDetails() {
+  const dic = (client.value?.dic || '').replace(/\D/g, '')
+  if (!dic) return
+  vatInfoOpen.value = true
+  vatInfoLoading.value = true
+  vatInfoError.value = ''
+  try {
+    vatInfo.value = await clientsApi.lookupBank(dic)
+  } catch (e: any) {
+    vatInfoError.value = e?.response?.data?.error?.message || t('client.vat_payer_details_failed')
+  } finally {
+    vatInfoLoading.value = false
+  }
+}
+
 // Aggregace přijatých faktur per měsíc / rok (paralel se statistikami vystavených).
 // Server zatím nevrací aggregated dataset, takže computované client-side z purchaseInvoices.
 //
@@ -49,6 +71,16 @@ const purchaseIsMultiCurrency = computed(() => purchaseCurrencies.value.length >
 const purchaseDisplayCurrency = computed(() =>
   purchaseIsMultiCurrency.value ? 'CZK' : (purchaseCurrencies.value[0] || 'CZK')
 )
+
+function formatPaymentDue(c: Client): string {
+  if (c.payment_due_default == null) return t('client.due_default')
+  if (c.payment_due_unit === 'month') {
+    return c.payment_due_default === 1
+      ? t('client.payment_due_preset_month')
+      : `${c.payment_due_default}× ${t('client.payment_due_preset_month').toLowerCase()}`
+  }
+  return t('client.due_days_n', { n: c.payment_due_default })
+}
 
 // Náklady čteme ze server-side agregace (client.costs_by_month / costs_by_year) — nezávislé na paginaci
 // listu. Multi-currency: v multi režimu sloučíme do CZK přes total_czk, single-ccy zachová per měnu.
@@ -297,10 +329,15 @@ async function deleteClient() {
       </div>
       <div class="flex flex-wrap gap-2 md:justify-end">
         <RouterLink v-if="auth.canWrite" :to="`/clients/${client.id}/edit`"
-          class="cursor-pointer px-3 h-9 text-sm border border-primary-500/40 rounded-md text-primary-700 hover:bg-primary-50 inline-flex items-center gap-1.5">
-          <svg class="w-4 h-4 text-primary-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M11 5H6a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2v-5m-1.414-9.414a2 2 0 1 1 2.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/></svg>
+          class="cursor-pointer px-3 h-9 text-sm border border-success-500 text-success-600 hover:bg-success-50 font-medium rounded-md inline-flex items-center gap-1.5">
+          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M11 5H6a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2v-5m-1.414-9.414a2 2 0 1 1 2.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/></svg>
           {{ t('common.edit') }}
         </RouterLink>
+        <button v-if="client.dic" @click="loadVatPayerDetails" :disabled="vatInfoLoading"
+          class="cursor-pointer px-3 h-9 text-sm border border-primary-500/40 rounded-md text-primary-700 hover:bg-primary-50 inline-flex items-center gap-1.5 disabled:opacity-50">
+          <svg class="w-4 h-4 text-primary-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 1 1-18 0 9 9 0 0 1 18 0z"/></svg>
+          {{ vatInfoLoading ? t('common.loading') : t('client.vat_payer_details') }}
+        </button>
         <button v-if="!client.archived_at && auth.canWrite" @click="archive"
           class="cursor-pointer px-3 h-9 text-sm border border-warning-500/50 rounded-md text-warning-600 hover:bg-warning-50 inline-flex items-center gap-1.5">
           <svg class="w-4 h-4 text-warning-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M5 8h14M5 8a2 2 0 1 1 0-4h14a2 2 0 1 1 0 4M5 8v10a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8m-9 4h4"/></svg>
@@ -319,9 +356,39 @@ async function deleteClient() {
       </div>
     </div>
 
+    <!-- Detaily plátce DPH (na vyžádání z registru plátců DPH / MFČR) -->
+    <div v-if="vatInfoOpen" class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
+      <div class="flex items-center justify-between mb-3">
+        <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-500">{{ t('client.vat_payer_details') }}</h3>
+        <button @click="vatInfoOpen = false" class="cursor-pointer text-neutral-400 hover:text-neutral-700 text-sm leading-none">✕</button>
+      </div>
+      <div v-if="vatInfoLoading" class="text-sm text-neutral-500">{{ t('common.loading') }}</div>
+      <div v-else-if="vatInfoError" class="text-sm text-danger-500">{{ vatInfoError }}</div>
+      <template v-else-if="vatInfo">
+        <div v-if="vatInfo.source === 'error'" class="text-sm text-warning-600">{{ t('client.vat_payer_unavailable') }}</div>
+        <div v-else-if="!vatInfo.found" class="text-sm text-neutral-600">{{ t('client.vat_payer_not_registered') }}</div>
+        <div v-else class="space-y-3 text-sm">
+          <div class="flex items-center gap-2">
+            <span class="text-neutral-500">{{ t('client.vat_payer_reliability') }}:</span>
+            <span v-if="vatInfo.unreliable === true" class="px-2 py-0.5 rounded bg-danger-50 text-danger-600 font-medium">{{ t('client.vat_payer_unreliable') }}</span>
+            <span v-else-if="vatInfo.unreliable === false" class="px-2 py-0.5 rounded bg-success-50 text-success-600 font-medium">{{ t('client.vat_payer_reliable') }}</span>
+            <span v-else class="px-2 py-0.5 rounded bg-neutral-100 text-neutral-600">{{ t('client.vat_payer_unknown') }}</span>
+          </div>
+          <div>
+            <div class="text-neutral-500 mb-1">{{ t('client.vat_payer_accounts') }}:</div>
+            <ul v-if="vatInfo.accounts.length" class="space-y-1">
+              <li v-for="(a, i) in vatInfo.accounts" :key="i" class="font-mono text-neutral-900">{{ a.display }}</li>
+            </ul>
+            <div v-else class="text-neutral-500">{{ t('client.vat_payer_no_accounts') }}</div>
+          </div>
+          <p class="text-xs text-neutral-400">{{ t('client.vat_payer_source') }}</p>
+        </div>
+      </template>
+    </div>
+
     <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
       <!-- Kontakt -->
-      <div class="bg-white border border-neutral-200 rounded-lg p-5 shadow-sm">
+      <div class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
         <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-500 mb-3">{{ t('client.section_contact') }}</h3>
         <dl class="space-y-2 text-sm">
           <div>
@@ -336,7 +403,7 @@ async function deleteClient() {
       </div>
 
       <!-- Adresa -->
-      <div class="bg-white border border-neutral-200 rounded-lg p-5 shadow-sm">
+      <div class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
         <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-500 mb-3">{{ t('client.section_address') }}</h3>
         <div class="text-sm text-neutral-900 leading-relaxed">
           {{ client.street }}<br />
@@ -346,12 +413,12 @@ async function deleteClient() {
       </div>
 
       <!-- Nastavení -->
-      <div class="bg-white border border-neutral-200 rounded-lg p-5 shadow-sm">
+      <div class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
         <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-500 mb-3">{{ t('nav.settings') }}</h3>
         <dl class="space-y-2 text-sm">
           <div class="flex justify-between"><dt class="text-neutral-500">{{ t('client.language_label') }}</dt><dd class="font-mono">{{ client.language.toUpperCase() }}</dd></div>
           <div class="flex justify-between"><dt class="text-neutral-500">{{ t('common.currency') }}</dt><dd class="font-mono">{{ client.currency_default }}</dd></div>
-          <div class="flex justify-between"><dt class="text-neutral-500">{{ t('client.due_label') }}</dt><dd>{{ client.payment_due_default ? t('client.due_days_n', { n: client.payment_due_default }) : t('client.due_default') }}</dd></div>
+          <div class="flex justify-between"><dt class="text-neutral-500">{{ t('client.due_label') }}</dt><dd>{{ formatPaymentDue(client) }}</dd></div>
           <div v-if="client.hourly_rate > 0" class="flex justify-between"><dt class="text-neutral-500">{{ t('client.hourly_rate') }}</dt><dd class="font-mono">{{ client.hourly_rate.toLocaleString('cs') }} {{ client.currency_default }}/h</dd></div>
           <div class="flex justify-between"><dt class="text-neutral-500">{{ t('client.rc_label') }}</dt><dd>{{ client.reverse_charge ? t('client.yes_short') : t('client.no_short') }}</dd></div>
         </dl>
@@ -360,7 +427,7 @@ async function deleteClient() {
 
     <!-- KPI: nezaplaceno + po splatnosti -->
     <div v-if="(client.unpaid_summary?.length ?? 0) > 0" class="grid grid-cols-1 md:grid-cols-2 gap-4">
-      <div class="bg-white border border-neutral-200 rounded-lg p-5 shadow-sm">
+      <div class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
         <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-500 mb-3">{{ t('client.unpaid') }}</h3>
         <div class="space-y-1">
           <div v-for="u in client.unpaid_summary || []" :key="`u-${u.currency}`" class="flex items-baseline justify-between">
@@ -369,7 +436,7 @@ async function deleteClient() {
           </div>
         </div>
       </div>
-      <div class="bg-white border border-neutral-200 rounded-lg p-5 shadow-sm" :class="overdueAny ? 'border-danger-500/40' : ''">
+      <div class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm" :class="overdueAny ? 'border-danger-500/40' : ''">
         <h3 class="text-sm font-semibold uppercase tracking-wide mb-3" :class="overdueAny ? 'text-danger-500' : 'text-neutral-500'">{{ t('client.overdue') }}</h3>
         <div class="space-y-1">
           <div v-for="u in client.unpaid_summary || []" :key="`o-${u.currency}`" class="flex items-baseline justify-between">
@@ -382,14 +449,14 @@ async function deleteClient() {
 
     <!-- Obrat: graf po měsících + sumace po letech -->
     <div v-if="(client.revenue_by_month?.length ?? 0) > 0" class="grid grid-cols-1 md:grid-cols-3 gap-4">
-      <div class="md:col-span-2 bg-white border border-neutral-200 rounded-lg p-5 shadow-sm">
+      <div class="md:col-span-2 bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
         <div class="flex items-baseline justify-between mb-3">
           <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-500">{{ t('client.revenue_by_month') }}</h3>
           <span class="text-xs font-mono text-neutral-500">{{ primaryCurrency }}<span v-if="revenueIsMultiCurrency" class="ml-1 text-neutral-400 normal-case">({{ t('client.converted_from', { ccys: revenueCurrencies.join(', ') }) }})</span></span>
         </div>
         <MonthlyRevenueChart :labels="monthlyChart.labels" :values="monthlyChart.values" :currency="primaryCurrency" />
       </div>
-      <div class="bg-white border border-neutral-200 rounded-lg p-5 shadow-sm">
+      <div class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
         <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-500 mb-3">{{ t('client.revenue_by_year') }}</h3>
         <div class="overflow-x-auto">
         <table class="w-full text-sm">
@@ -407,14 +474,14 @@ async function deleteClient() {
 
     <!-- Náklady (přijaté faktury) — graf po měsících + sumace po letech -->
     <div v-if="purchaseByMonth.length > 0" class="grid grid-cols-1 md:grid-cols-3 gap-4">
-      <div class="md:col-span-2 bg-white border border-neutral-200 rounded-lg p-5 shadow-sm">
+      <div class="md:col-span-2 bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
         <div class="flex items-baseline justify-between mb-3">
           <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-500">{{ t('client.costs_by_month') }}</h3>
           <span class="text-xs font-mono text-neutral-500">{{ purchaseDisplayCurrency }}<span v-if="purchaseIsMultiCurrency" class="ml-1 text-neutral-400 normal-case">({{ t('client.converted_from', { ccys: purchaseCurrencies.join(', ') }) }})</span></span>
         </div>
         <MonthlyRevenueChart :labels="purchaseMonthlyChart.labels" :values="purchaseMonthlyChart.values" :currency="purchaseDisplayCurrency" />
       </div>
-      <div class="bg-white border border-neutral-200 rounded-lg p-5 shadow-sm">
+      <div class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
         <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-500 mb-3">{{ t('client.costs_by_year') }}</h3>
         <div class="overflow-x-auto">
         <table class="w-full text-sm">
@@ -437,14 +504,14 @@ async function deleteClient() {
 
     <!-- Obrat podle zakázek — graf + tabulka -->
     <div v-if="projectsTable.length > 0" class="grid grid-cols-1 md:grid-cols-2 gap-4">
-      <div class="bg-white border border-neutral-200 rounded-lg p-5 shadow-sm">
+      <div class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
         <div class="flex items-baseline justify-between mb-3">
           <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-500">{{ t('client.revenue_by_project') }}</h3>
           <span class="text-xs font-mono text-neutral-500">{{ primaryCurrency }}</span>
         </div>
         <TopProjectsBarChart :labels="projectsChart.labels" :values="projectsChart.values" :currency="primaryCurrency" />
       </div>
-      <div class="bg-white border border-neutral-200 rounded-lg p-5 shadow-sm">
+      <div class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
         <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-500 mb-3">{{ t('client.revenue_by_project_table') }}</h3>
         <div class="overflow-x-auto">
           <table class="w-full text-sm">
@@ -474,7 +541,7 @@ async function deleteClient() {
 
     <!-- Zakázky — visible pokud is_customer NEBO existují zakázky -->
     <div v-if="client.is_customer !== false || (client.projects?.length ?? 0) > 0"
-         class="bg-white border border-neutral-200 rounded-lg shadow-sm">
+         class="bg-surface border border-neutral-200 rounded-lg shadow-sm">
       <div class="px-5 py-3 border-b border-neutral-200 flex items-center justify-between">
         <h3 class="font-semibold">{{ t('client.projects') }}</h3>
         <RouterLink v-if="auth.canWrite" :to="`/projects/new?client_id=${client.id}`"
@@ -503,8 +570,8 @@ async function deleteClient() {
             <td class="px-4 py-3">
               <span class="text-xs px-2 py-0.5 rounded"
                 :class="{
-                  'bg-emerald-50 text-emerald-700': p.status === 'active',
-                  'bg-amber-50 text-amber-700': p.status === 'paused',
+                  'bg-success-50 text-success-600': p.status === 'active',
+                  'bg-warning-50 text-warning-600': p.status === 'paused',
                   'bg-neutral-100 text-neutral-600': p.status === 'closed',
                 }">{{ p.status }}</span>
             </td>
@@ -536,8 +603,8 @@ async function deleteClient() {
             <div class="font-medium text-neutral-900 truncate">{{ p.name }}</div>
             <span class="text-xs px-2 py-0.5 rounded whitespace-nowrap"
               :class="{
-                'bg-emerald-50 text-emerald-700': p.status === 'active',
-                'bg-amber-50 text-amber-700': p.status === 'paused',
+                'bg-success-50 text-success-600': p.status === 'active',
+                'bg-warning-50 text-warning-600': p.status === 'paused',
                 'bg-neutral-100 text-neutral-600': p.status === 'closed',
               }">{{ p.status }}</span>
           </div>
@@ -554,7 +621,7 @@ async function deleteClient() {
     </div>
 
     <!-- Vystavené faktury — visible pokud is_customer NEBO existují vystavené faktury -->
-    <div v-if="client.is_customer !== false || invoices.length > 0" class="bg-white border border-neutral-200 rounded-lg shadow-sm">
+    <div v-if="client.is_customer !== false || invoices.length > 0" class="bg-surface border border-neutral-200 rounded-lg shadow-sm">
       <div class="px-5 py-3 border-b border-neutral-200 flex items-center justify-between">
         <h3 class="font-semibold">{{ t('client.issued_invoices') }} <span v-if="invoicesTotal" class="text-neutral-400 font-normal">({{ invoicesTotal }})</span></h3>
         <RouterLink v-if="auth.canWrite" :to="`/invoices/new?client_id=${client.id}`"
@@ -643,7 +710,7 @@ async function deleteClient() {
     </div>
 
     <!-- Přijaté faktury — visible pokud is_vendor NEBO existují přijaté faktury -->
-    <div v-if="client.is_vendor === true || purchaseInvoices.length > 0" class="bg-white border border-neutral-200 rounded-lg shadow-sm">
+    <div v-if="client.is_vendor === true || purchaseInvoices.length > 0" class="bg-surface border border-neutral-200 rounded-lg shadow-sm">
       <div class="px-5 py-3 border-b border-neutral-200 flex items-center justify-between">
         <h3 class="font-semibold">{{ t('client.received_invoices') }} <span v-if="purchaseInvoices.length" class="text-neutral-400 font-normal">({{ purchaseInvoices.length }})</span></h3>
         <RouterLink v-if="auth.canWrite" :to="`/purchase-invoices/new?vendor_id=${client.id}`"
@@ -685,7 +752,7 @@ async function deleteClient() {
 
     <!-- Pravidelné fakturace — visible pokud is_customer NEBO existují recurring -->
     <div v-if="client.is_customer !== false || recurringTemplates.length > 0"
-         class="bg-white border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
+         class="bg-surface border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
       <div class="px-5 py-3 border-b border-neutral-200 flex items-center justify-between">
         <h3 class="font-semibold">
           {{ t('recurring.title') }}
@@ -760,5 +827,6 @@ async function deleteClient() {
         </div>
       </div>
     </div>
+    <LinkedDocumentsPanel v-if="client" class="mt-4 block" entity-type="client" :entity-id="client.id" />
   </div>
 </template>

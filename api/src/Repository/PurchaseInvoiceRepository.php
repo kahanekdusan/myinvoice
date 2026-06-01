@@ -38,11 +38,13 @@ final class PurchaseInvoiceRepository
                     c.company_name AS vendor_company_name, c.ic AS vendor_ic, c.dic AS vendor_dic,
                     c.main_email AS vendor_main_email, c.language AS vendor_language,
                     cur.code AS currency, cur.symbol AS currency_symbol, cur.decimals AS currency_decimals,
-                    pcur.code AS payment_currency, pcur.symbol AS payment_currency_symbol
+                    pcur.code AS payment_currency, pcur.symbol AS payment_currency_symbol,
+                    ec.label AS expense_category_label, ec.code AS expense_category_code
                FROM purchase_invoices pi
                JOIN clients c        ON c.id   = pi.vendor_id
                JOIN currencies cur   ON cur.id = pi.currency_id
           LEFT JOIN currencies pcur  ON pcur.id = pi.payment_currency_id
+          LEFT JOIN expense_categories ec ON ec.id = pi.expense_category_id
               WHERE pi.id = ? AND pi.supplier_id = ?'
         );
         $stmt->execute([$id, $supplierId]);
@@ -60,7 +62,99 @@ final class PurchaseInvoiceRepository
             'advance_paid_amount' => $row['advance_paid_amount'],
             'amount_to_pay'       => $row['amount_to_pay'],
         ];
+
+        // Propojení se zálohou (advance):
+        //  - linked_advance   = záloha, kterou tato finální faktura vyúčtovává
+        //  - settled_by       = finální faktura vyúčtovávající tuto zálohu (reverzně)
+        //  - advance_link_suggestion = AI návrh (suggest & confirm), čeká na potvrzení
+        $row['linked_advance'] = $row['advance_purchase_invoice_id'] !== null
+            ? $this->briefFor((int) $row['advance_purchase_invoice_id'], $supplierId)
+            : null;
+        $row['advance_link_suggestion'] = $row['advance_link_suggested_id'] !== null
+            ? $this->briefFor((int) $row['advance_link_suggested_id'], $supplierId)
+            : null;
+        $row['settled_by'] = ($row['document_kind'] ?? '') === 'advance'
+            ? $this->settledByFor($id, $supplierId)
+            : null;
+
+        // Příznaky pro UI tlačítka „spárovat" (zobrazit jen když existuje protějšek):
+        //  - has_advance_candidates    = vyúčtovací faktura bez vazby a existuje nespárovaná záloha
+        //  - has_settlement_candidates = záloha bez vyúčtování a existuje nepropojená finální faktura
+        $row['has_advance_candidates'] = false;
+        $row['has_settlement_candidates'] = false;
+        $vendorId = (int) ($row['vendor_id'] ?? 0);
+        if (($row['document_kind'] ?? '') !== 'advance') {
+            if ($row['advance_purchase_invoice_id'] === null) {
+                $q = $this->db->pdo()->prepare(
+                    "SELECT EXISTS (
+                              SELECT 1 FROM purchase_invoices pi
+                               WHERE pi.supplier_id = ? AND pi.vendor_id = ?
+                                 AND pi.document_kind = 'advance' AND pi.status != 'cancelled'
+                                 AND pi.id <> ?
+                                 AND NOT EXISTS (SELECT 1 FROM purchase_invoices s
+                                                  WHERE s.advance_purchase_invoice_id = pi.id)
+                            )"
+                );
+                $q->execute([$supplierId, $vendorId, $id]);
+                $row['has_advance_candidates'] = (bool) $q->fetchColumn();
+            }
+        } elseif ($row['settled_by'] === null) {
+            $q = $this->db->pdo()->prepare(
+                "SELECT EXISTS (
+                          SELECT 1 FROM purchase_invoices pi
+                           WHERE pi.supplier_id = ? AND pi.vendor_id = ?
+                             AND pi.document_kind != 'advance' AND pi.status != 'cancelled'
+                             AND pi.advance_purchase_invoice_id IS NULL AND pi.id <> ?
+                        )"
+            );
+            $q->execute([$supplierId, $vendorId, $id]);
+            $row['has_settlement_candidates'] = (bool) $q->fetchColumn();
+        }
         return $row;
+    }
+
+    /**
+     * Stručné shrnutí přijaté faktury (pro propojení/odkazy v detailu). NULL pokud
+     * neexistuje nebo nepatří tenantovi.
+     *
+     * @return array{id:int, varsymbol:?string, vendor_invoice_number:?string,
+     *               document_kind:?string, status:string, issue_date:?string,
+     *               total_with_vat:float, currency:string}|null
+     */
+    private function briefFor(int $id, int $supplierId): ?array
+    {
+        $stmt = $this->db->pdo()->prepare(
+            'SELECT pi.id, pi.varsymbol, pi.vendor_invoice_number, pi.document_kind,
+                    pi.status, pi.issue_date, pi.total_with_vat, cur.code AS currency
+               FROM purchase_invoices pi
+               JOIN currencies cur ON cur.id = pi.currency_id
+              WHERE pi.id = ? AND pi.supplier_id = ?'
+        );
+        $stmt->execute([$id, $supplierId]);
+        $r = $stmt->fetch(PDO::FETCH_ASSOC);
+        if ($r === false) return null;
+        return [
+            'id'                    => (int) $r['id'],
+            'varsymbol'             => $r['varsymbol'] !== null ? (string) $r['varsymbol'] : null,
+            'vendor_invoice_number' => $r['vendor_invoice_number'] !== null ? (string) $r['vendor_invoice_number'] : null,
+            'document_kind'         => $r['document_kind'] !== null ? (string) $r['document_kind'] : null,
+            'status'                => (string) $r['status'],
+            'issue_date'            => $r['issue_date'] !== null ? (string) $r['issue_date'] : null,
+            'total_with_vat'        => (float) $r['total_with_vat'],
+            'currency'              => (string) $r['currency'],
+        ];
+    }
+
+    /** Finální faktura, která vyúčtovává tuto zálohu (reverzní pohled). */
+    private function settledByFor(int $advanceId, int $supplierId): ?array
+    {
+        $id = $this->db->pdo()->prepare(
+            'SELECT id FROM purchase_invoices
+              WHERE advance_purchase_invoice_id = ? AND supplier_id = ? LIMIT 1'
+        );
+        $id->execute([$advanceId, $supplierId]);
+        $finalId = $id->fetchColumn();
+        return $finalId !== false ? $this->briefFor((int) $finalId, $supplierId) : null;
     }
 
     /**
@@ -183,7 +277,9 @@ final class PurchaseInvoiceRepository
                        pi.status, pi.booked_at, pi.paid_at, pi.cancelled_at,
                        pi.extraction_warning, pi.vat_deduction, pi.vat_deduction_percent, pi.tax_deductible,
                        c.company_name AS vendor_company_name, c.ic AS vendor_ic,
-                       DATE_FORMAT(pi.issue_date, '%Y-%m') AS month_bucket
+                       DATE_FORMAT(pi.issue_date, '%Y-%m') AS month_bucket,
+                       EXISTS (SELECT 1 FROM purchase_invoices adv_f
+                               WHERE adv_f.advance_purchase_invoice_id = pi.id) AS is_settled_advance
                        {$selectTotal}
                   FROM purchase_invoices pi
                   JOIN clients c ON c.id = pi.vendor_id
@@ -217,6 +313,11 @@ final class PurchaseInvoiceRepository
         $grouped = [];
         foreach ($rows as $row) {
             unset($row['total_rows']); // metadata, nepatří do invoice payloadu
+            // Spárovaná záloha = advance, na kterou ukazuje finální (vyúčtovací) faktura.
+            // Zachytit z DB flagu PŘED castem a vyřadit z payloadu (interní metadata).
+            $isSettledAdvance = (string) ($row['document_kind'] ?? '') === 'advance'
+                && (int) ($row['is_settled_advance'] ?? 0) === 1;
+            unset($row['is_settled_advance']);
             $row = $this->castInvoice($row);
             $month = (string) $row['month_bucket'];
             if (!isset($grouped[$month])) {
@@ -230,8 +331,13 @@ final class PurchaseInvoiceRepository
             $grouped[$month]['invoices'][] = $row;
             $grouped[$month]['count']++;
 
-            // Nákupy: nezahrnujeme draft (koncepty), cancelled (storno)
-            if (!in_array($row['status'], ['draft', 'cancelled'], true)) {
+            // Měsíční součet = reálný náklad. Vyřadit: draft/cancelled a spárovanou/zaplacenou
+            // zálohu (advance) — náklad nese finální faktura, jinak 2× započteno (shoda s
+            // costs_by_month / CRM). Nespárovaná nezaplacená záloha se počítá (očekávaný náklad).
+            // Řádek se i tak zobrazí (analogicky proforma u vystavených faktur).
+            $excludedAdvance = $row['document_kind'] === 'advance'
+                && ($row['status'] === 'paid' || $isSettledAdvance);
+            if (!in_array($row['status'], ['draft', 'cancelled'], true) && !$excludedAdvance) {
                 $cur = $row['currency'];
                 if (!isset($grouped[$month]['totals_per_currency'][$cur])) {
                     $grouped[$month]['totals_per_currency'][$cur] = [
@@ -279,12 +385,23 @@ final class PurchaseInvoiceRepository
         }
 
         // Sanity check: vendor existuje a patří tenantovi
-        $stmt = $pdo->prepare('SELECT supplier_id FROM clients WHERE id = ?');
+        $stmt = $pdo->prepare('SELECT supplier_id, default_expense_category_id FROM clients WHERE id = ?');
         $stmt->execute([$vendorId]);
-        $vendorSupplier = (int) $stmt->fetchColumn();
+        $vendorRow = $stmt->fetch(\PDO::FETCH_ASSOC) ?: [];
+        $vendorSupplier = (int) ($vendorRow['supplier_id'] ?? 0);
         if ($vendorSupplier !== $supplierId) {
             throw new \InvalidArgumentException("Vendor #$vendorId nepatří tomuto tenantovi.");
         }
+
+        // Výchozí kategorie nákladu dodavatele — aplikuje se, pokud volající kategorii
+        // explicitně neurčil. Platí pro manuální zadání i pro všechny importy
+        // (AI, ISDOC/ZIP, iDoklad, Fakturoid, bankovní párování), které jdou tudy.
+        // Sjednocuje chování se server-side backfillem v ClientRepository::update().
+        $expenseCategoryId = (isset($data['expense_category_id']) && $data['expense_category_id'])
+            ? (int) $data['expense_category_id']
+            : (($vendorRow['default_expense_category_id'] ?? null) !== null
+                ? (int) $vendorRow['default_expense_category_id']
+                : null);
 
         // Vendor invoice number — povinné, validace max 50 znaků
         $vendorInvoiceNumber = trim((string) ($data['vendor_invoice_number'] ?? ''));
@@ -317,13 +434,13 @@ final class PurchaseInvoiceRepository
             (supplier_id, vendor_id, varsymbol, vendor_invoice_number, document_kind,
              issue_date, tax_date, due_date, received_at,
              currency_id, exchange_rate, exchange_rate_date, exchange_rate_source,
-             reverse_charge, language, note_above_items, note_below_items,
+             reverse_charge, prices_include_vat, language, note_above_items, note_below_items,
              vendor_snapshot, own_snapshot,
              advance_paid_amount,
              payment_currency_id, payment_exchange_rate,
              paid_amount_payment_ccy, paid_amount_invoice_ccy, exchange_diff_base,
              status, vat_classification_code, vat_deduction, vat_deduction_percent, tax_deductible, is_fixed_asset, expense_category_id, created_by)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "draft", ?, ?, ?, ?, ?, ?, ?)';
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "draft", ?, ?, ?, ?, ?, ?, ?)';
 
         $stmt = $pdo->prepare($sql);
         $stmt->execute([
@@ -341,6 +458,7 @@ final class PurchaseInvoiceRepository
             empty($data['exchange_rate_date']) ? null : (string) $data['exchange_rate_date'],
             (string) ($data['exchange_rate_source'] ?? 'cnb'),
             !empty($data['reverse_charge']) ? 1 : 0,
+            !empty($data['prices_include_vat']) ? 1 : 0,
             (string) ($data['language'] ?? 'cs'),
             $data['note_above_items'] ?? null,
             $data['note_below_items'] ?? null,
@@ -355,11 +473,11 @@ final class PurchaseInvoiceRepository
             isset($data['paid_amount_invoice_ccy']) ? (float) $data['paid_amount_invoice_ccy'] : null,
             isset($data['exchange_diff_base']) ? (float) $data['exchange_diff_base'] : null,
             isset($data['vat_classification_code']) ? (string) $data['vat_classification_code'] : null,
-            in_array($data['vat_deduction'] ?? 'full', ['full', 'none', 'proportional'], true) ? (string) $data['vat_deduction'] : 'full',
+            in_array($data['vat_deduction'] ?? 'full', ['full', 'none', 'proportional'], true) ? (string) ($data['vat_deduction'] ?? 'full') : 'full',
             max(0.0, min(100.0, (float) ($data['vat_deduction_percent'] ?? 100))),
             (array_key_exists('tax_deductible', $data) && !$data['tax_deductible']) ? 0 : 1,
             !empty($data['is_fixed_asset']) ? 1 : 0,
-            isset($data['expense_category_id']) && $data['expense_category_id'] ? (int) $data['expense_category_id'] : null,
+            $expenseCategoryId,
             $userId,
         ]);
 
@@ -399,7 +517,7 @@ final class PurchaseInvoiceRepository
                 vendor_id = ?, vendor_invoice_number = ?, document_kind = ?,
                 issue_date = ?, tax_date = ?, due_date = ?, received_at = ?,
                 currency_id = ?, exchange_rate = ?, exchange_rate_date = ?, exchange_rate_source = ?,
-                reverse_charge = ?, language = ?,
+                reverse_charge = ?, prices_include_vat = ?, language = ?,
                 note_above_items = ?, note_below_items = ?,
                 advance_paid_amount = ?,
                 payment_currency_id = ?, payment_exchange_rate = ?,
@@ -421,6 +539,7 @@ final class PurchaseInvoiceRepository
             empty($data['exchange_rate_date']) ? null : (string) $data['exchange_rate_date'],
             (string) ($data['exchange_rate_source'] ?? 'cnb'),
             !empty($data['reverse_charge']) ? 1 : 0,
+            !empty($data['prices_include_vat']) ? 1 : 0,
             (string) ($data['language'] ?? 'cs'),
             $data['note_above_items'] ?? null,
             $data['note_below_items'] ?? null,
@@ -431,7 +550,7 @@ final class PurchaseInvoiceRepository
             isset($data['paid_amount_invoice_ccy']) ? (float) $data['paid_amount_invoice_ccy'] : null,
             isset($data['exchange_diff_base']) ? (float) $data['exchange_diff_base'] : null,
             isset($data['vat_classification_code']) ? (string) $data['vat_classification_code'] : null,
-            in_array($data['vat_deduction'] ?? 'full', ['full', 'none', 'proportional'], true) ? (string) $data['vat_deduction'] : 'full',
+            in_array($data['vat_deduction'] ?? 'full', ['full', 'none', 'proportional'], true) ? (string) ($data['vat_deduction'] ?? 'full') : 'full',
             max(0.0, min(100.0, (float) ($data['vat_deduction_percent'] ?? 100))),
             (array_key_exists('tax_deductible', $data) && !$data['tax_deductible']) ? 0 : 1,
             !empty($data['is_fixed_asset']) ? 1 : 0,
@@ -613,6 +732,238 @@ final class PurchaseInvoiceRepository
     }
 
     /**
+     * Propojí finální fakturu ($finalId) se zálohou ($advanceId). Vazba se ukládá
+     * NA FINÁLNÍ fakturu (advance_purchase_invoice_id), 1:1 (UNIQUE index).
+     *
+     * Validace: oba doklady patří tenantovi, $advanceId je advance, $finalId NENÍ
+     * advance, a oba mají stejného dodavatele. Pokud finální nemá vyplněnou zálohu
+     * (advance_paid_amount = 0), doplní ji = total_with_vat zálohy, aby amount_to_pay
+     * ukázal zbývající úhradu. Návrh AI (advance_link_suggested_id) se zároveň vyčistí.
+     *
+     * @throws \RuntimeException při porušení validace
+     */
+    public function linkAdvance(int $finalId, int $advanceId, int $supplierId): void
+    {
+        if ($finalId === $advanceId) {
+            throw new \RuntimeException('Nelze propojit doklad sám se sebou.');
+        }
+        $final   = $this->find($finalId, $supplierId);
+        $advance = $this->find($advanceId, $supplierId);
+        if ($final === null || $advance === null) {
+            throw new \RuntimeException('Doklad nenalezen.');
+        }
+        if (($advance['document_kind'] ?? '') !== 'advance') {
+            throw new \RuntimeException('Propojit lze jen se zálohovou fakturou (advance).');
+        }
+        if (($final['document_kind'] ?? '') === 'advance') {
+            throw new \RuntimeException('Zálohu nelze vyúčtovávat jinou zálohou.');
+        }
+        if ((int) $final['vendor_id'] !== (int) $advance['vendor_id']) {
+            throw new \RuntimeException('Záloha i finální faktura musí být od stejného dodavatele.');
+        }
+
+        $advanceTotal = (float) $advance['total_with_vat'];
+        $setAdvancePaid = ((float) ($final['advance_paid_amount'] ?? 0)) == 0.0;
+
+        $sql = 'UPDATE purchase_invoices
+                   SET advance_purchase_invoice_id = ?, advance_link_suggested_id = NULL'
+             . ($setAdvancePaid ? ', advance_paid_amount = ?' : '')
+             . ' WHERE id = ? AND supplier_id = ?';
+        $params = $setAdvancePaid
+            ? [$advanceId, $advanceTotal, $finalId, $supplierId]
+            : [$advanceId, $finalId, $supplierId];
+        $this->db->pdo()->prepare($sql)->execute($params);
+    }
+
+    /** Zruší propojení finální faktury se zálohou (advance_paid_amount ponecháme — ruční korekce). */
+    public function unlinkAdvance(int $finalId, int $supplierId): void
+    {
+        $this->db->pdo()
+            ->prepare('UPDATE purchase_invoices
+                          SET advance_purchase_invoice_id = NULL
+                        WHERE id = ? AND supplier_id = ?')
+            ->execute([$finalId, $supplierId]);
+    }
+
+    /** Uloží AI návrh propojení se zálohou (suggest & confirm) — neaplikuje vazbu. */
+    public function suggestAdvanceLink(int $finalId, int $advanceId, int $supplierId): void
+    {
+        $this->db->pdo()
+            ->prepare('UPDATE purchase_invoices
+                          SET advance_link_suggested_id = ?
+                        WHERE id = ? AND supplier_id = ? AND advance_purchase_invoice_id IS NULL')
+            ->execute([$advanceId, $finalId, $supplierId]);
+    }
+
+    /** Zahodí AI návrh propojení. */
+    public function dismissAdvanceSuggestion(int $finalId, int $supplierId): void
+    {
+        $this->db->pdo()
+            ->prepare('UPDATE purchase_invoices
+                          SET advance_link_suggested_id = NULL
+                        WHERE id = ? AND supplier_id = ?')
+            ->execute([$finalId, $supplierId]);
+    }
+
+    /**
+     * Kandidáti k propojení: nespárované zálohy (document_kind='advance') stejného
+     * dodavatele jako finální faktura $finalId, které ještě nejsou navázané na žádnou
+     * finální fakturu. Seřazené od nejnovějších.
+     *
+     * @return list<array<string,mixed>>
+     */
+    public function advanceCandidates(int $finalId, int $supplierId): array
+    {
+        $final = $this->find($finalId, $supplierId);
+        if ($final === null) return [];
+        // Řazení: nejdřív stejná měna, pak nejbližší HRUBÁ částka (total_with_vat) k
+        // finální faktuře — záloha bývá ve výši celé/části faktury. Porovnáváme proti
+        // total_with_vat (před odečtem zálohy), NE amount_to_pay (to bývá 0, když je
+        // faktura už uhrazená zálohou). Nakonec nejnovější.
+        $stmt = $this->db->pdo()->prepare(
+            "SELECT pi.id, pi.varsymbol, pi.vendor_invoice_number, pi.document_kind,
+                    pi.status, pi.issue_date, pi.total_with_vat, cur.code AS currency
+               FROM purchase_invoices pi
+               JOIN currencies cur ON cur.id = pi.currency_id
+              WHERE pi.supplier_id = ?
+                AND pi.vendor_id = ?
+                AND pi.document_kind = 'advance'
+                AND pi.status != 'cancelled'
+                AND pi.id <> ?
+                AND NOT EXISTS (SELECT 1 FROM purchase_invoices s
+                                 WHERE s.advance_purchase_invoice_id = pi.id)
+              ORDER BY (pi.currency_id = ?) DESC,
+                       ABS(pi.total_with_vat - ?) ASC,
+                       pi.issue_date DESC, pi.id DESC
+              LIMIT 50"
+        );
+        $stmt->execute([
+            $supplierId, (int) $final['vendor_id'], $finalId,
+            (int) $final['currency_id'], (float) $final['total_with_vat'],
+        ]);
+        return array_map(fn (array $r) => [
+            'id'                    => (int) $r['id'],
+            'varsymbol'             => $r['varsymbol'] !== null ? (string) $r['varsymbol'] : null,
+            'vendor_invoice_number' => $r['vendor_invoice_number'] !== null ? (string) $r['vendor_invoice_number'] : null,
+            'document_kind'         => (string) $r['document_kind'],
+            'status'                => (string) $r['status'],
+            'issue_date'            => $r['issue_date'] !== null ? (string) $r['issue_date'] : null,
+            'total_with_vat'        => (float) $r['total_with_vat'],
+            'currency'              => (string) $r['currency'],
+        ], $stmt->fetchAll(PDO::FETCH_ASSOC) ?: []);
+    }
+
+    /**
+     * Opačný směr párování — z detailu zálohy ($advanceId) nabídne nepropojené finální
+     * faktury (document_kind != 'advance', bez advance_purchase_invoice_id) stejného
+     * dodavatele. Vlastní propojení proběhne přes linkAdvance($finalId, $advanceId).
+     * Řazení: stejná měna → nejbližší hrubá částka → nejnovější.
+     *
+     * @return list<array<string,mixed>>
+     */
+    public function settlementCandidates(int $advanceId, int $supplierId): array
+    {
+        $advance = $this->find($advanceId, $supplierId);
+        if ($advance === null) return [];
+        $stmt = $this->db->pdo()->prepare(
+            "SELECT pi.id, pi.varsymbol, pi.vendor_invoice_number, pi.document_kind,
+                    pi.status, pi.issue_date, pi.total_with_vat, cur.code AS currency
+               FROM purchase_invoices pi
+               JOIN currencies cur ON cur.id = pi.currency_id
+              WHERE pi.supplier_id = ?
+                AND pi.vendor_id = ?
+                AND pi.document_kind != 'advance'
+                AND pi.status != 'cancelled'
+                AND pi.advance_purchase_invoice_id IS NULL
+                AND pi.id <> ?
+              ORDER BY (pi.currency_id = ?) DESC,
+                       ABS(pi.total_with_vat - ?) ASC,
+                       pi.issue_date DESC, pi.id DESC
+              LIMIT 50"
+        );
+        $stmt->execute([
+            $supplierId, (int) $advance['vendor_id'], $advanceId,
+            (int) $advance['currency_id'], (float) $advance['total_with_vat'],
+        ]);
+        return array_map(fn (array $r) => [
+            'id'                    => (int) $r['id'],
+            'varsymbol'             => $r['varsymbol'] !== null ? (string) $r['varsymbol'] : null,
+            'vendor_invoice_number' => $r['vendor_invoice_number'] !== null ? (string) $r['vendor_invoice_number'] : null,
+            'document_kind'         => (string) $r['document_kind'],
+            'status'                => (string) $r['status'],
+            'issue_date'            => $r['issue_date'] !== null ? (string) $r['issue_date'] : null,
+            'total_with_vat'        => (float) $r['total_with_vat'],
+            'currency'              => (string) $r['currency'],
+        ], $stmt->fetchAll(PDO::FETCH_ASSOC) ?: []);
+    }
+
+    /**
+     * Rychlé hledání přijatých faktur podle čísla dokladu (naše varsymbol nebo číslo
+     * dodavatele) pro globální search box. Malý limit (dropdown).
+     *
+     * @return list<array{id:int, varsymbol:?string, vendor_invoice_number:?string,
+     *   document_kind:?string, status:string, issue_date:?string, total_with_vat:float,
+     *   currency:string, company_name:string}>
+     */
+    public function searchQuick(string $q, int $supplierId, int $limit = 6): array
+    {
+        $q = trim($q);
+        if ($q === '') return [];
+        $esc = addcslashes($q, '%_\\');
+        $stmt = $this->db->pdo()->prepare(
+            "SELECT pi.id, pi.varsymbol, pi.vendor_invoice_number, pi.document_kind,
+                    pi.status, pi.issue_date, pi.total_with_vat,
+                    COALESCE(cur.code, 'CZK') AS currency, c.company_name
+               FROM purchase_invoices pi
+               JOIN clients c ON c.id = pi.vendor_id
+          LEFT JOIN currencies cur ON cur.id = pi.currency_id
+              WHERE pi.supplier_id = ?
+                AND (pi.varsymbol LIKE ? OR pi.vendor_invoice_number LIKE ?)
+              ORDER BY pi.issue_date DESC, pi.id DESC
+              LIMIT " . (int) $limit
+        );
+        $stmt->execute([$supplierId, '%' . $esc . '%', '%' . $esc . '%']);
+        return array_map(static fn (array $r) => [
+            'id'                    => (int) $r['id'],
+            'varsymbol'             => $r['varsymbol'] !== null ? (string) $r['varsymbol'] : null,
+            'vendor_invoice_number' => $r['vendor_invoice_number'] !== null ? (string) $r['vendor_invoice_number'] : null,
+            'document_kind'         => $r['document_kind'] !== null ? (string) $r['document_kind'] : null,
+            'status'                => (string) $r['status'],
+            'issue_date'            => $r['issue_date'] !== null ? (string) $r['issue_date'] : null,
+            'total_with_vat'        => (float) $r['total_with_vat'],
+            'currency'              => (string) $r['currency'],
+            'company_name'          => (string) $r['company_name'],
+        ], $stmt->fetchAll(PDO::FETCH_ASSOC) ?: []);
+    }
+
+    /**
+     * Najde nespárovanou zálohu (advance) téhož dodavatele, jejíž číslo dokladu nebo
+     * variabilní symbol odpovídá odkazu z faktury (např. "zaplaceno zálohou č. X").
+     * Porovnává bez mezer (variabilní symbol může být na dokladu rozdělený). Vrací
+     * id pro AI návrh propojení, nebo null. Konzervativní (přesná shoda) — návrh
+     * uživatel stejně potvrzuje.
+     */
+    public function findAdvanceByReference(int $supplierId, int $vendorId, string $reference): ?int
+    {
+        $norm = preg_replace('/\s+/', '', trim($reference)) ?? '';
+        if ($norm === '') return null;
+        $stmt = $this->db->pdo()->prepare(
+            "SELECT pi.id FROM purchase_invoices pi
+              WHERE pi.supplier_id = ? AND pi.vendor_id = ?
+                AND pi.document_kind = 'advance'
+                AND pi.status != 'cancelled'
+                AND (REPLACE(COALESCE(pi.vendor_invoice_number,''), ' ', '') = ?
+                  OR REPLACE(COALESCE(pi.varsymbol,''), ' ', '') = ?)
+                AND NOT EXISTS (SELECT 1 FROM purchase_invoices s
+                                 WHERE s.advance_purchase_invoice_id = pi.id)
+              ORDER BY pi.issue_date DESC LIMIT 1"
+        );
+        $stmt->execute([$supplierId, $vendorId, $norm, $norm]);
+        $id = $stmt->fetchColumn();
+        return $id !== false ? (int) $id : null;
+    }
+
+    /**
      * Vygeneruje další varsymbol {PP}{YYMM}{CCC} (např. PF2602001) pro tenant + období.
      * Atomicky inkrementuje counter (FOR UPDATE / INSERT … ON DUPLICATE KEY).
      */
@@ -729,6 +1080,38 @@ final class PurchaseInvoiceRepository
     }
 
     /**
+     * Uloží (nebo vyčistí) ruční rekapitulaci DPH dle dokladu (§ 73 ZDPH).
+     * Sanitizuje vstup na list `{rate, base, vat}` (čísla zaokrouhlená na 2 des. místa);
+     * prázdné/`null` → NULL (žádný override, kalkulátor počítá standardně).
+     *
+     * @param list<array{rate?: float|int, base?: float|int|null, vat?: float|int|null}>|null $overrides
+     */
+    public function setVatOverrides(int $id, int $supplierId, ?array $overrides): void
+    {
+        $clean = [];
+        foreach ($overrides ?? [] as $o) {
+            if (!is_array($o) || !isset($o['rate']) || !is_numeric($o['rate'])) {
+                continue;
+            }
+            $entry = ['rate' => round((float) $o['rate'], 2)];
+            if (array_key_exists('base', $o) && $o['base'] !== null && is_numeric($o['base'])) {
+                $entry['base'] = round((float) $o['base'], 2);
+            }
+            if (array_key_exists('vat', $o) && $o['vat'] !== null && is_numeric($o['vat'])) {
+                $entry['vat'] = round((float) $o['vat'], 2);
+            }
+            // Override bez base i vat nemá smysl (= žádná změna pro tu sazbu).
+            if (array_key_exists('base', $entry) || array_key_exists('vat', $entry)) {
+                $clean[] = $entry;
+            }
+        }
+        $json = $clean === [] ? null : json_encode($clean, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        $this->db->pdo()->prepare(
+            'UPDATE purchase_invoices SET vat_overrides = ? WHERE id = ? AND supplier_id = ?'
+        )->execute([$json, $id, $supplierId]);
+    }
+
+    /**
      * Zapíše (nebo vyčistí) diagnostický popis problému z AI extrakce.
      * UI ho zobrazí jako žluté upozornění, aby si uživatel data ověřil
      * (typicky: AI sečetla subtotaly jako další položky).
@@ -738,6 +1121,31 @@ final class PurchaseInvoiceRepository
         $this->db->pdo()->prepare(
             'UPDATE purchase_invoices SET extraction_warning = ? WHERE id = ? AND supplier_id = ?'
         )->execute([$warning, $id, $supplierId]);
+    }
+
+    /**
+     * Přidá další varování k existujícímu (oddělené prázdným řádkem) místo přepsání.
+     * Prázdná faktura → nastaví jen nové; prázdný vstup → no-op. Pro importéry, které
+     * mohou přidat varování (rekapitulace DPH) vedle už existujícího (AI mismatch).
+     */
+    public function appendExtractionWarning(int $id, int $supplierId, string $warning): void
+    {
+        $warning = trim($warning);
+        if ($warning === '') {
+            return;
+        }
+        $pdo = $this->db->pdo();
+        $stmt = $pdo->prepare(
+            'SELECT extraction_warning FROM purchase_invoices WHERE id = ? AND supplier_id = ?'
+        );
+        $stmt->execute([$id, $supplierId]);
+        $current = $stmt->fetchColumn();
+        $combined = ($current === false || $current === null || trim((string) $current) === '')
+            ? $warning
+            : rtrim((string) $current) . "\n\n" . $warning;
+        $pdo->prepare(
+            'UPDATE purchase_invoices SET extraction_warning = ? WHERE id = ? AND supplier_id = ?'
+        )->execute([$combined, $id, $supplierId]);
     }
 
     public function updateTotals(int $id, float $withoutVat, float $vat, float $withVat, float $rounding): void
@@ -865,13 +1273,16 @@ final class PurchaseInvoiceRepository
     private function castInvoice(array $row): array
     {
         foreach (['id', 'supplier_id', 'vendor_id', 'currency_id', 'payment_currency_id',
-                  'created_by', 'pdf_size_bytes', 'expense_category_id'] as $f) {
+                  'created_by', 'pdf_size_bytes', 'expense_category_id',
+                  'advance_purchase_invoice_id', 'advance_link_suggested_id'] as $f) {
             if (isset($row[$f]) && $row[$f] !== null) $row[$f] = (int) $row[$f];
         }
         $row['reverse_charge'] = isset($row['reverse_charge']) ? (bool) $row['reverse_charge'] : false;
+        $row['prices_include_vat'] = isset($row['prices_include_vat']) ? (bool) $row['prices_include_vat'] : false;
         $row['is_fixed_asset'] = isset($row['is_fixed_asset']) ? (bool) $row['is_fixed_asset'] : false;
         $row['tax_deductible'] = !array_key_exists('tax_deductible', $row) || (bool) $row['tax_deductible'];
-        $row['vat_deduction'] = (string) ($row['vat_deduction'] ?? 'full');
+        $vatDeduction = (string) ($row['vat_deduction'] ?? '');
+        $row['vat_deduction'] = in_array($vatDeduction, ['full', 'none', 'proportional'], true) ? $vatDeduction : 'full';
         $row['vat_deduction_percent'] = isset($row['vat_deduction_percent']) ? (float) $row['vat_deduction_percent'] : 100.0;
         foreach ([
             'total_without_vat', 'total_vat', 'total_with_vat', 'rounding',
@@ -887,6 +1298,12 @@ final class PurchaseInvoiceRepository
                 $decoded = json_decode($row[$f], true);
                 if (is_array($decoded)) $row[$f] = $decoded;
             }
+        }
+        // Ruční rekapitulace DPH dle dokladu (§ 73). NULL/prázdné → null (žádný override).
+        if (array_key_exists('vat_overrides', $row)) {
+            $raw = $row['vat_overrides'];
+            $decoded = (is_string($raw) && $raw !== '') ? json_decode($raw, true) : null;
+            $row['vat_overrides'] = (is_array($decoded) && $decoded !== []) ? $decoded : null;
         }
         return $row;
     }

@@ -8,6 +8,7 @@ use MyInvoice\Bootstrap;
 use MyInvoice\Infrastructure\Config\Config;
 use MyInvoice\Infrastructure\Database\Connection;
 use MyInvoice\Repository\EmailTemplateRepository;
+use MyInvoice\Service\Branding\AccentColor;
 use Psr\Log\LoggerInterface;
 use Symfony\Component\Mailer\Mailer as SymfonyMailer;
 use Symfony\Component\Mailer\Transport;
@@ -793,6 +794,10 @@ final class Mailer
             if ($row !== false) {
                 $row['email_branding_enabled'] = (bool) ($row['email_branding_enabled'] ?? false);
                 $row['email_accent_color']     = (string) ($row['email_accent_color'] ?: '#3B2D83');
+                $row['accent_soft']            = AccentColor::emailBackground(
+                    (bool) $row['email_branding_enabled'],
+                    $row['email_accent_color'],
+                );
             }
             $this->supplierFooter = $row !== false ? $row : [];
             return $this->supplierFooter ?: null;
@@ -861,6 +866,7 @@ final class Mailer
                 'password_reset'    => 'Obnova hesla — MyInvoice.cz',
                 'login_otp'         => 'Ověřovací kód pro přihlášení — MyInvoice.cz',
                 'invoice_send'      => 'Faktura — MyInvoice.cz',
+                'invoice_payment_thanks' => 'Poděkování za úhradu — MyInvoice.cz',
                 'invoice_reminder'  => 'Upomínka — MyInvoice.cz',
                 'proforma_reminder' => 'Připomínka zálohy — MyInvoice.cz',
                 'recurring_draft_reminder' => 'Koncept pravidelné faktury se brzy vystaví — MyInvoice.cz',
@@ -869,6 +875,7 @@ final class Mailer
                 'password_reset'    => 'Password reset — MyInvoice.cz',
                 'login_otp'         => 'Sign-in verification code — MyInvoice.cz',
                 'invoice_send'      => 'Invoice — MyInvoice.cz',
+                'invoice_payment_thanks' => 'Thank you for your payment — MyInvoice.cz',
                 'invoice_reminder'  => 'Reminder — MyInvoice.cz',
                 'proforma_reminder' => 'Advance payment reminder — MyInvoice.cz',
                 'recurring_draft_reminder' => 'Recurring invoice draft will be issued soon — MyInvoice.cz',

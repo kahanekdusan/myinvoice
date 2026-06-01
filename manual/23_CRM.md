@@ -9,6 +9,9 @@ CRM (Customer Relationship Management) v MyInvoice.cz je BI/analytický modul na
 >
 > ![Tržby — jednoduchý revenue overview (12měsíční obrat, forecast, top klienti)](img/23_trzby.webp)
 
+> [!TIP]
+> Vedle Tržeb najdeš v menu **Finance → Náklady** zrcadlovou analýzu nad přijatými fakturami: 12měsíční náklady, odhad nákladů, top dodavatelé, rozpad DPH na vstupu a podle kategorií, riziko koncentrace dodavatelů, plán plateb (splatné závazky do 30 / 60 / 90 dní) a aging závazků. Náklady jsou počítány bez DPH u plátců (na vstupu se odečte), s DPH u neplátců, a řazeny podle pozdějšího z dat DUZP / vystavení.
+
 ## Co CRM zobrazuje
 
 ### KPI karty (top of dashboard)
@@ -46,10 +49,17 @@ Pro vystavené (pohledávky) i přijaté (závazky), per currency.
 - **DSO (Days Sales Outstanding)** — průměrná doba inkasa (paid_at − issue_date) za posledních 12 měsíců
 - **Platební morálka** — % faktur zaplacených včas vs po splatnosti
 - **Riziko koncentrace** — kolik % tržeb dělá Top 1 klient + risk level (low <25%, medium <40%, high >40%) + Pareto count (kolik klientů dělá 80%)
+- **DPO (Days Payable Outstanding)** — průměrná doba úhrady dodavatelům (paid_at − issue_date u přijatých faktur), protějšek DSO
+- **Koncentrace dodavatelů** — kolik % nákladů dělá Top 1 dodavatel + risk level + Pareto count (závislost na klíčových dodavatelích)
+- **Pracovní kapitálový cyklus** — DSO − DPO; kladný = financuješ provoz (inkasuješ pomaleji, než platíš), záporný = dodavatelé tě financují
 
 ### Náklady podle kategorií
 
 Pie chart (nebo bar) s rozpadem nákladů per `expense_categories`. Pokud nemáš kategorie přiřazené, vidíš jeden bar "Bez kategorie" — doporučujeme přiřadit (Číselníky → Kategorie nákladů).
+
+### Tržby podle kategorií
+
+Symetrický rozpad tržeb per `revenue_categories` (tabulka v CRM dashboardu, koláčový graf na stránce **Tržby**, rolling 12 měsíců, přepočet na CZK). Kategorii tržby vybíráš na vydané faktuře; výchozí kategorii lze přednastavit na **zákazníkovi** i na **zakázce** (zakázka má přednost) a spravuje se v **Číselníky → Kategorie tržeb**. Výchozí kategorie se aplikuje i u importovaných, pravidelných a z proformy vyúčtovaných faktur.
 
 ### Churn risk
 
@@ -58,7 +68,7 @@ Klienti, kteří **60+ dní nemají objednávku**. Pro každého: poslední fakt
 ## Filtry
 
 - **Period**: 3 / 6 / 12 / 24 měsíců zpět
-- **Currency**: pokud máš víc měn, picker (default první)
+- **Currency**: pokud máš víc měn, picker s volbou **„Vše (CZK)"** (výchozí) — boxy Přehled i měsíční graf sečtou všechny měny přepočtené na CZK; nebo konkrétní měna (nativní částky). Chybějící data za zvolenou měnu se ukážou jako 0 (ne částka jiné měny).
 - **Recompute** (admin only) — manuální trigger `sp_recompute_crm_monthly_summary` (typicky není potřeba, cron běží denně, ale po importu většího batche faktur může pomoct hned aktualizovat)
 
 ## Jak data fungují

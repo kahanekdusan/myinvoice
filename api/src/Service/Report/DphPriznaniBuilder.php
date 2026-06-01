@@ -153,6 +153,11 @@ final class DphPriznaniBuilder
             '24' => ['veta' => 2, 'base' => 'pln_zaslani', 'vat' => null],
             '25' => ['veta' => 2, 'base' => 'pln_rez_pren','vat' => null],
             '26' => ['veta' => 2, 'base' => 'pln_ost',     'vat' => null],
+            // Veta3 (oddíl C — doplňující údaje; jen základ, bez daně):
+            //   ř.30 pořízení zboží prostřední osobou · ř.31 dodání zboží prostřední osobou
+            //   (třístranný obchod § 17). Hodnota z ř.31 jde do souhrnného hlášení s kódem 2.
+            '30' => ['veta' => 3, 'base' => 'tri_pozb',   'vat' => null],
+            '31' => ['veta' => 3, 'base' => 'tri_dozb',   'vat' => null],
             // Veta4 (odpočet)
             '40' => ['veta' => 4, 'base' => 'pln23',      'vat' => 'odp_tuz23_nar'],
             '41' => ['veta' => 4, 'base' => 'pln5',       'vat' => 'odp_tuz5_nar'],
@@ -165,6 +170,7 @@ final class DphPriznaniBuilder
         $totalDanOdpocitatelne = 0.0;
         $veta1Attrs = [];
         $veta2Attrs = [];
+        $veta3Attrs = [];
         $veta4Attrs = [];
 
         foreach ($lines as $lineNum => $data) {
@@ -178,12 +184,16 @@ final class DphPriznaniBuilder
                 }
                 unset($target);
             }
+            // Rekapitulaci sčítáme ze zaokrouhlených řádků (na celé Kč, jak se vykazují),
+            // aby ř.62/63 přesně seděly se součtem vystavených řádků — EPO jinak hlásí
+            // nekonzistenci mezi detailem a rekapitulací.
+            $lineVat = round($data['vat']);
             if ($this->isOutputLine($lineKey)) {
-                $totalDanZdanitelne += $data['vat'];
+                $totalDanZdanitelne += $lineVat;
             } elseif ((int) $lineKey !== 47) {
                 // ř.47 je doplňující údaj k ř.40-45, jeho daň se NEzapočítává
                 // (jinak by se daň majetku duplikovala s odpočtem z ř.40).
-                $totalDanOdpocitatelne += $data['vat'];
+                $totalDanOdpocitatelne += $lineVat;
             }
         }
         if (!empty($veta1Attrs)) {
@@ -191,11 +201,17 @@ final class DphPriznaniBuilder
             foreach ($veta1Attrs as $k => $v) $veta1->setAttribute($k, $v);
             $dphdp3->appendChild($veta1);
         }
-        // Veta2 — oddíl C (ř.20-26). XSD vyžaduje pořadí Veta1 → Veta2 → … → Veta4.
+        // Veta2 — oddíl B (ř.20-26). XSD vyžaduje pořadí Veta1 → Veta2 → Veta3 → Veta4.
         if (!empty($veta2Attrs)) {
             $veta2 = $dom->createElement('Veta2');
             foreach ($veta2Attrs as $k => $v) $veta2->setAttribute($k, $v);
             $dphdp3->appendChild($veta2);
+        }
+        // Veta3 — oddíl C, doplňující údaje (ř.30/31 třístranný obchod prostřední osobou).
+        if (!empty($veta3Attrs)) {
+            $veta3 = $dom->createElement('Veta3');
+            foreach ($veta3Attrs as $k => $v) $veta3->setAttribute($k, $v);
+            $dphdp3->appendChild($veta3);
         }
         if (!empty($veta4Attrs)) {
             $veta4 = $dom->createElement('Veta4');
@@ -203,12 +219,27 @@ final class DphPriznaniBuilder
             $dphdp3->appendChild($veta4);
         }
 
+        $vlastniDan = $totalDanZdanitelne - $totalDanOdpocitatelne;
+
+        // ── Veta6: rekapitulace (XSD pořadí Veta4 → Veta6 → VetaR) ───────
+        // ř.62 dan_zocelk = daň na výstupu celkem, ř.63 odp_zocelk = odpočet celkem,
+        // ř.64 dano_da = vlastní daň (jen když výstup > odpočet),
+        // ř.66 dano_no = nadměrný odpočet (kladné číslo, jen když odpočet > výstup).
+        // EPO si rekapitulaci po importu sice dopočítá, ale úplný soubor je správnější.
+        $veta6 = $dom->createElement('Veta6');
+        $veta6->setAttribute('dan_zocelk', $this->formatAmount($totalDanZdanitelne));
+        $veta6->setAttribute('odp_zocelk', $this->formatAmount($totalDanOdpocitatelne));
+        if ($vlastniDan > 0) {
+            $veta6->setAttribute('dano_da', $this->formatAmount($vlastniDan));
+        } elseif ($vlastniDan < 0) {
+            $veta6->setAttribute('dano_no', $this->formatAmount(-$vlastniDan));
+        }
+        $dphdp3->appendChild($veta6);
+
         // ── VetaR: poradi (wrapper element, summary attrs jdou jinam) ────
         $vetaR = $dom->createElement('VetaR');
         $vetaR->setAttribute('poradi', '1');
         $dphdp3->appendChild($vetaR);
-
-        $vlastniDan = $totalDanZdanitelne - $totalDanOdpocitatelne;
 
         // trans: A = vznikla daňová povinnost (kladná vlastní daň), N = nevznikla
         // (nadměrný odpočet / nulový rozdíl). Setneme až teď, kdy máme spočítáno.
