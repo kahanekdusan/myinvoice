@@ -19,6 +19,14 @@ if [ "${MYINVOICE_SKIP_MIGRATIONS:-0}" != "1" ]; then
   done
 fi
 
+# Migrace běží jako root (entrypoint), takže mohou vytvořit log soubory s owner=root.
+# Před startem Apache sjednotíme ownership/permissions, aby www-data mohl app logy appendovat.
+DATA_DIR="${MYINVOICE_DATA_DIR:-/var/www/html}"
+mkdir -p "$DATA_DIR/log" "$DATA_DIR/log/cron"
+chown -R www-data:www-data "$DATA_DIR/log" 2>/dev/null || true
+find "$DATA_DIR/log" -type d -exec chmod 775 {} \; 2>/dev/null || true
+find "$DATA_DIR/log" -type f -exec chmod 664 {} \; 2>/dev/null || true
+
 # Vestavěný cron (default zapnutý; multi-replica deployment si dá MYINVOICE_ENABLE_CRON=0,
 # jinak by úlohy běžely v každé replice). Spouští se PO migracích, aby schéma bylo hotové.
 if [ "${MYINVOICE_ENABLE_CRON:-1}" != "0" ]; then

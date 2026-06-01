@@ -1039,7 +1039,14 @@ final class InvoiceRepository
             }
         }
 
-        return $this->find((int) $id);
+        $cs = $pdo->prepare('SELECT default_revenue_category_id FROM clients WHERE id = ?');
+        $cs->execute([$clientId]);
+        $ccat = $cs->fetchColumn();
+        if ($ccat !== false && $ccat !== null) {
+            return (int) $ccat;
+        }
+
+        return null;
     }
 
     /**
