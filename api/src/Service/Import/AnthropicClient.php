@@ -175,14 +175,15 @@ JSON schema:
     "email": string|null,
     "phone": string|null,
     "web": string|null,
-    "bank_account": string|null
+    "bank_account": string|null,
+    "is_vat_payer": boolean|null
   },
   "customer": {
     "company_name": string|null,
     "ic": string|null,
     "dic": string|null
   },
-  "vendor_invoice_number": string,
+  "vendor_invoice_number": string|null,
   "varsymbol": string|null,
   "document_kind": "invoice"|"credit_note"|"advance"|"receipt",
   "issue_date": "YYYY-MM-DD",
@@ -198,10 +199,15 @@ JSON schema:
       "vat_rate": number
     }
   ],
+  "unit_prices_include_vat": boolean,
   "total_without_vat": number|null,
   "total_with_vat": number|null,
   "total_with_vat_rounded": number|null,
-  "already_paid": boolean
+  "vat_recap": [
+    { "rate": number, "base": number, "vat": number }
+  ],
+  "already_paid": boolean,
+  "advance_reference": string|null
 }
 
 DŮLEŽITÉ k poli `document_kind`:
@@ -213,6 +219,39 @@ DŮLEŽITÉ k poli `document_kind`:
   "Zálohový list", "Advance invoice" → vrať `"advance"`.
 - Pokud doklad je "Účtenka", "Paragon", "Pokladní doklad", "Receipt" → vrať `"receipt"`.
 - Jinak (běžná faktura / daňový doklad) → vrať `"invoice"`.
+
+DŮLEŽITÉ k poli `unit_prices_include_vat` (DPH v ceně položky):
+- Na ÚČTENKÁCH / PARAGONECH (`document_kind = "receipt"`) jsou ceny u položek
+  typicky uvedené VČETNĚ DPH (brutto). Poznáš to tak, že součet cen položek se
+  rovná řádku "CELKEM" / "K úhradě" (s DPH), zatímco "Mezisoučet bez DPH" je NIŽŠÍ.
+  Příklad: položka "Tonic 33,00 Kč" + "DPH 21 %", součet položek = CELKEM 344 Kč,
+  ale "Mezisoučet bez DPH" = 284,30 Kč → ceny položek JSOU včetně DPH.
+- Pokud jsou ceny položek VČETNĚ DPH → vrať `unit_prices_include_vat: true`
+  a do `unit_price_without_vat` dej cenu **TAK JAK JE NA DOKLADU (včetně DPH)**.
+  NEPŘEPOČÍTÁVEJ ji sám — přepočet na cenu bez DPH udělá náš systém dle `vat_rate`.
+- Pokud jsou ceny položek bez DPH (běžná faktura, kde je DPH až v součtu) →
+  vrať `unit_prices_include_vat: false` a `unit_price_without_vat` jako cenu bez DPH.
+- Když si nejsi jistý, porovnej součet cen položek s "Mezisoučet bez DPH" vs
+  "CELKEM/K úhradě": blíž k bez-DPH → false; blíž k celkem-s-DPH → true.
+- Když na dokladu ŽÁDNÝ řádek "bez DPH" / "Mezisoučet bez DPH" NENÍ (typická
+  jednoduchá účtenka, foto účtenky, nebo doklad od NEPLÁTCE DPH) → ceny položek
+  jsou prakticky vždy s DPH → vrať `true`. Pole bez DPH na takovém dokladu nehledej.
+- U dokladu od NEPLÁTCE DPH (není uvedena žádná sazba ani DPH) vrať `vat_rate: 0`
+  a `unit_prices_include_vat: true` (cena je konečná, žádné DPH se neodečítá).
+
+DŮLEŽITÉ k poli `vendor.is_vat_payer` (plátcovství dodavatele):
+- `false` pokud doklad jasně značí, že DODAVATEL je neplátce DPH — typicky text
+  „Neplátce DPH" / „Nejsem plátce DPH" u DIČ dodavatele, NEBO dodavatel nemá DIČ
+  a na dokladu není žádná sazba/částka DPH.
+- `true` pokud má dodavatel platné DIČ a/nebo je na dokladu vyčíslena DPH.
+- `null` když to z dokladu nelze určit. (Systém ověří plátcovství i v registru ARES/VIES.)
+
+DŮLEŽITÉ k poli `vendor_invoice_number` (číslo dokladu):
+- Vrať číslo dokladu/faktury/účtenky tak, jak je vytištěné (např. "3266011131",
+  "2025/0042", u paragonu pořadové číslo účtenky / číslo dokladu pokud existuje).
+- Účtenka / paragon NEMUSÍ mít žádné jednoznačné číslo dokladu. Pokud na dokladu
+  ŽÁDNÉ použitelné číslo NENÍ → vrať `null`. NEVYMÝŠLEJ ho a NEPOUŽÍVEJ náhražky
+  jako číslo pokladny, IČO, DIČ, datum nebo telefon — to číslo dokladu není.
 
 DŮLEŽITÉ k položkám u dobropisu (`document_kind = "credit_note"`):
 - `quantity` a `unit_price_without_vat` vrať jako **kladná čísla** (jak jsou na PDF).
@@ -237,12 +276,38 @@ DŮLEŽITÉ k poli `already_paid`:
   nebo podobné indikátory že faktura už byla zaplacena → vrať `true`.
 - Pokud žádný takový text není (default scénář) → vrať `false`.
 
+DŮLEŽITÉ k poli `advance_reference`:
+- Pokud doklad odkazuje na zaplacenou zálohu / proformu (typicky "Odečet zálohy",
+  "Zaplaceno zálohou č. ...", "Uhrazeno zálohovou fakturou ...", "k zálohové
+  faktuře č. ...", "Hradí se ze zálohy ...", "paid by advance ...", "proforma
+  no. ...") → vrať identifikátor té zálohy/proformy jak je uveden na dokladu
+  (číslo faktury / variabilní symbol), např. `"2026/0042"` nebo `"PF2026001"`.
+- Pokud žádný odkaz na zálohu není → vrať `null`. Nevymýšlej hodnoty.
+
 DŮLEŽITÉ k zaokrouhlení:
 - `total_with_vat` = přesný součet (např. 228.69)
 - `total_with_vat_rounded` = zaokrouhlená částka pokud je na PDF uvedeno
   zaokrouhlení (např. "229.00 Kč", "K úhradě: 229").
 - Rozdíl (229 - 228.69 = 0.31) půjde do pole `rounding` faktury.
 - Pokud na PDF NENÍ explicitní zaokrouhlení, vrať `total_with_vat_rounded: null`.
+
+DŮLEŽITÉ k poli `vat_recap` (rekapitulace DPH po sazbách):
+- Opiš REKAPITULACI / REKAPITULACI DPH z dokladu — tabulku, kde je pro každou
+  sazbu DPH uveden základ daně a daň. Typicky dole na faktuře:
+  „Rekapitulace DPH" / „Rozpis DPH" / „DPH rozpis" / „VAT summary" se sloupci
+  Sazba | Základ | DPH.
+- Pro KAŽDOU sazbu vrať jeden objekt `{ "rate": sazba_v_%, "base": základ_bez_DPH,
+  "vat": částka_DPH }` — VŠE jako kladná čísla TAK JAK JSOU NA DOKLADU (nepřepočítávej).
+- Příklad rekapitulace na dokladu:
+    Sazba   Základ      DPH
+    21 %    1 000,00    210,00
+    12 %      500,00     60,00
+  → `vat_recap`: [{"rate":21,"base":1000.00,"vat":210.00},{"rate":12,"base":500.00,"vat":60.00}]
+- Klíčové je věrně opsat hodnoty DPH dle dokladu (kvůli § 73 ZDPH — odpočet ve výši
+  daně uvedené na dokladu); haléřové rozdíly oproti přepočtu jsou očekávané.
+- U DOBROPISU vrať kladná čísla (sign aplikuje importér).
+- Pokud doklad rekapitulaci DPH po sazbách NEMÁ (jednoduchá účtenka, neplátce,
+  reverse-charge bez DPH) → vrať `vat_recap: []` (prázdné pole). Nevymýšlej hodnoty.
 
 DŮLEŽITÉ k řádkům faktury (`items`):
 - Vrať POUZE listové (atomické) položky — konkrétní práce, materiál, zboží.
@@ -258,6 +323,22 @@ DŮLEŽITÉ k řádkům faktury (`items`):
   celkovou částku 2-5× nad reálný total.
 - Pokud na faktuře vidíš stejnou položku "Vyvážení kola" s qty 1 i jako
   součtový řádek "Celkem Vyvážení" s vypočtenou sumou — vrať POUZE ten s qty 1.
+
+DŮLEŽITÉ k VÍCESTRÁNKOVÝM dokladům (faktura + příloha/rozpis):
+- Některé doklady mají na PRVNÍ straně vlastní fakturu se sumarizovanými
+  fakturačními řádky (to, co se reálně účtuje a sčítá do "K úhradě"), a na DALŠÍCH
+  stranách PODROBNÝ ROZPIS / SPECIFIKACI / přílohu (rozpad té samé částky na
+  detailní položky, položky po měsících, telefonní hovory, odečty měřidel apod.).
+- Vrať VÝHRADNĚ fakturační řádky z HLAVNÍ faktury (typicky 1. strana), jejichž
+  součet odpovídá "K úhradě". NIKDY nepřidávej řádky z podrobného rozpisu/přílohy
+  — ty rozpadají TÉŽ částku znovu a jejich přidání by total zdvojnásobilo.
+- Poznáš rozpis podle nadpisů jako "Rozpis", "Specifikace", "Podrobný rozpis",
+  "Příloha", "Detailní výpis", "Vyúčtování položek", "Soupis", "Rozpis plnění"
+  na druhé+ straně, nebo podle toho, že součet detailních řádků = součet
+  fakturačních řádků z 1. strany (stejná částka rozepsaná jinak).
+- Pravidlo zdravého rozumu: součet vrácených `items` (bez DPH) se musí blížit
+  základu daně z hlavní faktury, NE jeho násobku. Když by řádky z rozpisu total
+  zdvojily, ignoruj rozpis a ber jen hlavní fakturu.
 
 DŮLEŽITÉ k poli `total_with_vat`:
 - Hodnota MUSÍ pocházet výhradně z hlavního finálního "K úhradě" /

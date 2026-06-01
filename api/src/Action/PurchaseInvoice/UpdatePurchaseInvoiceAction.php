@@ -78,6 +78,13 @@ final class UpdatePurchaseInvoiceAction
             $this->clients->markAsVendor((int) $vendor['id']);
         }
 
+        // Dodavatel neplátce DPH → bez nároku na odpočet. Default 'none' když neposláno;
+        // explicitní volbu respektujeme (vědomý override), ale níže přidáme varování.
+        $vendorNonPayer = isset($vendor['is_vat_payer']) && !$vendor['is_vat_payer'];
+        if ($vendorNonPayer && !array_key_exists('vat_deduction', $body)) {
+            $body['vat_deduction'] = 'none';
+        }
+
         // Auto-default VAT klasifikace pokud uživatel nezadal — na header i items (s multi-tenant scope).
         $this->applyVatClassificationDefaults($body, $supplierId);
 
@@ -87,6 +94,11 @@ final class UpdatePurchaseInvoiceAction
             return Json::error($response, 'integrity_violation', $e->getMessage(), 400);
         }
         $this->repo->replaceItems($id, (array) ($body['items'] ?? []));
+        // Ruční rekapitulace DPH dle dokladu (§ 73) — uložit PŘED recompute, aby ji
+        // kalkulátor zapekl do řádkových totálů.
+        if (array_key_exists('vat_overrides', $body)) {
+            $this->repo->setVatOverrides($id, $supplierId, is_array($body['vat_overrides']) ? $body['vat_overrides'] : null);
+        }
         $this->calc->recompute($id);
         // Rounding override z body (uživatel může ručně upravit v editoru)
         if (array_key_exists('rounding', $body)) {
@@ -103,6 +115,10 @@ final class UpdatePurchaseInvoiceAction
         $invoice = $this->repo->find($id, $supplierId);
         // Non-blocking varování (např. dobropis s kladným součtem — viz issue #35).
         $warnings = PurchaseInvoiceValidation::warnings($invoice ?? []);
+        // Neplátce + přesto uplatněn odpočet → upozorni (uživatel vědomě přepsal).
+        if ($vendorNonPayer && ($invoice['vat_deduction'] ?? 'full') !== 'none') {
+            $warnings[] = 'vendor_non_payer_deduction';
+        }
         if (!empty($warnings)) {
             $invoice['_warnings'] = $warnings;
         }

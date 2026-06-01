@@ -10,9 +10,14 @@ use MyInvoice\Infrastructure\Database\Connection;
  * Kanonický producent VAT řádků — JEDNO místo se sdílenou logikou pro všechny
  * tři daňové reporty (DPH přiznání, kontrolní hlášení, Kniha DPH):
  *
- *   - filtr období: COALESCE(tax_date, issue_date) v rozsahu
+ *   - filtr období (daňově korektní zařazení do měsíce):
+ *       * vystavené → COALESCE(tax_date, issue_date) = DUZP (daň na výstupu k DUZP),
+ *       * přijaté → GREATEST(DUZP, vystavení) — nárok na odpočet nejdřív, když plátce
+ *         drží daňový doklad (§ 73 ZDPH); zpětné DUZP tak padne do měsíce vystavení.
+ *     (Zobrazený sloupec tax_date dál nese skutečné DUZP, mění se jen příslušnost k období.)
  *   - filtr stavu: bez 'cancelled'; 'draft' jen pokud $includeDrafts (Kniha ano,
- *     DPH/KH ne); u vystavených navíc bez 'proforma'
+ *     DPH/KH ne); u vystavených navíc bez 'proforma', u přijatých bez 'advance'
+ *     (zálohová/proforma není daňový doklad)
  *   - resolve klasifikačního kódu: řádek → hlavička → auto-default dle sazby + RC + směru
  *   - přepočet na CZK kurzem faktury
  *   - RC samovyměření (jen přijaté): když pii.total_vat=0 a (reverse_charge flag NEBO
@@ -27,7 +32,7 @@ use MyInvoice\Infrastructure\Database\Connection;
  *   document_kind:?string, status:string, is_draft:bool, tax_date:?string, issue_date:?string,
  *   counterparty_name:string, counterparty_dic:?string, country_iso2:?string,
  *   code:?string, dphdp3_line:?string, dphdp3_line_secondary:?string, kh_section:?string,
- *   is_reverse_charge:bool, vat_rate:float, base_czk:float, vat_czk:float,
+ *   is_reverse_charge:bool, vat_deduction_partial:bool, vat_rate:float, base_czk:float, vat_czk:float,
  *   total_with_vat_czk:float, is_fixed_asset:bool, exchange_rate:float
  * }
  */
@@ -99,7 +104,11 @@ final class VatLedgerService
                    COALESCE(
                        ii.vat_classification_code, i.vat_classification_code,
                        CASE
-                           WHEN i.reverse_charge = 1 THEN '20'
+                           -- Zahraniční EU odběratel + RC = dodání do JČS → ř.20 (dod_zb).
+                           WHEN i.reverse_charge = 1
+                                AND COALESCE(co.is_eu, 0) = 1 AND COALESCE(co.iso2, 'CZ') <> 'CZ' THEN '20'
+                           -- Tuzemský odběratel + RC = přenesená daň. povinnost §92 → ř.25 (pln_rez_pren), KH A.1.
+                           WHEN i.reverse_charge = 1 THEN '25s'
                            WHEN ii.vat_rate_snapshot >= 20.5 THEN '1'
                            WHEN ii.vat_rate_snapshot > 0     THEN '2'
                            WHEN ii.vat_rate_snapshot = 0     THEN '3'
@@ -126,10 +135,14 @@ final class VatLedgerService
     }
 
     /**
-     * Pozn.: faktury s `vat_deduction = 'none'` (bez nároku na odpočet — reprezentace,
-     * osobní spotřeba…) se do DPH evidence VŮBEC nezahrnují (ani Kniha DPH, ani DPHDP3,
-     * ani KH) — jsou jen účetní náklad. `proportional` (krácený nárok §76) zatím
-     * zahrnujeme jako plný nárok; aplikace koeficientu se řeší samostatně (TODO).
+     * Pozn. k odpočtu DPH na vstupu:
+     *  - `vat_deduction = 'none'` (bez nároku — reprezentace, osobní spotřeba…) → do DPH
+     *    evidence se VŮBEC nezahrnuje (ani Kniha DPH, ani DPHDP3, ani KH), jen účetní náklad.
+     *  - `vat_deduction = 'proportional'` = **poměrný odpočet podle § 75** (vstup zčásti pro
+     *    ekonomickou, zčásti pro neekonomickou činnost) → základ i daň se krátí na
+     *    `vat_deduction_percent` (viz normalize()). Tyto řádky se v KH označí `pomer='A'`.
+     *  - **Krácený nárok § 76** (vypořádací koeficient u plnění osvobozených bez nároku,
+     *    ř. 52/53 DPHDP3) implementovaný NENÍ — řeší se ručně / v účetním SW.
      *
      * @return list<array<string,mixed>>
      */
@@ -166,9 +179,38 @@ final class VatLedgerService
          LEFT JOIN currencies cur ON cur.id = pi.currency_id
              WHERE pi.supplier_id = ?
                AND {$statusFilter}
+               -- Zálohová / proforma (advance) NENÍ daňový doklad → ven z DPH evidence,
+               -- symetricky k výstupní straně (fetchSales: invoice_type != 'proforma').
+               -- Daňovým dokladem je až 'daňový doklad k přijaté platbě', ne tato výzva k platbě.
+               -- COALESCE: NULL document_kind (legacy / neimportované doklady) = běžný
+               -- doklad → ponechat (NULL <> 'advance' by jinak řádek vyřadilo).
+               AND COALESCE(pi.document_kind, '') <> 'advance'
                AND pi.vat_deduction <> 'none'
-               AND COALESCE(pi.tax_date, pi.issue_date) BETWEEN ? AND ?
-          ORDER BY COALESCE(pi.tax_date, pi.issue_date), pi.id, pii.id
+               -- Období odpočtu = pozdější z (DUZP, vystavení). Nárok na odpočet nelze
+               -- uplatnit dřív, než plátce drží daňový doklad (§ 73 odst. 2 ZDPH), takže
+               -- faktura se zpětným DUZP, ale vystavená v pozdějším měsíci, spadá do
+               -- měsíce vystavení. (Zobrazený sloupec tax_date dál ukazuje skutečné DUZP.)
+               --
+               -- Pozn.: striktně dle § 73 je rozhodující datum, kdy plátce doklad fyzicky
+               -- DRŽÍ (= received_at). Záměrně používáme issue_date jako proxy, protože
+               -- received_at importy (iDoklad/Fakturoid/ISDOC/AI) plní na den importu —
+               -- u zpětně importovaných dokladů by received_at naházel veškerý odpočet do
+               -- měsíce importu. issue_date (datum vystavení dodavatelem) je spolehlivé a
+               -- pro běžný případ ≈ datum přijetí. Pokud bude k dispozici důvěryhodné datum
+               -- přijetí, lze přejít na GREATEST(DUZP, received_at).
+               -- CASE místo GREATEST kvůli přenositelnosti (SQLite v testech GREATEST nemá).
+               AND CASE
+                       WHEN pi.tax_date IS NULL THEN pi.issue_date
+                       WHEN pi.issue_date IS NULL THEN pi.tax_date
+                       WHEN pi.tax_date >= pi.issue_date THEN pi.tax_date
+                       ELSE pi.issue_date
+                   END BETWEEN ? AND ?
+          ORDER BY CASE
+                       WHEN pi.tax_date IS NULL THEN pi.issue_date
+                       WHEN pi.issue_date IS NULL THEN pi.tax_date
+                       WHEN pi.tax_date >= pi.issue_date THEN pi.tax_date
+                       ELSE pi.issue_date
+                   END, pi.id, pii.id
         ");
         $stmt->execute([$supplierId, $start, $end]);
         return $stmt->fetchAll(\PDO::FETCH_ASSOC);
@@ -198,10 +240,12 @@ final class VatLedgerService
         // §75 poměrný odpočet — u přijatých s 'proportional' se odpočet (základ i daň)
         // uplatní jen v poměrné výši (vat_deduction_percent). Zbytek je nedaňová část
         // mimo DPH přiznání. 'full'/'none' se sem nedostanou (none je odfiltrováno v SQL).
+        $isPartialDeduction = false;
         if ($source === 'purchase' && ($r['vat_deduction'] ?? 'full') === 'proportional') {
             $pct = max(0.0, min(100.0, (float) ($r['vat_deduction_percent'] ?? 100))) / 100.0;
             $baseRaw = round($baseRaw * $pct, 2);
             $vatRaw  = round($vatRaw * $pct, 2);
+            $isPartialDeduction = true;
         }
 
         return [
@@ -225,6 +269,7 @@ final class VatLedgerService
             'dphdp3_line_secondary' => $clsf['dphdp3_line_secondary'] ?? null,
             'kh_section'            => $clsf['kh_section'] ?? null,
             'is_reverse_charge'     => $isRc,
+            'vat_deduction_partial' => $isPartialDeduction,
             'vat_rate'              => $vatRate,
             'currency'              => (string) $r['currency'],
             'base_czk'              => round($baseRaw * $rate, 2),

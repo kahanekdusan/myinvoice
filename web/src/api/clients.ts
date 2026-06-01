@@ -17,12 +17,25 @@ export interface Client {
   currency_default_id: number
   currency_default: string
   reverse_charge: boolean
+  /** Plátce DPH (ARES/VIES). U dodavatele řídí nárok na odpočet — neplátce ⇒ vat_deduction='none'. */
+  is_vat_payer?: boolean
   is_customer?: boolean
   is_vendor?: boolean
   auto_send_reminders: boolean
   payment_due_default?: number | null
+  payment_due_unit?: 'days' | 'month' | null
   hourly_rate: number
   note?: string | null
+  default_expense_category_id?: number | null
+  default_revenue_category_id?: number | null
+  // Vrací UpdateClientAction: počet faktur, do kterých byla doplněna nově nastavená
+  // výchozí kategorie nákladu/tržby (pro toast po uložení klienta).
+  expense_category_backfilled?: number
+  revenue_category_backfilled?: number
+  invoice_number_format?: string | null
+  proforma_number_format?: string | null
+  credit_note_number_format?: string | null
+  invoice_number_period?: 'year' | 'month' | 'none' | null
   archived_at?: string | null
   active_projects_count?: number
   invoices_count?: number
@@ -58,6 +71,15 @@ export interface ProjectSummary {
   project_number?: string | null
 }
 
+export interface VatStatusResult {
+  id: number
+  is_vat_payer: boolean
+  /** Zdroj výsledku: 'ares' (CZ dle IČO), 'vies' (zahr. dle DIČ), 'unknown' (nezjištěno → uložený příznak). */
+  source: 'ares' | 'vies' | 'unknown'
+  ic: string | null
+  dic: string | null
+}
+
 export interface AresLookupResult {
   found: boolean
   source: 'cache' | 'fresh'
@@ -72,7 +94,29 @@ export interface AresLookupResult {
     is_vat_payer: boolean
     date_active?: string
     legal_form?: string
+    /** Zápis v OR pro PO (např. „Spisová značka C 45039 vedená u Krajského soudu v Plzni"). Prázdné u OSVČ. */
+    commercial_register?: string
+    /** Typ poplatníka odvozený z právní formy: 'fo' = OSVČ (DPFO), 'po' = firma (DPPO), '' = neurčeno. */
+    taxpayer_type?: 'fo' | 'po' | ''
   }
+}
+
+/** Zveřejněný bankovní účet z registru plátců DPH (CRPDPH/MFČR). */
+export interface CrpDphAccount {
+  prefix: string
+  number: string
+  bank_code: string
+  iban: string | null
+  /** Hotový lidský zápis: „19-2000145399/0800" nebo IBAN. */
+  display: string
+}
+
+export interface BankLookupResult {
+  found: boolean
+  /** true = nespolehlivý plátce, false = spolehlivý, null = neznámé/nenalezeno. */
+  unreliable: boolean | null
+  accounts: CrpDphAccount[]
+  source: 'cache' | 'fresh' | 'error'
 }
 
 export interface ViesLookupResult {
@@ -104,12 +148,20 @@ export interface ClientPayload {
   language: 'cs' | 'en'
   currency_default_id: number
   reverse_charge: boolean
+  is_vat_payer?: boolean
   is_customer?: boolean
   is_vendor?: boolean
   auto_send_reminders: boolean
   payment_due_default?: number | null
+  payment_due_unit?: 'days' | 'month' | null
   hourly_rate?: number
   note?: string | null
+  default_expense_category_id?: number | null
+  default_revenue_category_id?: number | null
+  invoice_number_format?: string | null
+  proforma_number_format?: string | null
+  credit_note_number_format?: string | null
+  invoice_number_period?: 'year' | 'month' | 'none' | null
 }
 
 export interface ListResponse<T> {
@@ -131,7 +183,7 @@ export interface ClientListResponse {
 export type ClientRoleFilter = 'all' | 'customers' | 'vendors'
 
 export const clientsApi = {
-  list: (params?: { q?: string; page?: number; per_page?: number; archived?: boolean; role?: ClientRoleFilter; sort?: 'name' | 'revenue' | 'last_activity' }) =>
+  list: (params?: { q?: string; page?: number; per_page?: number; archived?: boolean; role?: ClientRoleFilter; sort?: 'name' | 'revenue' | 'last_activity'; expense_category_id?: number | null }) =>
     api
       .get<ClientListResponse>('/clients', {
         params: {
@@ -140,12 +192,17 @@ export const clientsApi = {
           per_page: params?.per_page,
           sort: params?.sort,
           role: params?.role && params.role !== 'all' ? params.role : undefined,
+          expense_category_id: params?.expense_category_id || undefined,
           ...(params?.archived ? { 'filter[archived]': 1 } : {}),
         },
       })
       .then((r) => r.data),
 
   get: (id: number) => api.get<Client>(`/clients/${id}`).then((r) => r.data),
+
+  /** Online ověření plátcovství DPH dodavatele (ARES dle IČO / VIES dle DIČ); uloží na klienta. */
+  getVatStatus: (id: number) =>
+    api.get<VatStatusResult>(`/clients/${id}/vat-status`).then((r) => r.data),
 
   create: (payload: ClientPayload) => api.post<Client>('/clients', payload).then((r) => r.data),
   update: (id: number, payload: ClientPayload) =>
@@ -159,4 +216,7 @@ export const clientsApi = {
     api.post<AresLookupResult>('/clients/lookup-ares', { ic }).then((r) => r.data),
   lookupVies: (vatId: string) =>
     api.post<ViesLookupResult>('/clients/lookup-vies', { vat_id: vatId }).then((r) => r.data),
+  /** Zveřejněné bankovní účty z registru plátců DPH podle DIČ. */
+  lookupBank: (dic: string) =>
+    api.post<BankLookupResult>('/clients/lookup-bank', { dic }).then((r) => r.data),
 }

@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { ref, onMounted, reactive, computed, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { settingsApi, type Supplier, type CurrencyAccount } from '@/api/settings'
+import { settingsApi, type Supplier, type CurrencyAccount, type SigningCertMeta } from '@/api/settings'
+import { clientsApi } from '@/api/clients'
 import { useHotkey } from '@/composables/useHotkey'
 import { useToast } from '@/composables/useToast'
 import { renderVarsymbolTemplate, hasCounterPlaceholder } from '@/utils/varsymbol'
@@ -20,6 +21,63 @@ const currencyDraft = reactive<Partial<CurrencyAccount>>({})
 
 useHotkey('escape', () => { if (editingCurrency.value !== null) editingCurrency.value = null })
 
+// ARES → spisová značka (commercial_register) podle IČ
+const crLoading = ref(false)
+async function loadCommercialRegister() {
+  const ic = (supplier.value?.ic || '').replace(/\D/g, '')
+  if (!/^\d{8}$/.test(ic)) { toast.error(t('supplier.ares_invalid_ic')); return }
+  crLoading.value = true
+  try {
+    const r = await clientsApi.lookupAres(ic)
+    if (r.found && r.data?.commercial_register && supplier.value) {
+      supplier.value.commercial_register = r.data.commercial_register
+      toast.success(t('settings.commercial_register_loaded'))
+    } else if (r.found && r.data?.taxpayer_type === 'fo') {
+      // OSVČ (fyzická osoba) není v obchodním rejstříku → spisová značka neexistuje.
+      // Není to chyba (issue #76), jen neutrální info.
+      toast.info(t('settings.commercial_register_none_fo'))
+    } else {
+      toast.error(t('settings.commercial_register_not_found'))
+    }
+  } catch (e: any) {
+    toast.error(e?.response?.data?.error?.message || t('supplier.ares_failed'))
+  } finally {
+    crLoading.value = false
+  }
+}
+
+// Registr plátců DPH (CRPDPH) → bankovní účet do právě editované měny (currencyDraft)
+const bankDraftLoading = ref(false)
+const bankDraftMsg = ref<{ type: 'success' | 'error' | 'warning'; text: string } | null>(null)
+async function loadBankToDraft() {
+  const dic = (supplier.value?.dic || '').replace(/\D/g, '')
+  if (!/^\d{8,10}$/.test(dic)) { bankDraftMsg.value = { type: 'error', text: t('supplier.bank_lookup_no_dic') }; return }
+  bankDraftLoading.value = true
+  bankDraftMsg.value = null
+  try {
+    const r = await clientsApi.lookupBank(dic)
+    if (r.accounts.length === 0) {
+      bankDraftMsg.value = { type: 'error', text: t('supplier.bank_lookup_none') }
+    } else {
+      // Preferuj účet odpovídající editované měně: CZK → standardní účet, jinak IBAN.
+      const isCzk = (currencyDraft.code || '').toUpperCase() === 'CZK'
+      const acc = (isCzk ? r.accounts.find(a => !a.iban) : r.accounts.find(a => a.iban)) || r.accounts[0]
+      if (acc.iban) {
+        currencyDraft.iban = acc.iban
+      } else {
+        currencyDraft.account_number = acc.prefix ? `${acc.prefix}-${acc.number}` : acc.number
+        currencyDraft.bank_code = acc.bank_code
+      }
+      bankDraftMsg.value = { type: 'success', text: r.accounts.length === 1 ? t('supplier.bank_lookup_one') : t('supplier.bank_lookup_many', { n: r.accounts.length }) }
+    }
+    if (r.unreliable === true) bankDraftMsg.value = { type: 'warning', text: t('supplier.bank_lookup_unreliable') }
+  } catch (e: any) {
+    bankDraftMsg.value = { type: 'error', text: e?.response?.data?.error?.message || t('supplier.bank_lookup_failed') }
+  } finally {
+    bankDraftLoading.value = false
+  }
+}
+
 // Live preview pro číslování faktur — okamžitá zpětná vazba pod každým polem.
 // Chybějící counter → červený error; jinak „Náhled: JD2026-01".
 function validateAndPreview(template: string | null) {
@@ -28,6 +86,43 @@ function validateAndPreview(template: string | null) {
   if (!hasCounterPlaceholder(tmpl)) return { error: t('settings.numbering_must_have_counter'), preview: '' }
   return { error: '', preview: renderVarsymbolTemplate(tmpl, new Date(), 1) }
 }
+// Výchozí splatnost — UI preset ('7' / '14' / 'month' / 'custom') je odvozen z dvojice
+// (default_payment_due_days, default_payment_due_unit). 'month' znamená přesně 1 kalendářní
+// měsíc (days=1, unit='month'); 'custom' nechá volný číselný input v dnech.
+type DuePreset = '7' | '14' | 'month' | 'custom'
+// 'custom' musí být „sticky" i když hodnota náhodou odpovídá presetu (7/14) — jinak
+// by getter spadl zpět na preset a číselný input by se nikdy neukázal.
+const dueCustom = ref(false)
+const dueSelectValue = computed<DuePreset>({
+  get() {
+    if (!supplier.value) return '7'
+    if (dueCustom.value) return 'custom'
+    const d = supplier.value.default_payment_due_days
+    const u = supplier.value.default_payment_due_unit
+    if (u === 'month' && d === 1) return 'month'
+    if (u === 'days' && d === 7)  return '7'
+    if (u === 'days' && d === 14) return '14'
+    return 'custom'
+  },
+  set(v: DuePreset) {
+    if (!supplier.value) return
+    dueCustom.value = (v === 'custom')
+    if (v === '7') {
+      supplier.value.default_payment_due_days = 7
+      supplier.value.default_payment_due_unit = 'days'
+    } else if (v === '14') {
+      supplier.value.default_payment_due_days = 14
+      supplier.value.default_payment_due_unit = 'days'
+    } else if (v === 'month') {
+      supplier.value.default_payment_due_days = 1
+      supplier.value.default_payment_due_unit = 'month'
+    } else {
+      supplier.value.default_payment_due_unit = 'days'
+      // days zachovat — pokud byl 7/14 user dostane editovatelnou hodnotu k úpravě
+    }
+  },
+})
+
 const invoicePreview        = computed(() => validateAndPreview(supplier.value?.invoice_number_format ?? null).preview)
 const invoiceFormatError    = computed(() => validateAndPreview(supplier.value?.invoice_number_format ?? null).error)
 const quotePreview          = computed(() => validateAndPreview(supplier.value?.quote_number_format ?? null).preview)
@@ -47,10 +142,7 @@ async function load() {
     ])
     // První render preview hned po loadu supplier
     bumpPreview()
-  } catch (e: any) {
-    supplier.value = null
-    currencies.value = []
-    loadError.value = e?.response?.data?.error?.message || t('settings.missing_supplier_error')
+    loadSigningMeta()
   } finally { loading.value = false }
 }
 
@@ -86,8 +178,14 @@ async function saveSupplier() {
       tagline: supplier.value.tagline,
       commercial_register: supplier.value.commercial_register,
       default_payment_due_days: supplier.value.default_payment_due_days,
+      default_payment_due_unit: supplier.value.default_payment_due_unit,
+      default_prices_include_vat: supplier.value.default_prices_include_vat,
       default_hourly_rate: supplier.value.default_hourly_rate,
       auto_send_reminders: supplier.value.auto_send_reminders,
+      payment_thanks_enabled: supplier.value.payment_thanks_enabled,
+      payment_thanks_auto_send: supplier.value.payment_thanks_auto_send,
+      payment_thanks_default_checked: supplier.value.payment_thanks_default_checked,
+      payment_thanks_attach_paid_pdf: supplier.value.payment_thanks_attach_paid_pdf,
       auto_generate_recurring: supplier.value.auto_generate_recurring,
       embed_isdoc: supplier.value.embed_isdoc,
       pohoda_account_code: supplier.value.pohoda_account_code,
@@ -104,6 +202,7 @@ async function saveSupplier() {
       // Tax settings (EPO výkazy DPH/KH)
       taxpayer_type: (supplier.value as any).taxpayer_type ?? null,
       vat_period: (supplier.value as any).vat_period ?? null,
+      flat_tax_band: (supplier.value as any).flat_tax_band ?? 'none',
       financial_office_code: (supplier.value as any).financial_office_code ?? null,
       workplace_code: (supplier.value as any).workplace_code ?? null,
       cz_nace_code: (supplier.value as any).cz_nace_code ?? null,
@@ -153,6 +252,7 @@ async function saveBranding(silent = false) {
     const updated = await settingsApi.updateSupplier({
       email_branding_enabled: supplier.value.email_branding_enabled,
       email_accent_color: supplier.value.email_accent_color,
+      pdf_logo_show_name: supplier.value.pdf_logo_show_name,
     })
     // Merge response do reactive supplier (zachová local-only fields jako has_email_logo)
     supplier.value = { ...supplier.value, ...updated }
@@ -177,6 +277,7 @@ watch(supplier, () => {
 
 let colorTimer: ReturnType<typeof setTimeout> | null = null
 watch(() => supplier.value?.email_branding_enabled, () => { if (watching) saveBranding(true) })
+watch(() => supplier.value?.pdf_logo_show_name, () => { if (watching) saveBranding(true) })
 watch(() => supplier.value?.email_accent_color, () => {
   if (!watching) return
   if (colorTimer) clearTimeout(colorTimer)
@@ -221,9 +322,82 @@ async function removeLogo() {
   }
 }
 
+// === Podpis PDF certifikátem (PAdES, migrace 0076) ===========================
+const signingCert = ref<SigningCertMeta>({ has_cert: false })
+const certFileInput = ref<HTMLInputElement | null>(null)
+const certFile = ref<File | null>(null)
+const certUploading = ref(false)
+const certPassword = ref('')
+const tsaPassword = ref('')  // heslo k TSA (HTTP Basic) — odešle se při uložení, do UI se nevrací
+
+async function loadSigningMeta() {
+  try { signingCert.value = await settingsApi.getSigningCert() } catch { /* ignore */ }
+}
+
+// Uloží jen signing pole (toggle/TSA/důvod), nešahá na zbytek formuláře.
+async function saveSigning(silent = false) {
+  if (!supplier.value) return
+  try {
+    const payload: any = {
+      pdf_signing_enabled: supplier.value.pdf_signing_enabled,
+      signing_tsa_url: supplier.value.signing_tsa_url || null,
+      signing_reason: supplier.value.signing_reason || '',
+      signing_tsa_username: supplier.value.signing_tsa_username || null,
+    }
+    // heslo k TSA posíláme jen když ho uživatel zadal/změnil (jinak se nedotkneme)
+    if (tsaPassword.value !== '') payload.signing_tsa_password = tsaPassword.value
+    const updated = await settingsApi.updateSupplier(payload)
+    supplier.value = { ...supplier.value, ...updated }
+    tsaPassword.value = ''
+    if (!silent) toast.success(t('settings.signing_saved'))
+  } catch (e: any) {
+    toast.error(e?.response?.data?.error?.message || t('common.error'))
+  }
+}
+watch(() => supplier.value?.pdf_signing_enabled, () => { if (watching) saveSigning(true) })
+
+function pickCert() { certFileInput.value?.click() }
+// Výběr souboru jen uloží referenci — upload až po kliknutí na „Nahrát"
+// (žádná past na pořadí heslo ↔ soubor; tlačítko je disabled dokud nemáš oboje).
+function onCertSelected(ev: Event) {
+  certFile.value = (ev.target as HTMLInputElement).files?.[0] ?? null
+}
+async function uploadCert() {
+  if (!supplier.value || !certFile.value || !certPassword.value) return
+  certUploading.value = true
+  try {
+    signingCert.value = await settingsApi.uploadSigningCert(certFile.value, certPassword.value)
+    supplier.value.has_signing_cert = true
+    certPassword.value = ''
+    certFile.value = null
+    if (certFileInput.value) certFileInput.value.value = ''
+    toast.success(t('settings.signing_cert_uploaded'))
+  } catch (e: any) {
+    toast.error(e?.response?.data?.error?.message || t('common.error'))
+  } finally {
+    certUploading.value = false
+  }
+}
+async function removeCert() {
+  if (!supplier.value) return
+  if (!window.confirm(t('settings.signing_cert_remove_confirm'))) return
+  try {
+    await settingsApi.deleteSigningCert()
+    signingCert.value = { has_cert: false }
+    supplier.value.has_signing_cert = false
+    supplier.value.pdf_signing_enabled = false
+    certFile.value = null
+    if (certFileInput.value) certFileInput.value.value = ''
+    toast.success(t('settings.signing_cert_removed'))
+  } catch (e: any) {
+    toast.error(e?.response?.data?.error?.message || t('common.error'))
+  }
+}
+
 function startEditCurrency(c: CurrencyAccount) {
   editingCurrency.value = c.id
   editingCurrencyLabel.value = c.label
+  bankDraftMsg.value = null
   Object.assign(currencyDraft, { ...c })
 }
 
@@ -283,7 +457,7 @@ async function removeCurrency(c: CurrencyAccount) {
 
     <div v-else-if="supplier" class="space-y-6">
       <!-- Supplier -->
-      <section class="bg-white border border-neutral-200 rounded-lg p-5 shadow-sm">
+      <section class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
         <h2 class="text-sm font-semibold uppercase tracking-wide text-neutral-500 mb-4">{{ t('settings.supplier') }}</h2>
         <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
           <div>
@@ -318,7 +492,8 @@ async function removeCurrency(c: CurrencyAccount) {
           </div>
           <div>
             <label class="flex items-center gap-2 text-sm mt-7">
-              <input v-model="supplier.is_vat_payer" type="checkbox" class="rounded border-neutral-300 text-primary-600" />
+              <input v-model="supplier.is_vat_payer" type="checkbox" class="rounded border-neutral-300 text-primary-600"
+                @change="supplier.is_vat_payer && ((supplier as any).flat_tax_band = 'none')" />
               {{ t('settings.is_vat_payer') }}
             </label>
           </div>
@@ -339,15 +514,40 @@ async function removeCurrency(c: CurrencyAccount) {
             <input v-model="supplier.tagline" type="text" class="w-full h-10 px-3 border border-neutral-300 rounded-md text-sm" />
           </div>
           <div class="md:col-span-2">
-            <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('settings.commercial_register') }}</label>
+            <div class="flex items-center justify-between mb-1 gap-2">
+              <label class="block text-sm font-medium text-neutral-700">{{ t('settings.commercial_register') }}</label>
+              <button type="button" @click="loadCommercialRegister" :disabled="crLoading || !supplier.ic"
+                class="cursor-pointer h-7 px-2.5 text-xs bg-surface border border-primary-300 text-primary-700 rounded-md hover:bg-primary-50 disabled:opacity-50 shrink-0">
+                {{ crLoading ? '…' : t('settings.commercial_register_load_ares') }}
+              </button>
+            </div>
             <input v-model="supplier.commercial_register" type="text"
               :placeholder="t('settings.commercial_register_placeholder')"
               class="w-full h-10 px-3 border border-neutral-300 rounded-md text-sm" />
             <p class="text-xs text-neutral-500 mt-1">{{ t('settings.commercial_register_hint') }}</p>
           </div>
           <div>
-            <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('settings.default_due') }}</label>
-            <input v-model.number="supplier.default_payment_due_days" type="number" min="0" class="w-full h-10 px-3 border border-neutral-300 rounded-md text-sm font-mono" />
+            <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('settings.default_due_label') }}</label>
+            <div class="flex gap-2">
+              <select v-model="dueSelectValue" class="h-10 px-2 border border-neutral-300 rounded-md text-sm bg-surface" :class="dueSelectValue === 'custom' ? 'w-40' : 'w-full'">
+                <option value="7">{{ t('settings.default_due_preset_7') }}</option>
+                <option value="14">{{ t('settings.default_due_preset_14') }}</option>
+                <option value="month">{{ t('settings.default_due_preset_month') }}</option>
+                <option value="custom">{{ t('settings.default_due_preset_custom') }}</option>
+              </select>
+              <div v-if="dueSelectValue === 'custom'" class="flex items-center gap-2 flex-1">
+                <input v-model.number="supplier.default_payment_due_days" type="number" min="0" class="w-24 h-10 px-3 border border-neutral-300 rounded-md text-sm font-mono" />
+                <span class="text-sm text-neutral-500">{{ t('settings.default_due_custom_days_suffix') }}</span>
+              </div>
+            </div>
+            <p v-if="dueSelectValue === 'month'" class="text-xs text-neutral-500 mt-1">{{ t('settings.default_due_month_hint') }}</p>
+          </div>
+          <div v-if="supplier.is_vat_payer" class="md:col-span-2">
+            <label class="flex items-center gap-2 text-sm">
+              <input v-model="supplier.default_prices_include_vat" type="checkbox" class="rounded border-neutral-300 text-primary-600" />
+              <span class="font-medium">{{ t('settings.default_prices_include_vat') }}</span>
+            </label>
+            <p class="text-xs text-neutral-500 mt-1 ml-6">{{ t('settings.default_prices_include_vat_hint') }}</p>
           </div>
           <div>
             <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('settings.default_hourly_rate') }} ({{ supplier.default_currency }})</label>
@@ -359,6 +559,27 @@ async function removeCurrency(c: CurrencyAccount) {
               {{ t('settings.auto_send_reminders') }}
             </label>
             <p class="text-xs text-neutral-500 mt-1 ml-6">{{ t('settings.auto_send_reminders_hint') }}</p>
+          </div>
+          <div class="md:col-span-2 border-t border-neutral-200 pt-3">
+            <label class="flex items-center gap-2 text-sm">
+              <input v-model="supplier.payment_thanks_enabled" type="checkbox" class="rounded border-neutral-300 text-primary-600" />
+              <span class="font-medium">{{ t('settings.payment_thanks_enabled') }}</span>
+            </label>
+            <p class="text-xs text-neutral-500 mt-1 ml-6">{{ t('settings.payment_thanks_enabled_hint') }}</p>
+            <div v-if="supplier.payment_thanks_enabled" class="ml-6 mt-2 space-y-2">
+              <label class="flex items-center gap-2 text-sm">
+                <input v-model="supplier.payment_thanks_auto_send" type="checkbox" class="rounded border-neutral-300 text-primary-600" />
+                {{ t('settings.payment_thanks_auto_send') }}
+              </label>
+              <label class="flex items-center gap-2 text-sm">
+                <input v-model="supplier.payment_thanks_default_checked" type="checkbox" class="rounded border-neutral-300 text-primary-600" />
+                {{ t('settings.payment_thanks_default_checked') }}
+              </label>
+              <label class="flex items-center gap-2 text-sm">
+                <input v-model="supplier.payment_thanks_attach_paid_pdf" type="checkbox" class="rounded border-neutral-300 text-primary-600" />
+                {{ t('settings.payment_thanks_attach_paid_pdf') }}
+              </label>
+            </div>
           </div>
           <div class="md:col-span-2">
             <label class="flex items-center gap-2 text-sm">
@@ -379,7 +600,7 @@ async function removeCurrency(c: CurrencyAccount) {
       </section>
 
       <!-- Číslování faktur — samostatný box -->
-      <section class="bg-white border border-neutral-200 rounded-lg p-5 shadow-sm">
+      <section class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
         <h2 class="text-sm font-semibold uppercase tracking-wide text-neutral-500 mb-4">{{ t('settings.numbering_section') }}</h2>
         <div>
           <h3 class="sr-only">{{ t('settings.numbering_section') }}</h3>
@@ -454,7 +675,7 @@ async function removeCurrency(c: CurrencyAccount) {
       </section>
 
       <!-- Daňové nastavení (EPO výkazy DPH/KH/DPFO/DPPO) — samostatný box -->
-      <section class="bg-white border border-neutral-200 rounded-lg p-5 shadow-sm">
+      <section class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
         <h2 class="text-sm font-semibold uppercase tracking-wide text-neutral-500 mb-4">{{ t('settings.tax_section') }}</h2>
         <div>
           <h3 class="sr-only">{{ t('settings.tax_section') }}</h3>
@@ -462,7 +683,7 @@ async function removeCurrency(c: CurrencyAccount) {
           <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
             <div>
               <label class="block text-xs font-medium text-neutral-700 mb-1">{{ t('settings.taxpayer_type') }}</label>
-              <select v-model="supplier.taxpayer_type" class="w-full h-9 px-3 border border-neutral-300 rounded-md bg-white text-sm">
+              <select v-model="supplier.taxpayer_type" class="w-full h-9 px-3 border border-neutral-300 rounded-md bg-surface text-sm">
                 <option :value="null">— {{ t('common.unset') }} —</option>
                 <option value="fo">{{ t('settings.taxpayer_fo') }}</option>
                 <option value="po">{{ t('settings.taxpayer_po') }}</option>
@@ -470,12 +691,22 @@ async function removeCurrency(c: CurrencyAccount) {
             </div>
             <div>
               <label class="block text-xs font-medium text-neutral-700 mb-1">{{ t('settings.vat_period') }}</label>
-              <select v-model="supplier.vat_period" class="w-full h-9 px-3 border border-neutral-300 rounded-md bg-white text-sm">
+              <select v-model="supplier.vat_period" class="w-full h-9 px-3 border border-neutral-300 rounded-md bg-surface text-sm">
                 <option :value="null">— {{ t('common.unset') }} —</option>
                 <option value="monthly">{{ t('settings.vat_monthly') }}</option>
                 <option value="quarterly">{{ t('settings.vat_quarterly') }}</option>
               </select>
               <p class="text-xs text-neutral-500 mt-1">{{ t('settings.vat_period_hint') }}</p>
+            </div>
+            <div v-if="!supplier.is_vat_payer">
+              <label class="block text-xs font-medium text-neutral-700 mb-1">{{ t('settings.flat_tax_band') }}</label>
+              <select v-model="(supplier as any).flat_tax_band" class="w-full h-9 px-3 border border-neutral-300 rounded-md bg-surface text-sm">
+                <option value="none">{{ t('settings.flat_tax_none') }}</option>
+                <option value="band1">{{ t('settings.flat_tax_band1') }}</option>
+                <option value="band2">{{ t('settings.flat_tax_band2') }}</option>
+                <option value="band3">{{ t('settings.flat_tax_band3') }}</option>
+              </select>
+              <p class="text-xs text-neutral-500 mt-1">{{ t('settings.flat_tax_hint') }}</p>
             </div>
             <div>
               <label class="block text-xs font-medium text-neutral-700 mb-1">{{ t('settings.financial_office_code') }}</label>
@@ -568,7 +799,7 @@ async function removeCurrency(c: CurrencyAccount) {
       </section>
 
       <!-- Pohoda XML export config (volitelné) — samostatný box -->
-      <section class="bg-white border border-neutral-200 rounded-lg p-5 shadow-sm">
+      <section class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
         <h2 class="text-sm font-semibold uppercase tracking-wide text-neutral-500 mb-4">{{ t('settings.pohoda_section') }}</h2>
         <div>
           <h3 class="sr-only">{{ t('settings.pohoda_section') }}</h3>
@@ -601,7 +832,7 @@ async function removeCurrency(c: CurrencyAccount) {
       </section>
 
       <!-- Email branding (M16) -->
-      <section class="bg-white border border-neutral-200 rounded-lg p-5 shadow-sm">
+      <section class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
         <div class="flex items-center justify-between mb-1">
           <h2 class="text-sm font-semibold uppercase tracking-wide text-neutral-500">{{ t('settings.branding_title') }}</h2>
           <label class="inline-flex items-center gap-2 cursor-pointer">
@@ -631,6 +862,14 @@ async function removeCurrency(c: CurrencyAccount) {
                 </button>
                 <input ref="logoFileInput" @change="onLogoSelected" type="file" accept=".png,.jpg,.jpeg,.svg,image/png,image/jpeg,image/svg+xml" class="hidden" />
               </div>
+              <label class="inline-flex items-center gap-2 mt-3 cursor-pointer">
+                <input
+                  v-model="supplier.pdf_logo_show_name" type="checkbox"
+                  :disabled="!supplier.email_branding_enabled || !supplier.has_email_logo"
+                  class="h-4 w-4 accent-primary-600 disabled:opacity-50" />
+                <span class="text-sm text-neutral-700">{{ t('settings.branding_logo_show_name') }}</span>
+              </label>
+              <p class="text-xs text-neutral-500 mt-1">{{ t('settings.branding_logo_show_name_hint') }}</p>
             </div>
 
             <div>
@@ -686,8 +925,96 @@ async function removeCurrency(c: CurrencyAccount) {
         </div>
       </section>
 
+      <!-- Podpis PDF certifikátem (PAdES, migrace 0076) -->
+      <section class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
+        <div class="flex items-center justify-between mb-1">
+          <h2 class="text-sm font-semibold uppercase tracking-wide text-neutral-500">{{ t('settings.signing_title') }}</h2>
+          <label class="inline-flex items-center gap-2"
+            :class="supplier.has_signing_cert ? 'cursor-pointer' : 'cursor-not-allowed'"
+            :title="supplier.has_signing_cert ? '' : t('settings.signing_need_cert')">
+            <input v-model="supplier.pdf_signing_enabled" type="checkbox" :disabled="!supplier.has_signing_cert" class="h-4 w-4 accent-primary-600 disabled:opacity-50 disabled:cursor-not-allowed" />
+            <span class="text-sm" :class="supplier.has_signing_cert ? 'text-neutral-700' : 'text-neutral-400'">{{ t('settings.signing_enabled') }}</span>
+          </label>
+        </div>
+        <p class="text-xs text-neutral-500 mb-2">{{ t('settings.signing_subtitle') }}</p>
+        <p v-if="!supplier.has_signing_cert" class="text-xs text-warning-600 mb-4 flex items-center gap-1.5">
+          <svg class="w-3.5 h-3.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v2m0 4h.01M5.07 19h13.86a2 2 0 0 0 1.74-3L13.74 4a2 2 0 0 0-3.48 0L3.33 16a2 2 0 0 0 1.74 3z"/></svg>
+          {{ t('settings.signing_need_cert') }}
+        </p>
+
+        <div class="space-y-4 max-w-2xl">
+          <!-- Certifikát -->
+          <div>
+            <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('settings.signing_cert') }}</label>
+            <p class="text-xs text-neutral-500 mb-2">{{ t('settings.signing_cert_hint') }}</p>
+            <div v-if="signingCert.has_cert" class="mb-2 rounded-md border border-neutral-200 bg-neutral-50 p-3 text-xs">
+              <div><span class="text-neutral-500">{{ t('settings.signing_cert_cn') }}:</span> <span class="font-medium">{{ signingCert.cn }}</span></div>
+              <div><span class="text-neutral-500">{{ t('settings.signing_cert_issuer') }}:</span> {{ signingCert.issuer }}</div>
+              <div>
+                <span class="text-neutral-500">{{ t('settings.signing_cert_validity') }}:</span>
+                <span :class="signingCert.expired ? 'text-danger-600 font-semibold' : 'text-success-600'">
+                  {{ (signingCert.valid_from || '').slice(0,10) }} – {{ (signingCert.valid_to || '').slice(0,10) }}
+                  <template v-if="signingCert.expired"> ({{ t('settings.signing_cert_expired') }})</template>
+                </span>
+              </div>
+              <div class="font-mono text-[10px] text-neutral-400 mt-1 break-all">SHA-256: {{ signingCert.fingerprint }}</div>
+            </div>
+            <!-- Krok 1: vybrat soubor · Krok 2: heslo · Krok 3: nahrát (tlačítko aktivní až s oběma) -->
+            <div class="flex flex-wrap items-center gap-3">
+              <button @click="pickCert" type="button"
+                class="cursor-pointer px-3 h-9 text-sm border border-neutral-300 rounded-md hover:bg-neutral-50">
+                {{ t('settings.signing_cert_choose') }}
+              </button>
+              <span class="text-xs truncate max-w-[14rem]" :class="certFile ? 'text-neutral-700 font-medium' : 'text-neutral-400'">
+                {{ certFile ? certFile.name : t('settings.signing_cert_none_selected') }}
+              </span>
+              <input v-model="certPassword" type="password" :placeholder="t('settings.signing_password')"
+                class="h-9 w-48 px-3 border border-neutral-300 rounded-md text-sm" autocomplete="new-password" />
+              <button @click="uploadCert" type="button" :disabled="!certFile || !certPassword || certUploading"
+                class="cursor-pointer px-3 h-9 text-sm bg-primary-600 hover:bg-primary-700 text-white rounded-md disabled:opacity-50 disabled:cursor-not-allowed">
+                {{ certUploading ? t('common.loading') : (signingCert.has_cert ? t('settings.signing_cert_replace') : t('settings.signing_cert_upload')) }}
+              </button>
+              <button v-if="signingCert.has_cert" @click="removeCert" type="button"
+                class="cursor-pointer text-sm text-danger-600 hover:text-danger-700">{{ t('common.remove') }}</button>
+              <input ref="certFileInput" @change="onCertSelected" type="file" accept=".p12,.pfx,application/x-pkcs12" class="hidden" />
+            </div>
+          </div>
+
+          <!-- TSA URL + autentizace -->
+          <div>
+            <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('settings.signing_tsa') }}</label>
+            <p class="text-xs text-neutral-500 mb-2">{{ t('settings.signing_tsa_hint') }}</p>
+            <input v-model="supplier.signing_tsa_url" type="text" placeholder="http://tsa.cesnet.cz:3161/tsa"
+              class="h-10 w-full max-w-md px-3 border border-neutral-300 rounded-md text-sm font-mono" />
+            <p class="text-xs text-neutral-500 mt-2 mb-1">{{ t('settings.signing_tsa_auth_hint') }}</p>
+            <div class="flex items-center gap-2">
+              <input v-model="supplier.signing_tsa_username" type="text" :placeholder="t('settings.signing_tsa_user')"
+                autocomplete="off"
+                class="h-9 w-44 px-3 border border-neutral-300 rounded-md text-sm" />
+              <input v-model="tsaPassword" type="password"
+                :placeholder="supplier.has_tsa_password ? t('settings.signing_tsa_pass_set') : t('settings.signing_tsa_pass')"
+                autocomplete="new-password"
+                class="h-9 w-44 px-3 border border-neutral-300 rounded-md text-sm" />
+            </div>
+          </div>
+
+          <!-- Důvod -->
+          <div>
+            <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('settings.signing_reason') }}</label>
+            <input v-model="supplier.signing_reason" type="text" :placeholder="t('settings.signing_reason_ph')"
+              class="h-10 w-full max-w-md px-3 border border-neutral-300 rounded-md text-sm" />
+          </div>
+
+          <div class="pt-1">
+            <button @click="() => saveSigning(false)" class="cursor-pointer px-4 h-10 bg-primary-600 hover:bg-primary-700 text-white text-sm font-medium rounded-md">
+              {{ t('settings.signing_save') }}
+            </button>
+          </div>
+        </div>
+      </section>
+
       <!-- Currencies / Bank accounts -->
-      <section class="bg-white border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
+      <section class="bg-surface border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
         <header class="px-5 py-3 border-b border-neutral-200">
           <h2 class="text-sm font-semibold uppercase tracking-wide text-neutral-500">{{ t('settings.currencies_banks') }}</h2>
         </header>
@@ -735,7 +1062,7 @@ async function removeCurrency(c: CurrencyAccount) {
           <span>{{ t('settings.add_another_account') }}</span>
           <button v-for="code in [...new Set(currencies.map(c => c.code))]" :key="code"
             @click="addCurrencyAccount(code)"
-            class="cursor-pointer px-2 h-7 border border-neutral-300 rounded text-xs hover:bg-white">
+            class="cursor-pointer px-2 h-7 border border-neutral-300 rounded text-xs hover:bg-surface">
             + {{ code }}
           </button>
         </div>
@@ -743,10 +1070,25 @@ async function removeCurrency(c: CurrencyAccount) {
     </div>
 
     <!-- Modal — currency edit -->
-    <div v-if="editingCurrency" class="fixed inset-0 bg-neutral-900/40 z-50 flex items-center justify-center p-4">
-      <div class="bg-white rounded-xl shadow-lg max-w-md w-full p-5">
+    <div v-if="editingCurrency" class="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+      <div class="bg-surface rounded-xl shadow-lg max-w-md w-full p-5">
         <h3 class="text-lg font-semibold mb-3">{{ t('settings.edit_currency_label_full', { label: editingCurrencyLabel }) }}</h3>
         <div class="space-y-3">
+          <div class="flex items-center justify-end">
+            <button type="button" @click="loadBankToDraft" :disabled="bankDraftLoading"
+              class="cursor-pointer h-8 px-3 text-xs bg-surface border border-primary-300 text-primary-700 rounded-md hover:bg-primary-50 disabled:opacity-50 inline-flex items-center gap-1.5">
+              <span v-if="bankDraftLoading">…</span>
+              {{ bankDraftLoading ? t('common.loading') : t('supplier.bank_lookup') }}
+            </button>
+          </div>
+          <div v-if="bankDraftMsg" class="text-xs px-2 py-1 rounded"
+            :class="{
+              'bg-success-50 text-success-600': bankDraftMsg.type === 'success',
+              'bg-danger-50 text-danger-500': bankDraftMsg.type === 'error',
+              'bg-warning-50 text-warning-600': bankDraftMsg.type === 'warning',
+            }">
+            {{ bankDraftMsg.text }}
+          </div>
           <div>
             <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('settings.account_label_form') }}</label>
             <input v-model="currencyDraft.label" type="text" placeholder="CZK — Fio Bank"

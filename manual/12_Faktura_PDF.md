@@ -48,6 +48,13 @@ Vygenerované PDF obsahuje:
 10. **Patičku** — text z Nastavení dodavatele (volitelný)
 11. **(volitelně) 2. strana** — Výkaz víceprací. Pokud faktura výkaz má, položka „Výkaz víceprací" v tabulce položek je **proklikávací odkaz** (podtržená) — kliknutí přeskočí přímo na stránku s výkazem.
 
+> 💡 **Branding hlavičky** — pokud má dodavatel v *Nastavení → Branding* zapnutý
+> branding, PDF přebere jeho **logo** a **akcentovou barvu** (čára pod hlavičkou,
+> nadpisy, hlavička tabulky položek, světlá podbarvení). Když je logo malé nebo
+> neobsahuje název firmy, zapni **„Zobrazit i název firmy vedle loga"** — vedle
+> loga se pak vykreslí obchodní (nebo firemní) název. Sémantické barvy zůstávají
+> vždy stejné (dobropis červená, storno šedá).
+
 ### 12.2.1 Přepočet do CZK (faktury v cizí měně)
 
 Pokud je faktura v jiné měně než CZK, PDF obsahuje navíc:

@@ -355,30 +355,39 @@ final class RecurringInvoiceGenerator
         $pdo->beginTransaction();
         try {
             $discountPercent = round(max(0.0, min(100.0, (float) ($template['discount_percent'] ?? 0))), 2);
+            // Výchozí kategorie tržby — default zakázky > klienta (sdílený helper,
+            // stejná logika jako createDraft a import). Faktura ze šablony tak dostane
+            // kategorii stejně jako ručně založená.
+            $projectId = !empty($template['project_id']) ? (int) $template['project_id'] : null;
+            $revenueCategoryId = InvoiceRepository::resolveDefaultRevenueCategoryId(
+                $pdo, (int) $template['client_id'], $projectId
+            );
             $stmt = $pdo->prepare(
                 'INSERT INTO invoices
                    (invoice_type, client_id, project_id, supplier_id,
-                    issue_date, tax_date, due_date, currency_id, reverse_charge, language,
+                    issue_date, tax_date, due_date, currency_id, reverse_charge, prices_include_vat, language,
                     note_above_items, note_below_items, payment_method, discount_percent,
-                    recurring_template_id, status, created_by)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "draft", ?)'
+                    recurring_template_id, revenue_category_id, status, created_by)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "draft", ?)'
             );
             $stmt->execute([
                 $type,
                 (int) $template['client_id'],
-                !empty($template['project_id']) ? (int) $template['project_id'] : null,
+                $projectId,
                 (int) $template['supplier_id'],
                 $issueDate,
                 $taxDate,
                 $dueDate,
                 (int) $template['currency_id'],
                 $template['reverse_charge'] ? 1 : 0,
+                !empty($template['prices_include_vat']) ? 1 : 0,
                 (string) ($template['language'] ?? 'cs'),
                 $template['note_above_items'] ?? null,
                 $template['note_below_items'] ?? null,
                 (string) ($template['payment_method'] ?? 'bank_transfer'),
                 $discountPercent,
                 (int) $template['id'],
+                $revenueCategoryId,
                 $userId,
             ]);
             $newId = (int) $pdo->lastInsertId();
@@ -432,7 +441,7 @@ final class RecurringInvoiceGenerator
 
         $supplierId = (int) $invoice['supplier_id'];
         $issueDate = new \DateTimeImmutable((string) $invoice['issue_date']);
-        $varsymbol = $this->varsymbol->next($supplierId, (string) $invoice['invoice_type'], $issueDate);
+        $varsymbol = $this->varsymbol->next($supplierId, (string) $invoice['invoice_type'], $issueDate, (int) $invoice['client_id']);
         $snaps = $this->snapshots->build(
             (int) $invoice['client_id'],
             (int) $invoice['currency_id'],

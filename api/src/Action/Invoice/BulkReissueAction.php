@@ -145,6 +145,9 @@ final class BulkReissueAction
                 $dueDate,
                 (int) $source['currency_id'],
                 $source['reverse_charge'] ? 1 : 0,
+                // Reissue (kopie/dobropis) musí dědit režim „ceny s DPH" — jinak by se
+                // zkopírované brutto jednotkové ceny přepočítaly jako netto (nafouknuté totály).
+                !empty($source['prices_include_vat']) ? 1 : 0,
                 $source['language'],
                 $source['note_above_items'],
                 $source['note_below_items'],

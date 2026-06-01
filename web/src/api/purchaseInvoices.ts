@@ -30,6 +30,16 @@ export interface PurchaseVatBreakdownRow {
   with_vat: number
 }
 
+/**
+ * Ruční override rekapitulace DPH dle dokladu dodavatele (§ 73 ZDPH).
+ * Per sazba lze přepsat základ i daň; kalkulátor reziduum zapeče do řádkových totálů.
+ */
+export interface PurchaseVatOverride {
+  rate: number
+  base: number
+  vat: number
+}
+
 export interface PurchaseInvoiceTotals {
   without_vat: number
   vat: number
@@ -60,6 +70,18 @@ export interface VendorSnapshot {
 /** Nárok na odpočet DPH: plný / bez nároku / krácený (poměrný §75, viz vat_deduction_percent). */
 export type VatDeduction = 'full' | 'none' | 'proportional'
 
+/** Stručné shrnutí navázané přijaté faktury (záloha ↔ vyúčtovací). */
+export interface PurchaseInvoiceBrief {
+  id: number
+  varsymbol: string | null
+  vendor_invoice_number: string | null
+  document_kind: PurchaseDocumentKind | null
+  status: PurchaseInvoiceStatus
+  issue_date: string | null
+  total_with_vat: number
+  currency: string
+}
+
 export interface PurchaseInvoice {
   id: number
   supplier_id: number
@@ -79,6 +101,7 @@ export interface PurchaseInvoice {
   exchange_rate_date: string | null
   exchange_rate_source: ExchangeRateSource
   reverse_charge: boolean
+  prices_include_vat?: boolean
   is_fixed_asset: boolean
   /** Nárok na odpočet DPH (full=plný, none=bez nároku → mimo DPH evidenci, proportional=krácený §75). */
   vat_deduction: VatDeduction
@@ -115,6 +138,23 @@ export interface PurchaseInvoice {
   pdf_uploaded_at: string | null
   vat_classification_code: string | null
   expense_category_id: number | null
+  /** Název + kód kategorie nákladu (join z expense_categories, jen v detailu). */
+  expense_category_label?: string | null
+  expense_category_code?: string | null
+  /** Záloha (advance), kterou tato finální faktura vyúčtovává (vazba uložená na finální). */
+  advance_purchase_invoice_id: number | null
+  /** AI návrh propojení se zálohou (čeká na potvrzení uživatelem). */
+  advance_link_suggested_id: number | null
+  /** Shrnutí navázané zálohy (pokud advance_purchase_invoice_id != null). */
+  linked_advance?: PurchaseInvoiceBrief | null
+  /** Shrnutí AI-navržené zálohy (suggest & confirm). */
+  advance_link_suggestion?: PurchaseInvoiceBrief | null
+  /** U zálohy (advance): finální faktura, která ji vyúčtovává (reverzní pohled). */
+  settled_by?: PurchaseInvoiceBrief | null
+  /** Vyúčtovací faktura bez vazby: existuje nespárovaná záloha téhož dodavatele? */
+  has_advance_candidates?: boolean
+  /** Záloha bez vyúčtování: existuje nepropojená finální faktura téhož dodavatele? */
+  has_settlement_candidates?: boolean
   /**
    * Diagnostický popis problému z AI extrakce (např. AI sečetla mezisoučty
    * jako další položky → suma řádků se výrazně liší od AI-vráceného totalu).
@@ -136,6 +176,8 @@ export interface PurchaseInvoice {
   vendor_dic?: string | null
   vendor_main_email?: string
   vendor_language?: 'cs' | 'en'
+  /** Ruční rekapitulace DPH dle dokladu (§ 73). NULL = počítá se standardně. */
+  vat_overrides: PurchaseVatOverride[] | null
   // Related
   items: PurchaseInvoiceItem[]
   vat_breakdown: PurchaseVatBreakdownRow[]
@@ -200,6 +242,7 @@ export interface PurchaseInvoicePayload {
   exchange_rate_date?: string | null
   exchange_rate_source?: ExchangeRateSource
   reverse_charge?: boolean
+  prices_include_vat?: boolean
   is_fixed_asset?: boolean
   vat_deduction?: VatDeduction
   vat_deduction_percent?: number
@@ -216,6 +259,8 @@ export interface PurchaseInvoicePayload {
   exchange_diff_base?: number | null
   vat_classification_code?: string | null
   expense_category_id?: number | null
+  /** Ruční rekapitulace DPH dle dokladu (§ 73). null/[] = počítat standardně. */
+  vat_overrides?: PurchaseVatOverride[] | null
   items: Array<{
     description: string
     quantity: number
@@ -327,6 +372,22 @@ export const purchaseInvoicesApi = {
 
   dismissExtractionWarning: (id: number) =>
     api.post<PurchaseInvoice>(`/purchase-invoices/${id}/dismiss-extraction-warning`).then(r => r.data),
+
+  // Propojení se zálohovou fakturou (advance) — proti dvojímu započtení nákladu
+  advanceCandidates: (id: number) =>
+    api.get<{ candidates: PurchaseInvoiceBrief[] }>(`/purchase-invoices/${id}/advance-candidates`)
+      .then(r => r.data.candidates),
+  // Opačný směr — z detailu zálohy nabídni nepropojené vyúčtovací faktury téhož dodavatele
+  settlementCandidates: (id: number) =>
+    api.get<{ candidates: PurchaseInvoiceBrief[] }>(`/purchase-invoices/${id}/settlement-candidates`)
+      .then(r => r.data.candidates),
+  linkAdvance: (id: number, advanceId: number) =>
+    api.post<PurchaseInvoice>(`/purchase-invoices/${id}/link-advance`, { advance_id: advanceId })
+      .then(r => r.data),
+  unlinkAdvance: (id: number) =>
+    api.delete<PurchaseInvoice>(`/purchase-invoices/${id}/link-advance`).then(r => r.data),
+  dismissAdvanceSuggestion: (id: number) =>
+    api.delete<PurchaseInvoice>(`/purchase-invoices/${id}/advance-suggestion`).then(r => r.data),
 
   uploadPdf: (id: number, file: File) => {
     const fd = new FormData()

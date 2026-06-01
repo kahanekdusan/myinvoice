@@ -16,10 +16,10 @@ use Rikudou\Iban\Iban\CzechIbanAdapter;
  *
  * Vyrobí buď single .isdoc XML (pro 1 fakturu) nebo ZIP s více .isdoc soubory.
  *
- * Mapování DocumentType:
+ * Mapování DocumentType (ISDOC 6.0.2 číselník DocumentTypeType):
  *   1 = běžná faktura (invoice)
- *   2 = zálohová faktura (proforma)
- *   5 = opravný daňový doklad / dobropis (credit_note)
+ *   2 = opravný daňový doklad / dobropis (credit_note, cancellation)
+ *   4 = zálohová faktura — nedaňový zálohový list (proforma); je NEdaňový doklad
  *
  * PaymentMeansCode:
  *   42 = převod (bank transfer) — default pro CZK účty s bank_code
@@ -171,10 +171,10 @@ final class IsdocExporter
 
         // ─── ROOT SEQUENCE (přesné pořadí dle isdoc-invoice-6.0.2.xsd) ───
         $docType = match ($invoice['invoice_type']) {
-            'proforma'     => 2,
-            'credit_note'  => 5,
-            'cancellation' => 5,
-            default        => 1,
+            'proforma'     => 4,  // zálohová faktura = nedaňový zálohový list
+            'credit_note'  => 2,  // opravný daňový doklad (dobropis)
+            'cancellation' => 2,  // storno řešíme jako dobropis
+            default        => 1,  // faktura — daňový doklad
         };
         $this->el($dom, $root, 'DocumentType', (string) $docType);
         $this->el($dom, $root, 'ID', (string) ($invoice['varsymbol'] ?? ('DRAFT-' . $invoice['id'])));
@@ -186,12 +186,16 @@ final class IsdocExporter
         if (!empty($invoice['tax_date'])) {
             $this->el($dom, $root, 'TaxPointDate', (string) $invoice['tax_date']);
         }
-        // VATApplicable = je dodavatel plátce DPH? NEodvozovat z reverse_charge —
+        // VATApplicable = je doklad předmětem DPH? NEodvozovat z reverse_charge —
         // reverse charge je plátcovský režim a značí se <LocalReverseChargeFlag> v TaxCategory
-        // (viz níže). Neplátce → false; plátce (vč. reverse charge) → true. Default true (legacy).
+        // (viz níže). Doklad je nedaňový (false), pokud je dodavatel neplátce DPH NEBO jde
+        // o zálohovou fakturu (DocumentType 4 = nedaňový zálohový list — DPH se přiznává až
+        // na konečném daňovém dokladu). Jinak plátce (vč. reverse charge) → true.
         $supplier = $this->resolveSupplier($invoice);
         $isVatPayer = !isset($supplier['is_vat_payer']) || !empty($supplier['is_vat_payer']);
-        $this->el($dom, $root, 'VATApplicable', $isVatPayer ? 'true' : 'false');
+        $isProforma = ($invoice['invoice_type'] ?? '') === 'proforma';
+        $isTaxDocument = $isVatPayer && !$isProforma;
+        $this->el($dom, $root, 'VATApplicable', $isTaxDocument ? 'true' : 'false');
         // ElectronicPossibilityAgreementReference je povinný (minOccurs=1) — pokud
         // dodavatel nemá explicitní souhlasový dokument, posíláme prázdný string.
         $this->el($dom, $root, 'ElectronicPossibilityAgreementReference', '');
@@ -253,18 +257,33 @@ final class IsdocExporter
             // InvoiceLine řadí <…Curr> PŘED base sourozence (viz XSD sekvence).
             // UnitPrice/UnitPriceTaxInclusive/LineExtensionTaxAmount Curr variantu
             // nemají — dle standardu jsou vždy v lokální měně.
-            $unitPrice = (float) $item['unit_price_without_vat'];
+            // UnitPrice je BEZ DPH. V režimu „ceny s DPH" nese unit_price_without_vat brutto,
+            // proto jednotkové ceny dopočítáme z řádkových totálů (netto z base, s DPH z tot).
+            $qtyItem = (float) $item['quantity'];
+            $pricesInclVat = !empty($invoice['prices_include_vat']);
+            $unitPrice = ($pricesInclVat && $qtyItem != 0.0)
+                ? round($base / $qtyItem, 2)
+                : (float) $item['unit_price_without_vat'];
+            $unitPriceInclVat = ($pricesInclVat && $qtyItem != 0.0)
+                ? round($tot / $qtyItem, 2)
+                : $unitPrice * (1 + ((float) ($item['vat_rate_snapshot'] ?? 0)) / 100);
             $this->elAmountCurr($dom, $line, 'LineExtensionAmount', $base, true);
             $this->elAmountCurr($dom, $line, 'LineExtensionAmountTaxInclusive', $tot, true);
             $this->elAmount($dom, $line, 'LineExtensionTaxAmount', $vat);
             $this->elAmount($dom, $line, 'UnitPrice', $unitPrice);
-            $this->elAmount($dom, $line, 'UnitPriceTaxInclusive', $unitPrice * (1 + ((float) ($item['vat_rate_snapshot'] ?? 0)) / 100));
+            $this->elAmount($dom, $line, 'UnitPriceTaxInclusive', $unitPriceInclVat);
 
             // Na úrovni řádky je správný název <ClassifiedTaxCategory>
             // (na úrovni TaxSubTotal se používá <TaxCategory> — pozor na rozdíl).
             $cat = $dom->createElementNS(self::NS, 'ClassifiedTaxCategory');
             $this->el($dom, $cat, 'Percent', $this->fmt((float) ($item['vat_rate_snapshot'] ?? 0)));
             $this->el($dom, $cat, 'VATCalculationMethod', '0');
+            // ISDOC 4.1.5: je-li doklad nedaňový (VATApplicable=false na úrovni dokladu),
+            // musejí být nedaňové i všechny řádky → VATApplicable=false uvnitř
+            // ClassifiedTaxCategory (XSD sekvence: Percent, VATCalculationMethod, VATApplicable).
+            if (!$isTaxDocument) {
+                $this->el($dom, $cat, 'VATApplicable', 'false');
+            }
             $line->appendChild($cat);
 
             $itemEl = $dom->createElementNS(self::NS, 'Item');
@@ -328,10 +347,16 @@ final class IsdocExporter
         $mon = $dom->createElementNS(self::NS, 'LegalMonetaryTotal');
         $this->elAmountCurr($dom, $mon, 'TaxExclusiveAmount', $base, false);
         $this->elAmountCurr($dom, $mon, 'TaxInclusiveAmount', $tot, false);
+        // Záloha je NEDAŇOVÁ proforma — DPH se přiznává až na tomto konečném dokladu,
+        // takže `AlreadyClaimed*` (= již daňově zúčtováno z daňových záloh) jsou 0 a
+        // `Difference*` = plná hodnota dokladu. Odečtení uhrazené zálohy se komunikuje
+        // POUZE přes `PaidDepositsAmount` (snižuje `PayableAmount`). Dřív se sem dávala
+        // záloha do AlreadyClaimedTaxInclusive, což bylo vnitřně rozporné (základ 0,
+        // ale částka s DPH = celá záloha → nesmyslná implikovaná DPH).
         $this->elAmountCurr($dom, $mon, 'AlreadyClaimedTaxExclusiveAmount', 0.0, false);
-        $this->elAmountCurr($dom, $mon, 'AlreadyClaimedTaxInclusiveAmount', $advance, false);
+        $this->elAmountCurr($dom, $mon, 'AlreadyClaimedTaxInclusiveAmount', 0.0, false);
         $this->elAmountCurr($dom, $mon, 'DifferenceTaxExclusiveAmount', $base, false);
-        $this->elAmountCurr($dom, $mon, 'DifferenceTaxInclusiveAmount', $tot - $advance, false);
+        $this->elAmountCurr($dom, $mon, 'DifferenceTaxInclusiveAmount', $tot, false);
         $this->elAmountCurr($dom, $mon, 'PayableRoundingAmount', $rounding, false);
         $this->elAmountCurr($dom, $mon, 'PaidDepositsAmount', $advance, false);
         $this->elAmountCurr($dom, $mon, 'PayableAmount', $payable, false);
@@ -389,7 +414,10 @@ final class IsdocExporter
         $partyEl = $dom->createElementNS(self::NS, 'Party');
 
         $idEl = $dom->createElementNS(self::NS, 'PartyIdentification');
-        $this->el($dom, $idEl, 'ID', (string) ($party['ic'] ?? '0'));
+        // PartyIdentification i jeho <ID> (IČ) jsou v XSD povinné, ale IDType je
+        // neomezený xs:string → prázdný <ID></ID> je validní. Když subjekt IČO nemá
+        // (typicky B2C odběratel — fyzická osoba), posíláme prázdno, NE fiktivní "0".
+        $this->el($dom, $idEl, 'ID', trim((string) ($party['ic'] ?? '')));
         $partyEl->appendChild($idEl);
 
         $nameEl = $dom->createElementNS(self::NS, 'PartyName');

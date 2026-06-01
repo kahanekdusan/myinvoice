@@ -215,7 +215,7 @@ pro kontrolu proti seznamu faktur i pro účetní.
 
 | Filtr | Pravidlo |
 |---|---|
-| **Období** | `COALESCE(tax_date, issue_date)` spadá do měsíce / kvartálu. Tj. rozhoduje **DUZP**, a pokud chybí, datum vystavení. Doklad bez vyplněného DUZP tedy nevypadne. |
+| **Období** | **Vystavené** se řadí podle **DUZP** (`COALESCE(tax_date, issue_date)`) — daň na výstupu vzniká k datu plnění. **Přijaté** se řadí podle **pozdějšího z dat DUZP / vystavení** — nárok na odpočet nelze uplatnit dříve, než plátce drží daňový doklad (§ 73 ZDPH), takže faktura se zpětným DUZP, ale vystavená v pozdějším měsíci, spadá do měsíce vystavení. (Zobrazené *Datum plnění* dál nese skutečné DUZP, mění se jen příslušnost k období.) Doklad bez vyplněného DUZP nevypadne. |
 | **Stav** | Vylučují se `draft` a `cancelled`. U vystavených navíc `proforma` (zálohová faktura není daňový doklad). |
 | **Klasifikace** | Řádek se zařadí podle `vat_classification_code` (item-level override → header → auto-default podle sazby + RC + směru). Řádek bez výsledného kódu se do přiznání nedostane. |
 
@@ -404,6 +404,33 @@ Orig. číslo dokladu | Orig. datum plnění | KH kód (A.4. / B.2. / B.3.)**.
 Měsíční selektor (rok + měsíc), tlačítko **Stáhnout PDF** (landscape A4).
 Zahrnuje i drafty (vizuálně označené) — užitečné pro pracovní přehled před
 uzavřením období. Storno faktury (status `cancelled`) se neukazují.
+
+## Měsíční export (ZIP)
+
+### Cesta: `Daně → Měsíční export`
+
+Stáhne **jeden ZIP** za zvolený měsíc se vším, co účetní pro daný měsíc potřebuje,
+roztříděné do pojmenovaných složek. Zaškrtnutím vyberete, co se zabalí:
+
+- **Vystavené faktury** — PDF a/nebo ISDOC
+- **Přijaté faktury** — PDF a/nebo ISDOC (u PDF má přednost originál od dodavatele;
+  pokud chybí, vloží se naše rekonstrukce s příponou `-rekonstrukce`)
+- **Výpisy z účtu** — PDF a/nebo GPC (originální soubory)
+- **Kniha DPH** — měsíční PDF žurnál
+
+U každé části se hned ukáže počet dostupných dokladů; prázdné části nejdou zaškrtnout.
+
+**Zařazení do období je daňově korektní a shodné s výkazy DPH** (přiznání, kontrolní
+hlášení, kniha DPH): vystavené dle DUZP, přijaté dle pozdějšího z dat DUZP / vystavení,
+výpisy dle data výpisu.
+
+#### Běh na pozadí
+
+Protože u většího počtu faktur může příprava PDF chvíli trvat, export běží jako
+**úloha na pozadí** — po spuštění vidíte průběh (stav, postup, krok) a po dokončení
+tlačítko **Stáhnout ZIP**. Hotové exporty zůstávají v seznamu **Poslední exporty** a
+jdou stáhnout opakovaně; soubor se stažením nemaže. Úklid proběhne automaticky po
+7 dnech (nebo ručně tlačítkem koš). Souběžně běží vždy jen jeden export.
 
 ## Souhrnné hlášení (DPHSHV)
 

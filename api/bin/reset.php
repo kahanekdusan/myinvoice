@@ -17,7 +17,7 @@ declare(strict_types=1);
  *       invoice_counters, purchase_invoice_counters, invoice_pdfs (PDF historie),
  *       invoice_attachments, recurring_invoice_templates + _items
  *       (pravidelné fakturace), purchase_invoices + _items, app_meta
- *       (version cache), ares_cache, vies_cache (volitelně), email_templates,
+ *       (version cache), ares_cache, vies_cache, crpdph_cache (volitelně), email_templates,
  *       project/client revenue cache, currencies (per-supplier!),
  *       crm_monthly_summary, tax_submissions
  *
@@ -112,8 +112,15 @@ $wipe = [
     'purchase_invoices',
     'purchase_invoice_counters',     // per-tenant counter PF-YYYYMM-NNNN (migrace 0026)
     'expense_categories',            // per-tenant kategorie nákladů (migrace 0035)
+    // Dokumenty (sekce Dokumenty — plán 11)
+    'document_links',                // polymorfní vazby dokument↔entita
+    'document_tag_map',
+    'document_tags',
+    'document_dms_messages',         // ISDS metadata ZFO
+    'documents',
+    'document_folders',
     // Import jobs + AI extractions (fáze 2a/2b/2c)
-    'import_jobs',                   // iDoklad/Fakturoid background jobs
+    'import_jobs',                   // iDoklad/Fakturoid/dokumenty background jobs
     'import_job_logs',               // (pokud existuje — log za jobs)
     'ai_extractions',                // AI extract history (jen pokud table existuje)
     // CRM aggregate cache
@@ -154,6 +161,7 @@ $wipeWithGlobalSeed = [
 if (!$keepCache) {
     $wipe[] = 'ares_cache';
     $wipe[] = 'vies_cache';
+    $wipe[] = 'crpdph_cache';
 }
 
 echo "\n[reset] Mažu tabulky…\n";
@@ -185,10 +193,11 @@ $pdo->exec('SET FOREIGN_KEY_CHECKS = 1');
 
 // PDF cache + storage cleanup — vč. přijaté faktury archive + XSD (necháváme)
 $dirs = [
-    $rootDir . '/storage/invoices',
-    $rootDir . '/storage/purchase-invoices',  // archive PDF dodavatelů (fáze 1)
-    $rootDir . '/storage/cache/mpdf',
-    $rootDir . '/storage/cache/twig',
+    \MyInvoice\Infrastructure\Config\RuntimePaths::storage('invoices'),
+    \MyInvoice\Infrastructure\Config\RuntimePaths::storage('purchase-invoices'),  // archive PDF dodavatelů (fáze 1)
+    \MyInvoice\Infrastructure\Config\RuntimePaths::storage('documents'),          // sekce Dokumenty (soubory, náhledy, joby)
+    \MyInvoice\Infrastructure\Config\RuntimePaths::storage('cache/mpdf'),
+    \MyInvoice\Infrastructure\Config\RuntimePaths::storage('cache/twig'),
 ];
 echo "\n[reset] Čistím cache adresáře…\n";
 foreach ($dirs as $d) {

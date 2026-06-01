@@ -36,6 +36,8 @@ final class SettingsAction
         private readonly IpMatcher $ipMatcher,
         private readonly InvoicePdfRenderer $pdf,
         private readonly Config $config,
+        private readonly \MyInvoice\Service\Auth\SecretEncryption $secrets,
+        private readonly \MyInvoice\Service\Ares\SupplierRegistryEnricher $enricher,
     ) {}
 
     /** Aktuální supplier (z X-Supplier-Id middleware). */
@@ -120,10 +122,10 @@ final class SettingsAction
 
             $stmt = $pdo->prepare(
                 'INSERT INTO supplier (company_name, display_name, street, city, zip, country_id,
-                                       ic, dic, is_vat_payer, email, phone, web, tagline,
+                                       ic, dic, is_vat_payer, email, phone, web, tagline, commercial_register, taxpayer_type,
                                        default_currency_id, default_vat_rate_id,
                                        default_payment_due_days, default_hourly_rate)
-                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)'
+                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)'
             );
             $stmt->execute([
                 (string) $b['company_name'],
@@ -139,6 +141,8 @@ final class SettingsAction
                 $this->nullable($b, 'phone'),
                 $this->nullable($b, 'web'),
                 $this->nullable($b, 'tagline'),
+                $this->nullable($b, 'commercial_register'),
+                in_array($b['taxpayer_type'] ?? null, ['fo', 'po'], true) ? (string) $b['taxpayer_type'] : null,
                 $bootstrapCurId ?: 0,
                 $defaultVatId ?: 1,
                 (int) ($b['default_payment_due_days'] ?? 14),
@@ -154,6 +158,24 @@ final class SettingsAction
             $insertCur->execute([$newSupplierId, 'CZK', 'CZK — výchozí', 'Kč', 'Česká koruna', 'Czech Koruna', 2]);
             $newDefaultCurId = (int) $pdo->lastInsertId();
             $insertCur->execute([$newSupplierId, 'EUR', 'EUR — výchozí', '€', 'Euro', 'Euro', 2]);
+            $newEurCurId = (int) $pdo->lastInsertId();
+
+            // 2b. Volitelný bankovní účet (např. načtený z registru plátců DPH) → na seeded měnu.
+            $bank = isset($b['bank_account']) && is_array($b['bank_account']) ? $b['bank_account'] : null;
+            if ($bank !== null) {
+                $bankCcy = strtoupper((string) ($bank['currency'] ?? 'CZK'));
+                $targetCurId = $bankCcy === 'EUR' ? $newEurCurId : $newDefaultCurId;
+                $pdo->prepare(
+                    'UPDATE currencies SET account_number = ?, bank_code = ?, bank_name = ?, iban = ?, bic = ? WHERE id = ?'
+                )->execute([
+                    $this->nullable($bank, 'account_number'),
+                    $this->nullable($bank, 'bank_code'),
+                    $this->nullable($bank, 'bank_name'),
+                    $this->nullable($bank, 'iban'),
+                    $this->nullable($bank, 'bic'),
+                    $targetCurId,
+                ]);
+            }
 
             // 3. Update supplier.default_currency_id na CZK supplier
             $pdo->prepare('UPDATE supplier SET default_currency_id = ? WHERE id = ?')
@@ -172,6 +194,10 @@ final class SettingsAction
             return Json::error($response, 'create_failed', 'Vytvoření supplier selhalo: ' . $e->getMessage(), 500);
         }
 
+        // Po commitu (mimo DB transakci — síťové volání): doplň z veřejných registrů,
+        // co jde (čísla domu, NACE, spisová značka, typ poplatníka, kód FÚ).
+        $this->enricher->enrich($newSupplierId, $b['ic'] ?? null, $b['dic'] ?? null);
+
         $this->log($request, 'supplier.created', $newSupplierId, ['company_name' => $b['company_name'], 'ic' => $b['ic'] ?? null]);
         return Json::ok($response, ['id' => $newSupplierId], 201);
     }
@@ -188,25 +214,32 @@ final class SettingsAction
         $allowed = [
             'company_name', 'display_name', 'street', 'city', 'zip', 'country_id',
             'ic', 'dic', 'is_vat_payer', 'email', 'phone', 'web', 'tagline', 'commercial_register',
-            'default_currency_id', 'default_vat_rate_id', 'default_payment_due_days',
+            'default_currency_id', 'default_vat_rate_id', 'default_payment_due_days', 'default_payment_due_unit',
             // logo_path / signature_path se NIKDY nemění přes mass-assignment — jen přes
             // dedikované endpointy EmailBrandingAction::uploadLogo (multipart, processed by
             // SupplierLogoConverter do storage/branding/sup-N/). Mass-assign by umožnil
             // admin-planted LFI (security report @andrejtomci #2).
             'default_hourly_rate', 'auto_send_reminders', 'auto_generate_recurring', 'embed_isdoc',
+            'default_prices_include_vat',
             'pohoda_account_code', 'pohoda_centre_code', 'pohoda_activity_code', 'pohoda_contract_code',
             // Per-supplier konfigurace číslování faktur (migrace 0014)
                 'invoice_number_format', 'quote_number_format', 'proforma_number_format', 'credit_note_number_format',
             'invoice_number_period',
-            // Per-supplier branding emailů (migrace 0016)
-            'email_branding_enabled', 'email_accent_color',
+            // Per-supplier branding emailů (migrace 0016) + PDF logo+název (migrace 0058)
+            'email_branding_enabled', 'email_accent_color', 'pdf_logo_show_name',
             // Tax settings pro EPO výkazy (migrace 0038, fáze 6)
             'taxpayer_type', 'vat_period', 'financial_office_code', 'workplace_code',
-            'cz_nace_code', 'data_box_type', 'data_box_id',
+            'cz_nace_code', 'data_box_type', 'data_box_id', 'flat_tax_band',
             'sest_jmeno', 'sest_prijmeni', 'sest_telefon', 'sest_email', 'sest_funkce',
             // Doplňky pro DPH/KH XML VetaP (migrace 0043)
             'street_number_pop', 'street_number_orient',
             'opr_jmeno', 'opr_prijmeni', 'opr_postaveni',
+            // Podpis PDF certifikátem (migrace 0076) — toggle/TSA/důvod. Cert+heslo se
+            // NIKDY nemění mass-assignmentem (jen přes SigningCertAction multipart upload).
+            // signing_tsa_password (heslo k TSA) taky NE mass-assign — řešeno níže (encrypt).
+            'pdf_signing_enabled', 'signing_tsa_url', 'signing_reason', 'signing_tsa_username',
+            // Děkovný e-mail za úhradu (issue #57)
+            'payment_thanks_enabled', 'payment_thanks_auto_send', 'payment_thanks_default_checked', 'payment_thanks_attach_paid_pdf',
         ];
 
         // Validace tax fields
@@ -217,6 +250,29 @@ final class SettingsAction
         if (array_key_exists('vat_period', $body) && $body['vat_period'] !== null
             && !in_array($body['vat_period'], ['monthly', 'quarterly'], true)) {
             return Json::error($response, 'validation_failed', "vat_period musí být 'monthly' nebo 'quarterly'.", 400);
+        }
+        // Paušální daň pásmo — enum + podmínka §7a ZDP: paušalista nesmí být plátce DPH.
+        if (array_key_exists('flat_tax_band', $body)) {
+            $band = trim((string) ($body['flat_tax_band'] ?? ''));
+            if ($band === '') { $band = 'none'; }
+            $body['flat_tax_band'] = $band;
+            if (!in_array($band, ['none', 'band1', 'band2', 'band3'], true)) {
+                return Json::error($response, 'validation_failed', "flat_tax_band musí být 'none', 'band1', 'band2' nebo 'band3'.", 400);
+            }
+            if ($band !== 'none') {
+                // Efektivní plátcovství DPH po této změně (z body, jinak ze současného stavu).
+                if (array_key_exists('is_vat_payer', $body)) {
+                    $vatPayer = (bool) $body['is_vat_payer'];
+                } else {
+                    $stmt = $this->db->pdo()->prepare('SELECT is_vat_payer FROM supplier WHERE id = ?');
+                    $stmt->execute([$id]);
+                    $vatPayer = (bool) $stmt->fetchColumn();
+                }
+                if ($vatPayer) {
+                    return Json::error($response, 'validation_failed',
+                        'Paušální daň lze zvolit jen pro neplátce DPH (§ 7a ZDP).', 422);
+                }
+            }
         }
         // Empty string → null pro tax fields (NULL = nevyplněno)
         foreach (['taxpayer_type', 'vat_period', 'financial_office_code', 'workplace_code',
@@ -260,6 +316,11 @@ final class SettingsAction
         ) {
             return Json::error($response, 'validation_failed', "Neplatné invoice_number_period (year|month|none).", 400);
         }
+        if (array_key_exists('default_payment_due_unit', $body)
+            && !in_array($body['default_payment_due_unit'], ['days', 'month'], true)
+        ) {
+            return Json::error($response, 'validation_failed', "default_payment_due_unit musí být 'days' nebo 'month'.", 400);
+        }
         // Legacy: pokud frontend pošle 'default_currency' jako code, převedeme na id (scoped to supplier)
         if (isset($body['default_currency']) && !isset($body['default_currency_id'])) {
             $stmt = $this->db->pdo()->prepare(
@@ -273,11 +334,18 @@ final class SettingsAction
         foreach ($allowed as $f) {
             if (array_key_exists($f, $body)) {
                 $sets[] = "$f = ?";
-                $params[] = in_array($f, ['is_vat_payer', 'auto_send_reminders', 'auto_generate_recurring', 'embed_isdoc', 'email_branding_enabled'], true)
+                $params[] = in_array($f, ['is_vat_payer', 'auto_send_reminders', 'auto_generate_recurring', 'embed_isdoc', 'default_prices_include_vat', 'email_branding_enabled', 'pdf_logo_show_name', 'pdf_signing_enabled', 'payment_thanks_enabled', 'payment_thanks_auto_send', 'payment_thanks_default_checked', 'payment_thanks_attach_paid_pdf'], true)
                     ? ((int) (bool) $body[$f])
                     : $body[$f];
             }
         }
+        // TSA heslo (HTTP Basic auth) — NIKDY mass-assign: šifruj, prázdné = vymaž.
+        if (array_key_exists('signing_tsa_password', $body)) {
+            $tsaPw = (string) $body['signing_tsa_password'];
+            $sets[] = 'signing_tsa_password_enc = ?';
+            $params[] = $tsaPw !== '' ? $this->secrets->encrypt($tsaPw) : null;
+        }
+
         if (empty($sets)) return $this->respondSupplier($response, $id);
 
         $params[] = $id;
@@ -286,7 +354,16 @@ final class SettingsAction
         // Branding (barva/toggle) se v PDF renderuje živě → po změně invaliduj cached
         // draft PDF dodavatele, ať se přegenerují s novou barvou (mtime cache je sama
         // od sebe neobnoví). Vystavené regenerují přes ?regenerate=1.
-        if (array_key_exists('email_accent_color', $body) || array_key_exists('email_branding_enabled', $body)) {
+        if (array_key_exists('email_accent_color', $body)
+            || array_key_exists('email_branding_enabled', $body)
+            || array_key_exists('pdf_logo_show_name', $body)
+            // Podpis PDF se renderuje živě → po změně toggle/TSA invaliduj cached PDF
+            || array_key_exists('pdf_signing_enabled', $body)
+            || array_key_exists('signing_tsa_url', $body)
+            || array_key_exists('signing_tsa_username', $body)
+            || array_key_exists('signing_tsa_password', $body)
+            || array_key_exists('signing_reason', $body)
+        ) {
             $this->pdf->invalidateDraftsBySupplier($id);
         }
         $this->log($request, 'supplier.updated', $id, ['fields' => array_keys(array_intersect_key($body, array_flip($allowed)))]);
@@ -339,7 +416,7 @@ final class SettingsAction
         }
 
         // MS-P3-4: smaž PDF cache subfolder pro tohoto supplier
-        $pdfDir = \MyInvoice\Bootstrap::rootDir() . '/storage/invoices/sup-' . $id;
+        $pdfDir = \MyInvoice\Infrastructure\Config\RuntimePaths::storage('invoices') . '/sup-' . $id;
         if (is_dir($pdfDir)) {
             $iter = new \RecursiveIteratorIterator(
                 new \RecursiveDirectoryIterator($pdfDir, \FilesystemIterator::SKIP_DOTS),
@@ -375,13 +452,38 @@ final class SettingsAction
         $row['default_vat_rate_id']      = (int) $row['default_vat_rate_id'];
         $row['default_currency_id']      = (int) $row['default_currency_id'];
         $row['default_payment_due_days'] = (int) $row['default_payment_due_days'];
+        $row['default_payment_due_unit'] = (string) ($row['default_payment_due_unit'] ?? 'days');
         $row['default_hourly_rate']      = (float) $row['default_hourly_rate'];
         $row['auto_send_reminders']      = (bool) $row['auto_send_reminders'];
         $row['auto_generate_recurring']  = (bool) ($row['auto_generate_recurring'] ?? true);
+        $row['default_prices_include_vat'] = (bool) ($row['default_prices_include_vat'] ?? false);
         $row['embed_isdoc']              = (bool) ($row['embed_isdoc'] ?? true);
         $row['email_branding_enabled']   = (bool) ($row['email_branding_enabled'] ?? false);
         $row['email_accent_color']       = (string) ($row['email_accent_color'] ?? '#3B2D83');
-        $row['has_email_logo']           = is_file(\MyInvoice\Bootstrap::rootDir() . '/storage/supplier-logos/sup-' . $row['id'] . '.png');
+        $row['pdf_logo_show_name']       = (bool) ($row['pdf_logo_show_name'] ?? false);
+        $row['has_email_logo']           = is_file(\MyInvoice\Infrastructure\Config\RuntimePaths::storage('supplier-logos') . '/sup-' . $row['id'] . '.png');
+        // Podpis PDF (migrace 0076): heslo k certifikátu NIKDY neposílat do API.
+        $row['pdf_signing_enabled']      = (bool) ($row['pdf_signing_enabled'] ?? false);
+        $row['signing_tsa_url']          = $row['signing_tsa_url'] ?? null;
+        $row['signing_reason']           = (string) ($row['signing_reason'] ?? '');
+        $signingRel                      = (string) ($row['signing_cert_path'] ?? '');
+        $row['has_signing_cert']         = $signingRel !== '' && is_file(\MyInvoice\Service\Pdf\SigningConfig::absCertPath($signingRel));
+        $row['signing_tsa_username']     = $row['signing_tsa_username'] ?? null;
+        $row['has_tsa_password']         = !empty($row['signing_tsa_password_enc']);
+        $row['payment_thanks_enabled']        = (bool) ($row['payment_thanks_enabled'] ?? false);
+        $row['payment_thanks_auto_send']      = (bool) ($row['payment_thanks_auto_send'] ?? false);
+        $row['payment_thanks_default_checked']= (bool) ($row['payment_thanks_default_checked'] ?? false);
+        $row['payment_thanks_attach_paid_pdf']= (bool) ($row['payment_thanks_attach_paid_pdf'] ?? false);
+        // Bezpečnost: do API NIKDY neposílat žádná tajemství. Redakce vzorem `*_enc`
+        // je odolná vůči nově přidaným šifrovaným sloupcům (původní explicitní výčet
+        // nechával unikat idoklad/fakturoid/anthropic credentials). Plus explicitně
+        // živý nešifrovaný token a serverová cesta k certifikátu.
+        foreach (array_keys($row) as $k) {
+            if (str_ends_with((string) $k, '_enc')) {
+                unset($row[$k]);
+            }
+        }
+        unset($row['signing_cert_path'], $row['idoklad_access_token']);
         // Globální cfg fallback pro varsymbol — UI ho použije jako placeholder
         // u prázdných per-supplier polí (aby uživatel viděl, jaká šablona by se
         // použila kdyby ponechal pole prázdné).

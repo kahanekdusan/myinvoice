@@ -190,7 +190,8 @@ final class KontrolniHlaseniBuilder
             $v->setAttribute('dan1', $this->formatAmount($r['vat21']));
             $v->setAttribute('zakl_dane2', $this->formatAmount($r['base12']));
             $v->setAttribute('dan2', $this->formatAmount($r['vat12']));
-            $v->setAttribute('pomer', 'N');
+            // pomer = A když byl uplatněn poměrný odpočet §75 (částky jsou už zkrácené ve VatLedgerService).
+            $v->setAttribute('pomer', !empty($r['is_pomer']) ? 'A' : 'N');
             $v->setAttribute('zdph_44', 'N');
             $dphkh->appendChild($v);
         }
@@ -285,7 +286,7 @@ final class KontrolniHlaseniBuilder
                     'dic'                   => $this->cleanDic($r['counterparty_dic']),
                     'country_iso2'          => $r['country_iso2'],
                     'total_czk'             => (float) $r['total_with_vat_czk'],
-                    'is_rc' => false, 'has_a2' => false, 'has_b1' => false,
+                    'is_rc' => false, 'has_a2' => false, 'has_b1' => false, 'is_pomer' => false,
                     'base21' => 0.0, 'vat21' => 0.0, 'base12' => 0.0, 'vat12' => 0.0, 'base_total' => 0.0,
                     'a2_base21' => 0.0, 'a2_vat21' => 0.0, 'a2_base12' => 0.0, 'a2_vat12' => 0.0,
                 ];
@@ -294,11 +295,19 @@ final class KontrolniHlaseniBuilder
             if ($r['is_reverse_charge']) $g['is_rc'] = true;
             if ($r['kh_section'] === 'A.2') $g['has_a2'] = true;
             if ($r['kh_section'] === 'B.1') $g['has_b1'] = true;
+            if (!empty($r['vat_deduction_partial'])) $g['is_pomer'] = true;
             $base = (float) $r['base_czk'];
             $vat  = (float) $r['vat_czk'];
             $g['base_total'] += $base;
-            if ($r['vat_rate'] >= 20.5) { $g['base21'] += $base; $g['vat21'] += $vat; }
-            elseif ($r['vat_rate'] > 0) { $g['base12'] += $base; $g['vat12'] += $vat; }
+            // Přijaté plnění bez nároku na odpočet (dphdp3_line=NULL, např. kód 42
+            // "tuzemsko bez nároku") do B.2/B.3 nepatří — KH eviduje jen plnění,
+            // u kterých příjemce uplatňuje odpočet (a DPHDP3 je rovněž vynechává).
+            // Vystavené (sale) do A.4/A.5 přispívají vždy.
+            $khEligible = $r['source'] === 'sale' || $r['dphdp3_line'] !== null;
+            if ($khEligible) {
+                if ($r['vat_rate'] >= 20.5) { $g['base21'] += $base; $g['vat21'] += $vat; }
+                elseif ($r['vat_rate'] > 0) { $g['base12'] += $base; $g['vat12'] += $vat; }
+            }
             if ($r['kh_section'] === 'A.2') {
                 if ($r['vat_rate'] >= 20.5) { $g['a2_base21'] += $base; $g['a2_vat21'] += $vat; }
                 elseif ($r['vat_rate'] > 0) { $g['a2_base12'] += $base; $g['a2_vat12'] += $vat; }
@@ -347,7 +356,7 @@ final class KontrolniHlaseniBuilder
                 if ($zeroBase($g)) continue;      // osvobozená přijatá bez nároku → ne B.2/B.3
                 $row = ['vendor_invoice_number' => $g['vendor_invoice_number'], 'tax_date' => $g['tax_date'],
                         'counterparty_dic' => $g['dic'], 'base21' => $g['base21'], 'vat21' => $g['vat21'],
-                        'base12' => $g['base12'], 'vat12' => $g['vat12']];
+                        'base12' => $g['base12'], 'vat12' => $g['vat12'], 'is_pomer' => $g['is_pomer']];
                 if ($overLimit && $hasDic) {
                     $b2[] = $row;
                 } else {
