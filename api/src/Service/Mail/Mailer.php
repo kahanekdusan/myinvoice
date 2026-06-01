@@ -134,6 +134,7 @@ final class Mailer
         // Per-supplier branding logo jako CID inline image — je-li `email_branding_enabled`
         // a logo soubor existuje. Twig používá `cid:supplier_logo` jako image src.
         $inlineAttachments = [];
+        $inlineBinaryAttachments = [];
         if ($supplier !== null
             && !empty($supplier['email_branding_enabled'])
             && !empty($supplier['logo_path'])
@@ -157,6 +158,12 @@ final class Mailer
         // QR platba jako inline CID image (viz výše, issue #51).
         if ($qrEmbed !== null) {
             $email->embed($qrEmbed['bytes'], 'qr_payment', $qrEmbed['contentType']);
+            $inlineBinaryAttachments[] = [
+                'name' => 'qr-payment.png',
+                'contentType' => $qrEmbed['contentType'],
+                'contentId' => 'qr_payment',
+                'bytes' => $qrEmbed['bytes'],
+            ];
         }
 
         foreach ($to as $addr)  $email->addTo($addr);
@@ -194,6 +201,7 @@ final class Mailer
                 $replyName,
                 $attachments,
                 $inlineAttachments,
+                $inlineBinaryAttachments,
             );
 
             $this->logger->info('mail.sent', [
@@ -202,7 +210,7 @@ final class Mailer
                 'to'            => $to,
                 'cc'            => $cc,
                 'bcc'           => $bcc,
-                'attachments'   => count($attachments) + count($inlineAttachments),
+                'attachments'   => count($attachments) + count($inlineAttachments) + count($inlineBinaryAttachments),
                 'provider'      => 'graph',
                 'smtp_response' => $graphResponse,
                 'smtp_debug'    => '',
@@ -468,6 +476,7 @@ final class Mailer
      * @param string[] $bcc
      * @param array<int,array{path:string,name:string,contentType:string}> $attachments
      * @param array<int,array{path:string,name:string,contentType:string,contentId:string}> $inlineAttachments
+     * @param array<int,array{name:string,contentType:string,contentId:string,bytes:string}> $inlineBinaryAttachments
      */
     private function sendViaMicrosoftGraph(
         string $subject,
@@ -480,6 +489,7 @@ final class Mailer
         string $replyName,
         array $attachments,
         array $inlineAttachments,
+        array $inlineBinaryAttachments,
     ): string {
         $grantType = strtolower((string) $this->config->get('smtp.oauth.microsoft.grant_type', ''));
         $refreshToken = (string) $this->config->get('smtp.oauth.microsoft.refresh_token', '');
@@ -580,6 +590,19 @@ final class Mailer
                 'contentBytes' => base64_encode($bytes),
                 'isInline' => true,
                 'contentId' => $att['contentId'],
+            ];
+        }
+        foreach ($inlineBinaryAttachments as $att) {
+            if (($att['bytes'] ?? '') === '') {
+                continue;
+            }
+            $graphAttachments[] = [
+                '@odata.type' => '#microsoft.graph.fileAttachment',
+                'name' => (string) $att['name'],
+                'contentType' => (string) $att['contentType'],
+                'contentBytes' => base64_encode((string) $att['bytes']),
+                'isInline' => true,
+                'contentId' => (string) $att['contentId'],
             ];
         }
         if (!empty($graphAttachments)) {
