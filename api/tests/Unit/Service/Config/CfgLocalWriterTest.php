@@ -15,9 +15,17 @@ use PHPUnit\Framework\TestCase;
 final class CfgLocalWriterTest extends TestCase
 {
     private string $tmpRoot;
+    private string|false $prevDataDirEnv;
+    private string|false $prevRequireTotpEnv;
 
     protected function setUp(): void
     {
+        $this->prevDataDirEnv = getenv('MYINVOICE_DATA_DIR');
+        $this->prevRequireTotpEnv = getenv('MYINVOICE_AUTH_REQUIRE_TOTP');
+        // Test musí být hermetický: MYINVOICE_* env z hostu nesmí přepisovat cfg.local.php assertions.
+        putenv('MYINVOICE_DATA_DIR');
+        putenv('MYINVOICE_AUTH_REQUIRE_TOTP');
+
         $this->tmpRoot = sys_get_temp_dir() . '/myinvoice-cfglocal-' . bin2hex(random_bytes(6));
         mkdir($this->tmpRoot, 0700, true);
         // Minimální cfg.php — Config::load to vyžaduje
@@ -26,6 +34,17 @@ final class CfgLocalWriterTest extends TestCase
 
     protected function tearDown(): void
     {
+        if ($this->prevDataDirEnv === false) {
+            putenv('MYINVOICE_DATA_DIR');
+        } else {
+            putenv('MYINVOICE_DATA_DIR=' . $this->prevDataDirEnv);
+        }
+        if ($this->prevRequireTotpEnv === false) {
+            putenv('MYINVOICE_AUTH_REQUIRE_TOTP');
+        } else {
+            putenv('MYINVOICE_AUTH_REQUIRE_TOTP=' . $this->prevRequireTotpEnv);
+        }
+
         @unlink($this->tmpRoot . '/cfg.local.php');
         @unlink($this->tmpRoot . '/cfg.php');
         @rmdir($this->tmpRoot);

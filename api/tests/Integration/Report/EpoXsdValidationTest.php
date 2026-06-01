@@ -57,6 +57,13 @@ final class EpoXsdValidationTest extends TestCase
         $this->validator = $container->get(XmlSchemaValidator::class);
         $this->conn = $container->get(\MyInvoice\Infrastructure\Database\Connection::class);
 
+        // Fixture guard: test předpokládá supplier_id=1 s minimálně vyplněným DIČ.
+        // Na některých lokálních DB není seed kompletní; v tom případě test korektně skipneme.
+        $dic = $this->conn->pdo()->query('SELECT NULLIF(TRIM(dic), "") FROM supplier WHERE id = 1 LIMIT 1')->fetchColumn();
+        if (!is_string($dic) || $dic === '') {
+            $this->markTestSkipped('supplier_id=1 nemá vyplněné DIČ — EPO integrační fixture není připravená.');
+        }
+
         $supplierId = 1;
         $year = (int) date('Y');
         $month = (int) date('n');

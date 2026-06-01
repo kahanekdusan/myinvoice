@@ -85,6 +85,12 @@ final class IssueInvoiceAction
         $issueDate = new \DateTimeImmutable($invoice['issue_date']);
 
         $supplierId = (int) $invoice['supplier_id'];
+        $body = (array) ($request->getParsedBody() ?? []);
+        $numberingType = (string) ($body['numbering_type'] ?? '');
+        $effectiveNumberingType = (($invoice['numbering_type'] ?? 'default') === 'quote')
+            || ((string) ($invoice['invoice_type'] ?? '') === 'proforma' && $numberingType === 'quote')
+            ? 'quote'
+            : 'default';
 
         // Pokud byl draft ručně očíslován (varsymbol zadaný v editoru), respektuj override
         // a NEinkremenetuj counter. Jen ověříme unikátnost v rámci supplier scope.
@@ -105,7 +111,11 @@ final class IssueInvoiceAction
             $varsymbol = $manualVarsymbol;
         } else {
             try {
-                $varsymbol = $this->varsymbol->next($supplierId, $invoice['invoice_type'], $issueDate, (int) $invoice['client_id']);
+                $varsymbolType = (string) $invoice['invoice_type'];
+                if ($varsymbolType === 'proforma' && ($numberingType === 'quote' || (($invoice['numbering_type'] ?? 'default') === 'quote'))) {
+                    $varsymbolType = 'quote';
+                }
+                $varsymbol = $this->varsymbol->next($supplierId, $varsymbolType, $issueDate);
             } catch (\InvalidArgumentException $e) {
                 return Json::error($response, 'varsymbol_failed', $e->getMessage(), 500);
             }
@@ -120,6 +130,7 @@ final class IssueInvoiceAction
         $stmt = $this->db->pdo()->prepare(
             'UPDATE invoices SET
                 varsymbol         = ?,
+                numbering_type    = ?,
                 client_snapshot   = ?,
                 supplier_snapshot = ?,
                 bank_snapshot     = ?,
@@ -128,6 +139,7 @@ final class IssueInvoiceAction
         );
         $stmt->execute([
             $varsymbol,
+            $effectiveNumberingType,
             json_encode($snapshots['client'],   JSON_UNESCAPED_UNICODE),
             json_encode($snapshots['supplier'], JSON_UNESCAPED_UNICODE),
             $snapshots['bank'] !== null ? json_encode($snapshots['bank'], JSON_UNESCAPED_UNICODE) : null,

@@ -125,6 +125,8 @@ const dueSelectValue = computed<DuePreset>({
 
 const invoicePreview        = computed(() => validateAndPreview(supplier.value?.invoice_number_format ?? null).preview)
 const invoiceFormatError    = computed(() => validateAndPreview(supplier.value?.invoice_number_format ?? null).error)
+const quotePreview          = computed(() => validateAndPreview(supplier.value?.quote_number_format ?? null).preview)
+const quoteFormatError      = computed(() => validateAndPreview(supplier.value?.quote_number_format ?? null).error)
 const proformaPreview       = computed(() => validateAndPreview(supplier.value?.proforma_number_format ?? null).preview)
 const proformaFormatError   = computed(() => validateAndPreview(supplier.value?.proforma_number_format ?? null).error)
 const creditNotePreview     = computed(() => validateAndPreview(supplier.value?.credit_note_number_format ?? null).preview)
@@ -150,7 +152,12 @@ async function saveSupplier() {
   if (!supplier.value) return
   // Klient-side guard pro varsymbol formáty — stejná pravidla jako backend, ale uživatel
   // dostane okamžitou zpětnou vazbu (hláška u pole) místo toastu, který zmizí.
-  const errs = [invoiceFormatError.value, proformaFormatError.value, creditNoteFormatError.value].filter(Boolean)
+  const errs = [
+    invoiceFormatError.value,
+    quoteFormatError.value,
+    proformaFormatError.value,
+    creditNoteFormatError.value,
+  ].filter(Boolean)
   if (errs.length > 0) {
     toast.error(errs[0])
     return
@@ -186,6 +193,7 @@ async function saveSupplier() {
       pohoda_activity_code: supplier.value.pohoda_activity_code,
       pohoda_contract_code: supplier.value.pohoda_contract_code,
       invoice_number_format: supplier.value.invoice_number_format,
+      quote_number_format: supplier.value.quote_number_format,
       proforma_number_format: supplier.value.proforma_number_format,
       credit_note_number_format: supplier.value.credit_note_number_format,
       invoice_number_period: supplier.value.invoice_number_period,
@@ -634,6 +642,18 @@ async function removeCurrency(c: CurrencyAccount) {
               <p v-if="proformaFormatError" class="text-xs text-danger-500 mt-1">{{ proformaFormatError }}</p>
               <p v-else-if="proformaPreview" class="text-xs text-success-600 mt-1">
                 {{ t('settings.numbering_preview') }}: <code class="font-mono font-semibold">{{ proformaPreview }}</code>
+              </p>
+              <p v-else class="text-xs text-neutral-400 mt-1">{{ t('settings.numbering_preview') }}: {{ t('settings.numbering_preview_fallback') }}</p>
+            </div>
+            <div>
+              <label class="block text-xs font-medium text-neutral-700 mb-1">{{ t('settings.quote_number_format') }}</label>
+              <input v-model="supplier.quote_number_format" type="text"
+                placeholder="2{YY}{MM}{CCC}" maxlength="60"
+                class="w-full h-9 px-3 border rounded-md text-sm font-mono"
+                :class="quoteFormatError ? 'border-danger-500 bg-danger-50' : 'border-neutral-300'" />
+              <p v-if="quoteFormatError" class="text-xs text-danger-500 mt-1">{{ quoteFormatError }}</p>
+              <p v-else-if="quotePreview" class="text-xs text-success-600 mt-1">
+                {{ t('settings.numbering_preview') }}: <code class="font-mono font-semibold">{{ quotePreview }}</code>
               </p>
               <p v-else class="text-xs text-neutral-400 mt-1">{{ t('settings.numbering_preview') }}: {{ t('settings.numbering_preview_fallback') }}</p>
             </div>

@@ -9,6 +9,8 @@
 </head>
 <body>
 
+{% set is_quote = invoice.invoice_type == 'proforma' and (invoice.numbering_type|default('default')) == 'quote' %}
+
 {# ─── PAGE FOOTER (každá stránka) — attribution ─── #}
 <htmlpagefooter name="attribution">
   <div class="page-attribution">
@@ -37,7 +39,9 @@
     {% endif %}
     <td class="meta">
       <div class="doc-type">{{ doc_type_label }}</div>
-      {% if invoice.varsymbol %}
+      {% if is_quote %}
+        <div class="varsymbol-big">{{ quote_number_display ?: '—' }}</div>
+      {% elseif invoice.varsymbol %}
         <div class="varsymbol-big">{{ invoice.varsymbol }}</div>
       {% endif %}
       {% if parent_varsymbol %}
@@ -97,28 +101,24 @@
   <tr>
     <td class="meta-label">{{ t('Vystaveno', 'Issued') }}</td>
     <td class="meta-value">{{ invoice.issue_date|date(date_format) }}</td>
-    <td class="meta-label">{{ t('Var. symbol', 'Var. symbol') }}</td>
-    <td class="meta-value mono">{{ invoice.varsymbol|default('—') }}</td>
+    {% if not is_quote %}
+      <td class="meta-label">{{ t('Var. symbol', 'Var. symbol') }}</td>
+      <td class="meta-value mono">{{ invoice.varsymbol|default('—') }}</td>
+    {% else %}
+      <td></td><td></td>
+    {% endif %}
   </tr>
-  {% if not supplier.is_vat_payer %}
   <tr>
-    <td class="meta-label">{{ t('DPH', 'VAT') }}</td>
-    <td class="meta-value" colspan="3">{{ t('Není plátce DPH', 'Not a VAT payer') }}</td>
-  </tr>
-  {% elseif invoice.tax_date and invoice.invoice_type != 'proforma' %}
-  <tr>
-    <td class="meta-label">{{ t('DUZP', 'Tax point') }}</td>
-    <td class="meta-value">{{ invoice.tax_date|date(date_format) }}</td>
-    <td class="meta-label">{{ t('KS', 'Const. symbol') }}</td>
-    <td class="meta-value mono">0308</td>
-  </tr>
-  {% endif %}
-  <tr>
-    <td class="meta-label">{{ t('Splatnost', 'Due') }}</td>
+    <td class="meta-label">{{ is_quote ? t('Platnost', 'Validity') : t('Splatnost', 'Due') }}</td>
     <td class="meta-value">{{ invoice.due_date|date(date_format) }}</td>
-    <td class="meta-label">{{ t('Měna', 'Currency') }}</td>
-    <td class="meta-value mono">{{ invoice.currency }}</td>
+    {% if not is_quote %}
+      <td class="meta-label">{{ t('Měna', 'Currency') }}</td>
+      <td class="meta-value mono">{{ invoice.currency }}</td>
+    {% else %}
+      <td></td><td></td>
+    {% endif %}
   </tr>
+  {% if not is_quote %}
   <tr>
     <td class="meta-label">{{ t('Úhrada', 'Payment') }}</td>
     <td class="meta-value">
@@ -134,6 +134,20 @@
       <td></td><td></td>
     {% endif %}
   </tr>
+  {% if not supplier.is_vat_payer %}
+  <tr>
+    <td class="meta-label">{{ t('DPH', 'VAT') }}</td>
+    <td class="meta-value" colspan="3">{{ t('Není plátce DPH', 'Not a VAT payer') }}</td>
+  </tr>
+  {% elseif invoice.tax_date and invoice.invoice_type != 'proforma' %}
+  <tr>
+    <td class="meta-label">{{ t('DUZP', 'Tax point') }}</td>
+    <td class="meta-value">{{ invoice.tax_date|date(date_format) }}</td>
+    <td class="meta-label">{{ t('KS', 'Const. symbol') }}</td>
+    <td class="meta-value mono">0308</td>
+  </tr>
+  {% endif %}
+  {% endif %}
   {% if invoice.project_number or invoice.contract_number %}
   <tr>
     {% if invoice.project_number %}
@@ -411,10 +425,17 @@
 <div class="note">{{ invoice.note_below_items|nl2br }}</div>
 {% endif %}
 
-{% if invoice.invoice_type == 'proforma' %}
+{% if invoice.invoice_type == 'proforma' and not is_quote %}
 <div class="note proforma-note">
   {{ t('Nejedná se o daňový doklad, ten bude vystaven po připsání platby.',
        'This is not a tax document. The tax document will be issued after payment is received.') }}
+</div>
+{% endif %}
+
+{% if is_quote %}
+<div class="note proforma-note">
+  {{ t('Tento dokument je cenová nabídka (nejedná se o daňový doklad).',
+       'This document is a price quote (not a tax document).') }}
 </div>
 {% endif %}
 

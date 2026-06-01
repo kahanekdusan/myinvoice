@@ -51,6 +51,19 @@ final class PdfAction
         $q = $request->getQueryParams();
         $regenerate = !empty($q['regenerate']);
         $download   = !empty($q['download']);
+        $requestedNumberingType = (string) ($q['numbering_type'] ?? '');
+
+        // Legacy kompatibilita: z modulu Cenové nabídky explicitně požádáme o
+        // numbering_type=quote. Pokud je doklad proforma, marker persistujeme,
+        // aby se přepnuly texty v PDF i pro starší drafty vytvořené před fixem.
+        if (
+            $requestedNumberingType === 'quote'
+            && (string) ($invoice['invoice_type'] ?? '') === 'proforma'
+            && (string) ($invoice['numbering_type'] ?? 'default') !== 'quote'
+        ) {
+            $this->repo->setNumberingType($id, 'quote');
+            $regenerate = true;
+        }
 
         // Zachyť případné echo/warning z 3rd party libs během renderu.
         ob_start();

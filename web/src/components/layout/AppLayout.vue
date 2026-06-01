@@ -94,8 +94,6 @@ const ICONS = {
 
 const navSections = computed<NavSection[]>(() => {
   const isAdmin = auth.user?.role === 'admin'
-  // Daňový optimalizátor (paušál vs standardní režim) je jen pro OSVČ (fyzická osoba).
-  const isOsvc = supplierStore.currentSupplier?.taxpayer_type === 'fo'
   const sections: NavSection[] = [
     { items: [{ to: '/', label: t('nav.dashboard'), icon: ICONS.dashboard }] },
     {
@@ -104,9 +102,10 @@ const navSections = computed<NavSection[]>(() => {
       title: t('nav.section_sales'),
       accent: 'primary',
       items: [
-        { to: '/invoices',         label: t('nav.invoices'),   icon: ICONS.invoices,  newTo: '/invoices/new' },
-        { to: '/recurring',        label: t('nav.recurring'),  icon: ICONS.recurring, newTo: '/recurring/new' },
-        { to: '/clients',          label: t('nav.clients'),    icon: ICONS.clients,   newTo: '/clients/new' },
+        { to: '/invoices',         label: t('nav.invoices'),   icon: ICONS.invoices },
+        { to: '/price-quotes',     label: t('nav.price_quotes'), icon: ICONS.invoices },
+        { to: '/recurring',        label: t('nav.recurring'),  icon: ICONS.recurring },
+        { to: '/clients',          label: t('nav.clients'),    icon: ICONS.clients },
         { to: '/projects',         label: t('nav.projects'),   icon: ICONS.projects },
         ...(isAdmin ? [{ to: '/admin/approvals',          label: t('nav.approvals'),         icon: ICONS.approvals }] : []),
         // Export vidí všichni vč. readonly (export dat = čtení), daňové výkazy taktéž (sekce Daně níže).
@@ -151,7 +150,7 @@ const navSections = computed<NavSection[]>(() => {
         { to: '/reports/dph-book',    label: t('nav.reports_dph_book'),    icon: ICONS.tax_book },
         { to: '/reports/shv',         label: t('nav.reports_shv'),         icon: ICONS.tax_shv },
         { to: '/reports/income-tax',  label: t('nav.reports_income_tax'),  icon: ICONS.tax_income },
-        ...(isOsvc ? [{ to: '/tax', label: t('nav.tax_optimizer'), icon: ICONS.tax_optimizer }] : []),
+        { to: '/tax', label: t('nav.tax_optimizer'), icon: ICONS.tax_optimizer },
         { to: '/reports/submissions', label: t('nav.reports_submissions'), icon: ICONS.tax_archive },
         { to: '/reports/monthly-export', label: t('nav.reports_monthly_export'), icon: ICONS.exports },
       ],

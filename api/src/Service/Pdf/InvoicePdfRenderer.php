@@ -12,6 +12,7 @@ use MyInvoice\Repository\InvoiceRepository;
 use MyInvoice\Repository\WorkReportRepository;
 use MyInvoice\Service\Branding\AccentColor;
 use MyInvoice\Service\Export\IsdocExporter;
+use MyInvoice\Service\Invoice\VarsymbolGenerator;
 use MyInvoice\Service\Invoice\SnapshotBuilder;
 use MyInvoice\Service\Qr\QrPaymentGenerator;
 use Twig\Environment;
@@ -37,6 +38,7 @@ final class InvoicePdfRenderer
         private readonly Connection $db,
         private readonly Config $config,
         private readonly QrPaymentGenerator $qr,
+        private readonly VarsymbolGenerator $varsymbols,
         private readonly WorkReportRepository $workReports,
         private readonly SnapshotBuilder $snapshots,
         private readonly PdfArchiveService $archive,
@@ -252,6 +254,7 @@ final class InvoicePdfRenderer
 
         return $twig->render('invoice.twig', [
             'invoice'           => $invoice,
+            'quote_number_display' => $this->quoteNumberDisplay($invoice),
             'supplier'          => $supplierData,
             'client'            => $clientData,
             'bank'              => $bankData,
@@ -273,6 +276,33 @@ final class InvoicePdfRenderer
             'logo_show_name'    => $logoPath !== null && !empty($supplierData['pdf_logo_show_name']),
             'isdoc_attachment'  => $hasIsdocAttachment, // bool — badge gate
         ]);
+    }
+
+    private function quoteNumberDisplay(array $invoice): ?string
+    {
+        $isQuote = (($invoice['invoice_type'] ?? '') === 'proforma')
+            && (($invoice['numbering_type'] ?? 'default') === 'quote');
+        if (!$isQuote) {
+            return null;
+        }
+
+        $existing = trim((string) ($invoice['varsymbol'] ?? ''));
+        if ($existing !== '') {
+            return $existing;
+        }
+
+        $supplierId = (int) ($invoice['supplier_id'] ?? 0);
+        if ($supplierId <= 0) {
+            return null;
+        }
+
+        try {
+            $issueDate = new \DateTimeImmutable((string) ($invoice['issue_date'] ?? 'today'));
+            $preview = $this->varsymbols->preview($supplierId, 'quote', $issueDate);
+            return $preview !== '' ? $preview : null;
+        } catch (\Throwable) {
+            return null;
+        }
     }
 
     /**
@@ -411,6 +441,11 @@ final class InvoicePdfRenderer
     private function docTypeLabel(array $invoice, string $locale, array $supplier = []): string
     {
         $isVatPayer = (bool) ($supplier['is_vat_payer'] ?? true);
+        $isQuote = (($invoice['invoice_type'] ?? '') === 'proforma')
+            && (($invoice['numbering_type'] ?? 'default') === 'quote');
+        if ($isQuote) {
+            return $locale === 'en' ? 'Price quote' : 'Cenová nabídka';
+        }
         $labels = [
             'cs' => [
                 'invoice'      => $isVatPayer ? 'Faktura — daňový doklad' : 'Faktura',
@@ -431,8 +466,10 @@ final class InvoicePdfRenderer
     private function docTitle(array $invoice): string
     {
         $vs = $invoice['varsymbol'] ?? ('DRAFT-' . $invoice['id']);
+        $isQuote = (($invoice['invoice_type'] ?? '') === 'proforma')
+            && (($invoice['numbering_type'] ?? 'default') === 'quote');
         $t = match ($invoice['invoice_type']) {
-            'proforma'     => 'Zálohová faktura',
+            'proforma'     => $isQuote ? 'Cenová nabídka' : 'Zálohová faktura',
             'credit_note'  => 'Dobropis',
             'cancellation' => 'Storno',
             default        => 'Faktura',
@@ -613,8 +650,10 @@ final class InvoicePdfRenderer
         // se sice už validuje na vstupu ImportService::processOne, ale tady je to
         // belt-and-braces pro případ legacy řádků v DB nebo jiných cest vstupu).
         $vs = preg_replace('/[^A-Za-z0-9_-]/', '_', (string) $vs);
+        $isQuote = (($invoice['invoice_type'] ?? '') === 'proforma')
+            && (($invoice['numbering_type'] ?? 'default') === 'quote');
         $type = match ($invoice['invoice_type']) {
-            'proforma'     => 'Proforma',
+            'proforma'     => $isQuote ? 'CenovaNabidka' : 'Proforma',
             'credit_note'  => 'Dobropis',
             'cancellation' => 'Storno',
             default        => 'Faktura',

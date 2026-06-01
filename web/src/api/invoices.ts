@@ -233,6 +233,7 @@ export interface MonthGroup {
 
 export interface InvoicePayload {
   invoice_type?: InvoiceType
+  numbering_type?: 'default' | 'quote'
   client_id: number
   project_id?: number | null
   issue_date?: string
@@ -334,7 +335,11 @@ export const invoicesApi = {
    * Vrátí náhled, jaké číslo faktura dostane při Vystavení (BEZ inkrementu counteru).
    * Používá se v editoru jako placeholder „automaticky: JD2026-01".
    */
-  previewVarsymbol: (type: 'invoice' | 'proforma' | 'credit_note', issueDate: string, clientId?: number) =>
+  previewVarsymbol: (
+    type: 'invoice' | 'proforma' | 'credit_note' | 'quote',
+    issueDate: string,
+    clientId?: number,
+  ) =>
     api.get<{ varsymbol: string; has_template: boolean }>(
       `/invoices/preview-varsymbol`,
       { params: { type, issue_date: issueDate, ...(clientId ? { client_id: clientId } : {}) } },
@@ -350,11 +355,17 @@ export const invoicesApi = {
   delete: (id: number) => api.delete<{ ok: boolean; cascade_deleted: number }>(`/invoices/${id}`).then(r => r.data),
 
   // Akce nad fakturou
-  issue:    (id: number) => api.post<Invoice>(`/invoices/${id}/issue`).then(r => r.data),
-  markPaid: (id: number, paidAt?: string, opts?: { sendThanks?: boolean; thanksTrigger?: 'manual' | 'bulk' }) =>
+  issue:    (id: number, opts?: { numbering_type?: 'quote' }) =>
+    api.post<Invoice>(`/invoices/${id}/issue`, opts || {}).then(r => r.data),
+  markPaid: (
+    id: number,
+    paidAt?: string,
+    opts?: { sendThanks?: boolean; thanksTrigger?: 'manual' | 'bulk' },
+  ) =>
     api.post<Invoice>(`/invoices/${id}/mark-paid`, {
       paid_at: paidAt || new Date().toISOString().slice(0, 10),
-      ...(opts?.sendThanks ? { send_payment_thanks: true, thanks_trigger: opts.thanksTrigger || 'manual' } : {}),
+      ...(opts?.sendThanks ? { sendThanks: true } : {}),
+      ...(opts?.thanksTrigger ? { thanksTrigger: opts.thanksTrigger } : {}),
     }).then(r => r.data),
   unmarkPaid: (id: number) =>
     api.post<Invoice>(`/invoices/${id}/unmark-paid`, {}).then(r => r.data),
@@ -386,12 +397,18 @@ export const invoicesApi = {
       { invoice_ids: invoiceIds, ...opts },
     ).then(r => r.data),
 
-  pdfUrl: (id: number, download: boolean = false) => {
+  pdfUrl: (
+    id: number,
+    download: boolean = false,
+    opts?: { regenerate?: boolean; numbering_type?: 'quote' },
+  ) => {
     // Přímá navigace v prohlížeči neposílá X-Supplier-Id header (na rozdíl od axios) —
     // proto přidáváme supplier_id jako query param. Middleware ho přečte jako fallback.
     const sid = localStorage.getItem('myinvoice.current_supplier_id')
     const params = new URLSearchParams()
     if (download) params.set('download', '1')
+    if (opts?.regenerate) params.set('regenerate', '1')
+    if (opts?.numbering_type) params.set('numbering_type', opts.numbering_type)
     if (sid && /^\d+$/.test(sid)) params.set('supplier_id', sid)
     const qs = params.toString()
     return `/api/invoices/${id}/pdf${qs ? '?' + qs : ''}`

@@ -131,10 +131,9 @@ final class BulkReissueAction
             $stmt = $pdo->prepare(
                 'INSERT INTO invoices
                    (invoice_type, client_id, project_id, supplier_id,
-                    issue_date, tax_date, due_date, currency_id, reverse_charge, prices_include_vat, language,
-                    note_above_items, note_below_items, discount_percent, payment_method,
-                    revenue_category_id, status, created_by)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "draft", ?)'
+                    issue_date, tax_date, due_date, currency_id, reverse_charge, language,
+                          note_above_items, note_below_items, discount_percent, payment_method, numbering_type, status, created_by)
+                      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "draft", ?)'
             );
             $stmt->execute([
                 $type,
@@ -154,8 +153,7 @@ final class BulkReissueAction
                 $source['note_below_items'],
                 (float) ($source['discount_percent'] ?? 0),
                 (string) ($source['payment_method'] ?? 'bank_transfer'),
-                // Reissue zachová kategorii tržby zdrojové faktury.
-                $source['revenue_category_id'] ?? null,
+                (($source['numbering_type'] ?? 'default') === 'quote') ? 'quote' : 'default',
                 $userId,
             ]);
             $newId = (int) $pdo->lastInsertId();

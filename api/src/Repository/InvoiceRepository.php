@@ -628,9 +628,8 @@ final class InvoiceRepository
             (invoice_type, parent_invoice_id, client_id, project_id, supplier_id,
              issue_date, tax_date, due_date, currency_id, reverse_charge, prices_include_vat, language,
              note_above_items, note_below_items, advance_paid_amount, discount_percent, varsymbol,
-             payment_method, status, vat_classification_code, revenue_category, revenue_category_id,
-             income_tax_exempt, income_tax_exempt_reason, created_by)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "draft", ?, ?, ?, ?, ?, ?)';
+             payment_method, numbering_type, status, vat_classification_code, revenue_category, created_by)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "draft", ?, ?, ?)';
 
         $stmt = $pdo->prepare($sql);
         $stmt->execute([
@@ -652,6 +651,7 @@ final class InvoiceRepository
             self::clampDiscountPercent($data['discount_percent'] ?? 0),
             $manualVarsymbol,
             $paymentMethod,
+            (($data['numbering_type'] ?? 'default') === 'quote') ? 'quote' : 'default',
             !empty($data['vat_classification_code']) ? (string) $data['vat_classification_code'] : null,
             !empty($data['revenue_category']) ? (string) $data['revenue_category'] : null,
             $revenueCategoryId,
@@ -698,8 +698,8 @@ final class InvoiceRepository
                 currency_id = ?, reverse_charge = ?, prices_include_vat = ?, language = ?,
                 note_above_items = ?, note_below_items = ?,
                 advance_paid_amount = ?, discount_percent = ?,
-                vat_classification_code = ?, revenue_category = ?, revenue_category_id = ?,
-                income_tax_exempt = ?, income_tax_exempt_reason = ?'
+            vat_classification_code = ?, revenue_category = ?,
+            numbering_type = ?'
               . ($hasVarsymbol ? ', varsymbol = ?' : '')
               . ($hasPaymentMethod ? ', payment_method = ?' : '')
               . ($hasType ? ', invoice_type = ?' : '')
@@ -721,9 +721,7 @@ final class InvoiceRepository
             self::clampDiscountPercent($data['discount_percent'] ?? 0),
             !empty($data['vat_classification_code']) ? (string) $data['vat_classification_code'] : null,
             !empty($data['revenue_category']) ? (string) $data['revenue_category'] : null,
-            isset($data['revenue_category_id']) && $data['revenue_category_id'] ? (int) $data['revenue_category_id'] : null,
-            !empty($data['income_tax_exempt']) ? 1 : 0,
-            self::normalizeExemptReason($data['income_tax_exempt_reason'] ?? null),
+            (($data['numbering_type'] ?? 'default') === 'quote') ? 'quote' : 'default',
         ];
         if ($hasVarsymbol) $params[] = $manualVarsymbol;
         if ($hasPaymentMethod) $params[] = $paymentMethod;
@@ -1040,10 +1038,50 @@ final class InvoiceRepository
                 return (int) $pcat;
             }
         }
-        $cs = $pdo->prepare('SELECT default_revenue_category_id FROM clients WHERE id = ?');
-        $cs->execute([$clientId]);
-        $ccat = $cs->fetchColumn();
-        return ($ccat !== false && $ccat !== null) ? (int) $ccat : null;
+
+        return $this->find((int) $id);
+    }
+
+    /**
+     * Tracking prvního/posledního otevření veřejného odkazu.
+     */
+    public function markPublicLinkOpened(int $invoiceId): void
+    {
+        $this->db->pdo()->prepare(
+            'UPDATE invoices
+                SET public_first_opened_at = COALESCE(public_first_opened_at, NOW()),
+                    public_last_opened_at = NOW(),
+                    public_open_count = public_open_count + 1
+              WHERE id = ?'
+        )->execute([$invoiceId]);
+    }
+
+    /**
+     * Přepne variantu proforma dokladu (default/quote) bez zásahu do ostatních polí.
+     */
+    public function setNumberingType(int $invoiceId, string $numberingType): void
+    {
+        $normalized = $numberingType === 'quote' ? 'quote' : 'default';
+        $this->db->pdo()->prepare(
+            'UPDATE invoices SET numbering_type = ? WHERE id = ?'
+        )->execute([$normalized, $invoiceId]);
+    }
+
+    /**
+     * Tracking "viděna" po heartbeatu (>= 10s).
+     */
+    public function markPublicLinkViewed(int $invoiceId, int $viewedSeconds): void
+    {
+        $seconds = max(10, $viewedSeconds);
+
+        $this->db->pdo()->prepare(
+            'UPDATE invoices
+                SET public_first_viewed_at = COALESCE(public_first_viewed_at, NOW()),
+                    public_last_viewed_at = NOW(),
+                    public_view_count = public_view_count + 1,
+                    public_viewed_seconds = GREATEST(public_viewed_seconds, ?)
+              WHERE id = ?'
+        )->execute([$seconds, $invoiceId]);
     }
 
     /**

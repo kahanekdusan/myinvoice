@@ -45,10 +45,13 @@ final class UpdateInvoiceAction
         $user = (array) $request->getAttribute(AuthMiddleware::ATTR_USER, []);
         $isForce = $request->getQueryParams()['force'] ?? null;
         $isAdmin = (($user['role'] ?? '') === 'admin');
+        $isIssuedQuote = (($existing['invoice_type'] ?? '') === 'proforma')
+            && (($existing['numbering_type'] ?? 'default') === 'quote');
 
         if ($existing['status'] !== 'draft') {
-            // Pouze admin smí upravovat vystavenou fakturu, a to jen s explicit ?force=1.
-            if (!$isAdmin || !$isForce) {
+            // Cenová nabídka (proforma + numbering_type=quote) zůstává editovatelná i po vystavení.
+            // Ostatní vystavené doklady může upravit jen admin s explicit ?force=1.
+            if (!$isIssuedQuote && (!$isAdmin || !$isForce)) {
                 return Json::error($response, 'not_editable', 'Vystavenou fakturu nelze editovat.', 409);
             }
             // Cancellation/credit_note jsou implicitně chráněné (auditní stopa)
