@@ -232,7 +232,9 @@ final class InvoicePdfRenderer
         $isPaid = ($invoice['status'] ?? '') === 'paid';
         $paymentMethod = (string) ($invoice['payment_method'] ?? 'bank_transfer');
         $isBankTransfer = $paymentMethod === 'bank_transfer';
-        if ($hasAmount && $bankData !== null && (!$isCzk || $hasVs) && !$isPaid && $isBankTransfer) {
+        $isPriceQuote = (($invoice['invoice_type'] ?? '') === 'proforma')
+            && (($invoice['numbering_type'] ?? 'default') === 'quote');
+        if ($hasAmount && $bankData !== null && (!$isCzk || $hasVs) && !$isPaid && $isBankTransfer && !$isPriceQuote) {
             $qrUri = $this->qr->generate(
                 (string) $invoice['currency'],
                 (float) $invoice['amount_to_pay'],

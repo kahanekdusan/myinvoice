@@ -245,7 +245,7 @@
       <table style="width:100%;border-collapse:collapse;">
         <tr>
           <td style="vertical-align:top;padding-right:3mm;width:33mm;">
-            {% if qr_data_uri %}
+            {% if qr_data_uri and not is_quote %}
             <div class="qr-box">
               <img src="{{ qr_data_uri }}" alt="QR" width="105" height="105">
               <div class="qr-label">QR Pay</div>
@@ -293,7 +293,7 @@
                 </td>
               </tr>
             </table>
-            {% elseif bank %}
+            {% elseif bank and not is_quote %}
             <table class="bank-frame">
               <tr>
                 <td>

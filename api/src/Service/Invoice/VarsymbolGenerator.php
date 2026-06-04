@@ -408,8 +408,11 @@ final class VarsymbolGenerator
         $clientTemplate = '';
         $clientPeriod = null;
         if ($clientId > 0) {
+            // Per-client schema zatím nemá quote_number_format sloupec.
+            // U quote tedy per-client override fallbackuje na proforma_number_format.
+            $clientCol = $invoiceType === 'quote' ? 'proforma_number_format' : $col;
             $cliStmt = $this->db->pdo()->prepare(
-                "SELECT {$col} AS tpl, invoice_number_period AS period
+                "SELECT {$clientCol} AS tpl, invoice_number_period AS period
                    FROM clients WHERE id = ? AND supplier_id = ? LIMIT 1"
             );
             $cliStmt->execute([$clientId, $supplierId]);
