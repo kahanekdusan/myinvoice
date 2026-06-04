@@ -5,6 +5,7 @@ import { useI18n } from 'vue-i18n'
 import { useAuthStore } from '@/stores/auth'
 import { useSupplierStore } from '@/stores/supplier'
 import { updateApi, type PublicVersion } from '@/api/update'
+import { settingsApi } from '@/api/settings'
 import SupplierSwitcher from './SupplierSwitcher.vue'
 import GlobalSearch from './GlobalSearch.vue'
 import ThemeToggle from './ThemeToggle.vue'
@@ -22,11 +23,38 @@ const supplierStore = useSupplierStore()
 
 const mobileOpen = ref(false)
 const quickOpen = ref(false)
+const accountantSigningProfilesEnabled = ref(false)
+let signingSettingsRequest = 0
 
 async function logout() {
   await auth.logout()
   router.push('/login')
 }
+
+async function loadAccountantSigningMenu() {
+  const requestId = ++signingSettingsRequest
+  if (auth.user?.role !== 'accountant') {
+    accountantSigningProfilesEnabled.value = false
+    return
+  }
+
+  try {
+    const settings = await settingsApi.getSigningSettings()
+    if (requestId === signingSettingsRequest) {
+      accountantSigningProfilesEnabled.value = settings.accountant_profiles_enabled === true
+    }
+  } catch {
+    if (requestId === signingSettingsRequest) {
+      accountantSigningProfilesEnabled.value = false
+    }
+  }
+}
+
+watch(
+  () => [auth.user?.role, supplierStore.currentSupplierId] as const,
+  () => { void loadAccountantSigningMenu() },
+  { immediate: true },
+)
 
 interface NavItem {
   to: string
@@ -74,6 +102,7 @@ const ICONS = {
   exports:    'M4 16v1a3 3 0 0 0 3 3h10a3 3 0 0 0 3-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4',
   users:      'M17 20h5v-2a4 4 0 0 0-3-3.87M9 20H4v-2a3 3 0 0 1 5.356-1.857M15 7a4 4 0 1 1-8 0 4 4 0 0 1 8 0z',
   email:      'M3 8l7.89 5.26a2 2 0 0 0 2.22 0L21 8M5 19h14a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2z',
+  sent_email: 'M6 12L3.269 3.126A59.768 59.768 0 0 1 21.485 12 59.77 59.77 0 0 1 3.27 20.876L5.999 12Zm0 0h7.5',
   approvals:  'M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0 1 12 2.944a11.955 11.955 0 0 1-8.618 3.04A12.02 12.02 0 0 0 3 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z',
   log:        'M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2M9 5a2 2 0 0 0 2 2h2a2 2 0 0 0 2-2M9 5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2M9 12h6m-6 4h4',
   cron:       'M12 8v4l3 3m6-3a9 9 0 1 1-18 0 9 9 0 0 1 18 0z',
@@ -165,14 +194,25 @@ const navSections = computed<NavSection[]>(() => {
       accent: 'neutral',
       items: [
         { to: '/admin/settings',         label: t('nav.settings'),        icon: ICONS.settings },
+        { to: '/admin/bank-accounts',    label: t('nav.bank_accounts'),   icon: ICONS.bank },
         { to: '/admin/codebooks',        label: t('nav.codebooks'),       icon: ICONS.codebooks },
-        { to: '/admin/integrations',     label: t('nav.integrations'),    icon: ICONS.api_tokens },
         { to: '/admin/users',            label: t('nav.users'),           icon: ICONS.users },
-        { to: '/admin/email-templates',  label: t('nav.email_templates'), icon: ICONS.email },
+        { to: '/admin/emails',           label: t('nav.emails'),          icon: ICONS.email },
         { to: '/admin/activity-log',     label: t('nav.log'),             icon: ICONS.log },
+        { to: '/admin/integrations',     label: t('nav.integrations'),    icon: ICONS.api_tokens },
         { to: '/admin/cron-jobs',        label: t('nav.cron_jobs'),       icon: ICONS.cron },
         { to: '/admin/update',           label: t('nav.updates'),         icon: ICONS.updates },
         { to: '/profile/api-tokens',     label: t('nav.api_tokens'),      icon: ICONS.api_tokens },
+      ],
+    })
+  }
+
+  if (!isAdmin && auth.user?.role === 'accountant' && accountantSigningProfilesEnabled.value) {
+    sections.push({
+      title: t('nav.system'),
+      accent: 'neutral',
+      items: [
+        { to: '/admin/electronic-signatures', label: t('nav.electronic_signatures'), icon: ICONS.approvals },
       ],
     })
   }

@@ -78,7 +78,7 @@ final class PaymentThanksMailer
         $attachments = [];
         if ($settings['attach_paid_pdf']) {
             try {
-                $pdfPath = $this->renderer->render($invoiceId);
+                $pdfPath = $this->renderer->render($invoiceId, false, $userId);
                 $attachments[] = ['path' => $pdfPath, 'name' => basename($pdfPath), 'contentType' => 'application/pdf'];
             } catch (\Throwable $e) {
                 // PDF příloha je volitelná — když selže, pošli e-mail bez ní.
@@ -87,7 +87,7 @@ final class PaymentThanksMailer
         }
 
         try {
-            $smtp = $this->mailer->sendTemplate('invoice_payment_thanks', $locale, $to, $vars, null, [], [], $attachments);
+            $smtp = $this->mailer->sendTemplate('invoice_payment_thanks', $locale, $to, $vars, null, [], [], $attachments, $userId);
         } catch (\Throwable $e) {
             $this->logger->log('invoice.payment_thanks_failed', $userId, 'invoice', $invoiceId, [
                 'varsymbol' => $invoice['varsymbol'] ?? null,

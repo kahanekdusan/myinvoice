@@ -10,6 +10,7 @@ use MyInvoice\Repository\InvoiceRepository;
 use MyInvoice\Service\ActivityLogger;
 use MyInvoice\Service\Mail\InvoiceEmailVarsBuilder;
 use MyInvoice\Service\Mail\Mailer;
+use MyInvoice\Service\Pdf\InvoicePdfRenderer;
 use MyInvoice\Service\Stats\StatsRecomputer;
 use MyInvoice\Service\Validation\InvoiceAmountPolicy;
 
@@ -33,6 +34,7 @@ final class AutoIssueAndSendService
         private readonly VarsymbolGenerator $varsymbol,
         private readonly SnapshotBuilder $snapshots,
         private readonly PublicInvoiceLinkFactory $linkFactory,
+        private readonly InvoicePdfRenderer $renderer,
         private readonly Mailer $mailer,
         private readonly InvoiceEmailVarsBuilder $varsBuilder,
         private readonly ActivityLogger $logger,
@@ -81,7 +83,10 @@ final class AutoIssueAndSendService
             $invoice = $this->repo->find($invoiceId);
         }
 
-        // 2. Příjemci (stejná logika jako SendEmailAction)
+        // 2. PDF
+        $pdfPath = $this->renderer->render($invoiceId, false, $userId);
+
+        // 3. Příjemci (stejná logika jako SendEmailAction)
         $to = $this->resolveRecipients($invoice);
         $cc = [];
         if ((bool) $this->config->get('smtp.cc_supplier_on_send', false)) {
@@ -105,18 +110,31 @@ final class AutoIssueAndSendService
         $invoiceViewUrl = $this->linkFactory->build($publicToken);
 
         $locale = (string) ($invoice['language'] ?? 'cs');
-        $vars = $this->varsBuilder->build($invoice, false, $locale, $invoiceViewUrl);
+        $vars = $this->varsBuilder->build($invoice, false, $locale);
+        $vars['invoice_view_url'] = $invoiceViewUrl;
 
-        $this->mailer->sendTemplate(
-            'invoice_send',
-            $locale,
-            $to,
-            $vars,
-            null,
-            $cc,
-            [],
-            [],
-        );
+        try {
+            $this->mailer->sendTemplate(
+                'invoice_send',
+                $locale,
+                $to,
+                $vars,
+                null,
+                $cc,
+                [],
+                [['path' => $pdfPath, 'name' => basename($pdfPath), 'contentType' => 'application/pdf']],
+                $userId,
+            );
+        } catch (\Throwable $e) {
+            // Auto-send po schválení výkazu — selhání zalogujeme do přehledu e-mailů
+            // a propustíme dál (caller v approval flow si ho ošetří).
+            $this->logger->log('invoice.send_failed', $userId, 'invoice', $invoiceId, [
+                'to' => $to, 'cc' => $cc,
+                'auto_reason' => 'work_report_approved',
+                'error' => mb_substr($e->getMessage(), 0, 500),
+            ], $ip, $ua);
+            throw $e;
+        }
 
         $newStatus = $invoice['status'] === 'issued' ? 'sent' : $invoice['status'];
         $this->db->pdo()->prepare('UPDATE invoices SET status = ?, sent_at = NOW(), public_link_sent_at = NOW() WHERE id = ?')

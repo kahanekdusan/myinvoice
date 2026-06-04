@@ -52,6 +52,8 @@ final class PdfAction
         $regenerate = !empty($q['regenerate']);
         $download   = !empty($q['download']);
         $requestedNumberingType = (string) ($q['numbering_type'] ?? '');
+        $user = (array) $request->getAttribute(AuthMiddleware::ATTR_USER, []);
+        $userId = isset($user['id']) ? (int) $user['id'] : null;
 
         // Legacy kompatibilita: z modulu Cenové nabídky explicitně požádáme o
         // numbering_type=quote. Pokud je doklad proforma, marker persistujeme,
@@ -68,14 +70,13 @@ final class PdfAction
         // Zachyť případné echo/warning z 3rd party libs během renderu.
         ob_start();
         try {
-            $path = $this->renderer->render($id, $regenerate);
+            $path = $this->renderer->render($id, $regenerate, $userId);
         } catch (\Throwable $e) {
             ob_end_clean();
             return Json::error($response, 'pdf_failed', $e->getMessage(), 500);
         }
         ob_end_clean();
 
-        $user = (array) $request->getAttribute(AuthMiddleware::ATTR_USER, []);
         $ip = $this->ipMatcher->clientIpFromRequest($request->getServerParams());
         $this->logger->log('pdf.generated', $user['id'] ?? null, 'invoice', $id, [
             'regenerate' => $regenerate,

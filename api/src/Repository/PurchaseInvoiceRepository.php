@@ -15,8 +15,9 @@ use PDO;
  *   - vendor_id místo client_id (vendor = protistrana, řádek v `clients` s is_vendor=1)
  *   - status lifecycle: draft → received → booked → paid (+ cancelled)
  *   - žádný approval / sent / reminder flow
- *   - varsymbol generovaný z purchase_invoice_counters: {PP}{YYMM}{CCC} (např.
- *     PF2602001), kde PP dle daňového typu (PF/PN plný, KU/KN krácený, NU/NN bez nároku)
+ *   - varsymbol generovaný z purchase_invoice_counters dle per-supplier šablony
+ *     (supplier.purchase_invoice_number_format) nebo defaultu {PP}{YY}{MM}{CCC}
+ *     (např. PF2602001); {PP} dle daňového typu (PF/PN plný, KU/KN krácený, NU/NN bez nároku)
  *
  * Bezpečnostní pravidla:
  *   - Vždy filtrovat WHERE supplier_id = ? (tenant scope)
@@ -963,43 +964,231 @@ final class PurchaseInvoiceRepository
         return $id !== false ? (int) $id : null;
     }
 
+    /** Maximální počet pokusů přeskočit obsazené interní číslo (poslední pojistka). */
+    private const MAX_VARSYMBOL_SKIP = 1000;
+
     /**
-     * Vygeneruje další varsymbol {PP}{YYMM}{CCC} (např. PF2602001) pro tenant + období.
-     * Atomicky inkrementuje counter (FOR UPDATE / INSERT … ON DUPLICATE KEY).
+     * Vestavěná výchozí šablona interního čísla přijaté faktury (= dosavadní chování).
+     * {PP}=daňový prefix, {YY}{MM}=období, {CCC}=čítač → např. PF2602001.
+     */
+    public const PURCHASE_DEFAULT_TEMPLATE = '{PP}{YY}{MM}{CCC}';
+
+    /**
+     * Vygeneruje další interní číslo přijaté faktury pro tenant + období dle
+     * per-supplier šablony (supplier.purchase_invoice_number_format), nebo dle
+     * vestavěného defaultu {PP}{YY}{MM}{CCC} (např. PF2602001). Atomicky inkrementuje
+     * counter (INSERT … ON DUPLICATE KEY).
+     *
+     * Placeholdery šablony: {PP} daňový prefix (PF/PN/KU/KN/NU/NN), {YYYY}/{YY}/{MM}
+     * datum, {C+} čítač (padding dle počtu C). Scope čítače plyne ze šablony: má-li
+     * {MM} → měsíční řada, jinak {YYYY}/{YY} → roční, jinak jediná řada.
+     *
+     * Samoopravné (paralela k vydaným, #85/#103): když je counter pozadu za již
+     * použitými čísly (ruční číslo „dopředu", import, úprava v DB), vygenerované
+     * číslo nevezme — skočí za nejvyšší skutečně použité číslo dané řady a najde
+     * první volné. Unique index `uq_pi_supplier_varsymbol` je definitivní pojistka.
+     *
+     * $period je YYYYMM (období DUZP/vystavení); čítačový klíč se z něj odvodí dle scope.
      */
     public function nextVarsymbol(int $supplierId, ?string $period = null, string $prefix = 'PF'): string
     {
-        $period = $period ?? date('Ym');
-        $pdo = $this->db->pdo();
+        $period   = $period ?? date('Ym');
+        $prefix   = preg_match('/^[A-Z]{2}$/', $prefix) ? $prefix : 'PF';
+        $template = $this->purchaseTemplate($supplierId);
+        $counterPeriod = $this->purchaseCounterPeriod($template, $period);
 
-        // Atomický increment přes INSERT … ON DUPLICATE KEY UPDATE.
-        // Pro MariaDB platí, že LAST_INSERT_ID(expr) vrátí nově nastavenou hodnotu.
-        // Counter je sdílený per (supplier, období) napříč prefixy — číslo je tedy
-        // souvislé přes všechny přijaté doklady období, prefix jen značí daňový typ.
-        $stmt = $pdo->prepare(
+        $n        = $this->bumpPurchaseCounter($supplierId, $counterPeriod);
+        $rendered = $this->renderPurchaseNumber($template, $prefix, $period, $n);
+
+        // Happy path: counter sedí, číslo je volné.
+        if (!$this->purchaseVarsymbolExists($supplierId, $rendered)) {
+            return $rendered;
+        }
+
+        // Counter pozadu → skoč rovnou za nejvyšší použité číslo řady, pak dolaď mezery.
+        $highest = $this->highestUsedPurchaseCounter($supplierId, $template, $period);
+        if ($highest >= $n) {
+            $n        = $this->liftPurchaseCounterTo($supplierId, $counterPeriod, $highest + 1);
+            $rendered = $this->renderPurchaseNumber($template, $prefix, $period, $n);
+        }
+
+        $attempts = 0;
+        while ($this->purchaseVarsymbolExists($supplierId, $rendered)) {
+            if (++$attempts > self::MAX_VARSYMBOL_SKIP) {
+                throw new \RuntimeException(
+                    'Nepodařilo se najít volné interní číslo přijaté faktury ani po '
+                    . self::MAX_VARSYMBOL_SKIP . " pokusech (období {$period}). Zadej číslo ručně."
+                );
+            }
+            $n        = $this->bumpPurchaseCounter($supplierId, $counterPeriod);
+            $rendered = $this->renderPurchaseNumber($template, $prefix, $period, $n);
+        }
+
+        return $rendered;
+    }
+
+    /** Per-supplier šablona interního čísla přijaté faktury, nebo vestavěný default. */
+    private function purchaseTemplate(int $supplierId): string
+    {
+        $stmt = $this->db->pdo()->prepare('SELECT purchase_invoice_number_format FROM supplier WHERE id = ? LIMIT 1');
+        $stmt->execute([$supplierId]);
+        $t = trim((string) ($stmt->fetchColumn() ?: ''));
+        return $t !== '' ? $t : self::PURCHASE_DEFAULT_TEMPLATE;
+    }
+
+    /** Vyrenderuje číslo ze šablony: {PP} prefix, {YYYY}/{YY}/{MM} z období, {C+} čítač. */
+    private function renderPurchaseNumber(string $template, string $prefix, string $period, int $counter): string
+    {
+        $out = strtr($template, [
+            '{PP}'   => $prefix,
+            '{YYYY}' => substr($period, 0, 4),
+            '{YY}'   => substr($period, 2, 2),
+            '{MM}'   => substr($period, 4, 2),
+        ]);
+        return preg_replace_callback('/\{(C+)\}/', static function (array $m) use ($counter): string {
+            return str_pad((string) $counter, strlen($m[1]), '0', STR_PAD_LEFT);
+        }, $out) ?? $out;
+    }
+
+    /** Klíč čítače dle scope šablony: měsíční (YYYYMM) / roční (YYYY) / jediná řada (ALL). */
+    private function purchaseCounterPeriod(string $template, string $period): string
+    {
+        if (str_contains($template, '{MM}')) {
+            return $period; // YYYYMM
+        }
+        if (str_contains($template, '{YYYY}') || str_contains($template, '{YY}')) {
+            return substr($period, 0, 4); // YYYY
+        }
+        return 'ALL';
+    }
+
+    /** Atomický increment counteru období; vrací novou hodnotu (≥1). */
+    private function bumpPurchaseCounter(int $supplierId, string $period): int
+    {
+        $pdo = $this->db->pdo();
+        // LAST_INSERT_ID(expr) vrátí nově nastavenou hodnotu i při UPDATE větvi (MariaDB).
+        $pdo->prepare(
             'INSERT INTO purchase_invoice_counters (supplier_id, period, last_number)
              VALUES (?, ?, 1)
              ON DUPLICATE KEY UPDATE last_number = LAST_INSERT_ID(last_number + 1)'
-        );
-        $stmt->execute([$supplierId, $period]);
+        )->execute([$supplierId, $period]);
         $n = (int) $pdo->lastInsertId();
-        if ($n === 0) $n = 1;
+        return $n === 0 ? 1 : $n;
+    }
 
-        // Formát {PP}{YYMM}{CCC} bez oddělovačů, např. PF2602001. Counter key je
-        // YYYYMM (period), ve varsymbolu se používá jen dvojčíslí roku (YY).
-        // %03d = min. 3 místa; když by měsíc měl >999 dokladů, počítadlo přirozeně
-        // přeleze na 4+ místa (PF26021000…) — pořadí zůstane korektní.
-        $prefix = preg_match('/^[A-Z]{2}$/', $prefix) ? $prefix : 'PF';
-        return sprintf('%s%s%03d', $prefix, substr($period, 2, 4), $n);
+    private function purchaseVarsymbolExists(int $supplierId, string $varsymbol): bool
+    {
+        $stmt = $this->db->pdo()->prepare(
+            'SELECT 1 FROM purchase_invoices WHERE supplier_id = ? AND varsymbol = ? LIMIT 1'
+        );
+        $stmt->execute([$supplierId, $varsymbol]);
+        return $stmt->fetchColumn() !== false;
     }
 
     /**
-     * Po změně daňového uplatnění (vat_deduction / tax_deductible) přepíše PREFIX
-     * auto-generovaného interního čísla na ten odpovídající novému typu — číselnou
-     * řadu (YYMM+CCC) ponechá. Např. PF2602001 → NN2602001.
+     * Nejvyšší čítač mezi přijatými fakturami daného období, jejichž interní číslo
+     * odpovídá šabloně po dosazení data ({PP} = libovolný 2písmenný prefix → čítač
+     * se počítá napříč daňovými typy). 0 = žádná shoda. Jen zrychlený skok —
+     * korektnost garantuje exact-match smyčka v nextVarsymbol().
+     */
+    private function highestUsedPurchaseCounter(int $supplierId, string $template, string $period): int
+    {
+        [$regex, $likePrefix] = $this->buildPurchaseMatcher($template, $period);
+        if ($regex === null) {
+            return 0;
+        }
+        $like = $likePrefix . '%';
+        $stmt = $this->db->pdo()->prepare(
+            "SELECT varsymbol FROM purchase_invoices
+              WHERE supplier_id = ? AND varsymbol IS NOT NULL AND varsymbol <> '' AND varsymbol LIKE ?"
+        );
+        $stmt->execute([$supplierId, $like]);
+
+        $max = 0;
+        while (($vs = $stmt->fetchColumn()) !== false) {
+            if (preg_match($regex, (string) $vs, $m)) {
+                $val = (int) $m[1];
+                if ($val > $max) {
+                    $max = $val;
+                }
+            }
+        }
+        return $max;
+    }
+
+    /**
+     * Postaví [PCRE regex, LIKE prefix] pro zpětné vyparsování čítače z interního čísla.
+     * Datumové placeholdery se dosadí konkrétně, {PP} → [A-Z]{2}, {C+} → (\d+).
+     * LIKE prefix = literály (+ '__' za {PP}) až po první {C+} pro zúžení skenu.
      *
-     * No-op pro: draft (bez varsymbolu), ručně zadaná / cizí čísla (nevypadají jako
-     * auto-generovaná) a když už prefix sedí. Pozná i starý formát PF-YYYYMM-NNNN.
+     * @return array{0: ?string, 1: string}  [regex nebo null (šablona bez čítače), likePrefix]
+     */
+    private function buildPurchaseMatcher(string $template, string $period): array
+    {
+        if (!preg_match('/\{C+\}/', $template)) {
+            return [null, ''];
+        }
+        $withDate = strtr($template, [
+            '{YYYY}' => substr($period, 0, 4),
+            '{YY}'   => substr($period, 2, 2),
+            '{MM}'   => substr($period, 4, 2),
+        ]);
+        // Sentinely mimo regex/LIKE escaping.
+        $marked = str_replace('{PP}', "\x00P\x00", $withDate);
+        $marked = preg_replace('/\{C+\}/', "\x00C\x00", $marked) ?? $marked;
+        $parts  = preg_split('/(\x00P\x00|\x00C\x00)/', $marked, -1, PREG_SPLIT_DELIM_CAPTURE) ?: [];
+
+        $regex = '';
+        $likePrefix = '';
+        $beforeCounter = true;
+        foreach ($parts as $p) {
+            if ($p === "\x00P\x00") {
+                $regex .= '[A-Z]{2}';
+                if ($beforeCounter) {
+                    $likePrefix .= '__';
+                }
+            } elseif ($p === "\x00C\x00") {
+                $regex .= '(\d+)';
+                $beforeCounter = false;
+            } elseif ($p !== '') {
+                $regex .= preg_quote($p, '/');
+                if ($beforeCounter) {
+                    $likePrefix .= $this->escapeLikePurchase($p);
+                }
+            }
+        }
+        return ['/^' . $regex . '$/', $likePrefix];
+    }
+
+    /** Escapuje znaky se zvláštním významem v LIKE (% _ \). */
+    private function escapeLikePurchase(string $value): string
+    {
+        return str_replace(['\\', '%', '_'], ['\\\\', '\\%', '\\_'], $value);
+    }
+
+    /** Zvedne counter období na minimálně $value (GREATEST, nikdy nesnižuje); vrací výslednou hodnotu. */
+    private function liftPurchaseCounterTo(int $supplierId, string $period, int $value): int
+    {
+        $pdo = $this->db->pdo();
+        $pdo->prepare(
+            'INSERT INTO purchase_invoice_counters (supplier_id, period, last_number)
+             VALUES (?, ?, ?)
+             ON DUPLICATE KEY UPDATE last_number = GREATEST(last_number, VALUES(last_number))'
+        )->execute([$supplierId, $period, $value]);
+        $sel = $pdo->prepare(
+            'SELECT last_number FROM purchase_invoice_counters WHERE supplier_id = ? AND period = ?'
+        );
+        $sel->execute([$supplierId, $period]);
+        return (int) $sel->fetchColumn();
+    }
+
+    /**
+     * Po změně daňového uplatnění (vat_deduction / tax_deductible) přepíše daňový
+     * PREFIX ({PP}) auto-generovaného interního čísla na ten odpovídající novému
+     * typu — číselnou řadu i datum ponechá. Např. PF2602001 → NN2602001.
+     *
+     * No-op pro: draft (bez čísla), šablonu bez {PP} (pevný prefix, např. legacy
+     * 'PF-…'), ručně zadaná / cizí čísla (neodpovídají šabloně) a když prefix sedí.
      */
     public function reprefixVarsymbol(int $id, int $supplierId): void
     {
@@ -1013,19 +1202,45 @@ final class PurchaseInvoiceRepository
         $vs = (string) ($row['varsymbol'] ?? '');
         if ($vs === '') return; // draft / bez čísla
 
-        $cur = substr($vs, 0, 2);
-        $rest = substr($vs, 2);
-        // Auto-číslo = známý prefix + buď nový formát (YYMMCCC… = ≥7 číslic),
-        // nebo starý PF-YYYYMM-NNNN. Cokoli jiného (ruční / cizí) neměníme.
-        $isAuto = in_array($cur, ['PF', 'PN', 'KU', 'KN', 'NU', 'NN'], true)
-            && (preg_match('/^\d{7,}$/', $rest) === 1 || preg_match('/^-\d{6}-\d+$/', $rest) === 1);
-        if (!$isAuto) return;
+        $template = $this->purchaseTemplate($supplierId);
+        // Bez {PP} se daňový prefix v čísle nevyskytuje → není co přepisovat (např. legacy 'PF-…').
+        if (!str_contains($template, '{PP}')) return;
 
         $expected = self::varsymbolPrefix((string) ($row['vat_deduction'] ?? 'full'), (bool) ($row['tax_deductible'] ?? 1));
-        if ($cur === $expected) return;
+        $newVs = $this->swapTemplatePrefix($template, $vs, $expected);
+        if ($newVs === null || $newVs === $vs) return; // ruční / cizí číslo, nebo prefix už sedí
 
         $this->db->pdo()->prepare('UPDATE purchase_invoices SET varsymbol = ? WHERE id = ? AND supplier_id = ?')
-            ->execute([$expected . $rest, $id, $supplierId]);
+            ->execute([$newVs, $id, $supplierId]);
+    }
+
+    /**
+     * Nahradí daňový prefix ({PP}) v interním čísle dle šablony za $newPrefix, ostatní
+     * segmenty (datum, čítač, literály) zachová. Vrací null, když číslo neodpovídá
+     * struktuře šablony (ruční / cizí číslo). Date-agnostické.
+     */
+    private function swapTemplatePrefix(string $template, string $varsymbol, string $newPrefix): ?string
+    {
+        $tokens = preg_split('/(\{PP\}|\{YYYY\}|\{YY\}|\{MM\}|\{C+\})/', $template, -1, PREG_SPLIT_DELIM_CAPTURE) ?: [];
+        $regex  = '';
+        foreach ($tokens as $tok) {
+            $regex .= match (true) {
+                $tok === '{PP}'                       => '(?<pp>[A-Z]{2})',
+                $tok === '{YYYY}'                     => '\d{4}',
+                $tok === '{YY}', $tok === '{MM}'      => '\d{2}',
+                (bool) preg_match('/^\{C+\}$/', $tok) => '\d+',
+                $tok === ''                           => '',
+                default                               => preg_quote($tok, '/'),
+            };
+        }
+        if (!preg_match('/^' . $regex . '$/', $varsymbol, $m, PREG_OFFSET_CAPTURE)) {
+            return null;
+        }
+        [$pp, $offset] = $m['pp'];
+        if ($pp === $newPrefix) {
+            return $varsymbol;
+        }
+        return substr($varsymbol, 0, $offset) . $newPrefix . substr($varsymbol, $offset + strlen($pp));
     }
 
     /**

@@ -88,6 +88,35 @@ final class Bootstrap
             Connection::class      => fn (ContainerInterface $c) => new Connection($c->get(Config::class), $c->get(LoggerInterface::class)),
             RedisProbe::class      => fn (ContainerInterface $c) => new RedisProbe($c->get(Config::class)),
             RedisFactory::class    => fn (ContainerInterface $c) => new RedisFactory($c->get(Config::class)),
+            \MyInvoice\Service\Signing\SigningPassphraseProviderInterface::class => fn (ContainerInterface $c) => new \MyInvoice\Service\Signing\SigningPassphraseProvider(
+                $c->get(Config::class),
+                $c->get(\MyInvoice\Service\Auth\SecretEncryption::class),
+            ),
+            \MyInvoice\Service\Signing\Pdf\PdfSigningService::class => fn (ContainerInterface $c) => new \MyInvoice\Service\Signing\Pdf\PdfSigningService(
+                $c->get(Config::class),
+                $c->get(\MyInvoice\Service\ActivityLogger::class),
+                $c->get(\MyInvoice\Service\Signing\Pdf\NativePdfSignatureBackend::class),
+                $c->get(\MyInvoice\Repository\SigningProfileRepository::class),
+                $c->get(\MyInvoice\Service\Signing\SigningPassphraseProviderInterface::class),
+            ),
+            \MyInvoice\Service\Mail\Mailer::class => fn (ContainerInterface $c) => new \MyInvoice\Service\Mail\Mailer(
+                $c->get(Config::class),
+                $c->get(LoggerInterface::class),
+                $c->get(Connection::class),
+                $c->get(\MyInvoice\Repository\EmailTemplateRepository::class),
+                $c->get(\MyInvoice\Service\Signing\Email\EmailSigningService::class),
+            ),
+            \MyInvoice\Service\Bank\EmailNotice\ImapMailboxClientInterface::class => fn (ContainerInterface $c) => new \MyInvoice\Service\Bank\EmailNotice\WebklexImapMailboxClient(
+                $c->get(\MyInvoice\Service\Bank\EmailNotice\EmailNoticeTextNormalizer::class),
+            ),
+            \MyInvoice\Service\Bank\EmailNotice\Parser\BankEmailNoticeParserRepository::class => fn (ContainerInterface $c) => new \MyInvoice\Service\Bank\EmailNotice\Parser\BankEmailNoticeParserRepository(
+                $c->get(Connection::class),
+                self::bankEmailNoticeParsers($c, $config),
+            ),
+            \MyInvoice\Service\Bank\StatementMatcher::class => fn (ContainerInterface $c) => new \MyInvoice\Service\Bank\StatementMatcher(
+                $c->get(Connection::class),
+                $c->get(\MyInvoice\Service\Invoice\FinalFromProformaCreator::class),
+            ),
 
             // IpMatcher má v konstruktoru volitelný `?Config $config = null`. Autowiring
             // takový parametr neresolvuje (dosadí default null), takže clientIpFromRequest()
@@ -125,6 +154,31 @@ final class Bootstrap
         $app->addErrorMiddleware($displayErrors, true, true, $container->get(LoggerInterface::class));
 
         return $app;
+    }
+
+    /**
+     * Resolve class names ze slotů cfg.bank_email.notice_parsers na instance.
+     * Validaci (interface, prázdný/duplicitní key) dělá konstruktor
+     * BankEmailNoticeParserRepository — tady se jen vypínají sloty (null/false/'').
+     *
+     * @return list<object>
+     */
+    private static function bankEmailNoticeParsers(ContainerInterface $container, Config $config): array
+    {
+        $classes = $config->get('bank_email.notice_parsers', []);
+        if (!is_array($classes) || $classes === []) {
+            throw new \RuntimeException('cfg.bank_email.notice_parsers musí být neprázdná mapa parser slot => class.');
+        }
+
+        $parsers = [];
+        foreach ($classes as $class) {
+            if ($class === null || $class === false || trim((string) $class) === '') {
+                continue; // slot vypnutý přes cfg.php
+            }
+            $parsers[] = $container->get(trim((string) $class));
+        }
+
+        return $parsers;
     }
 
     private static function resolveLogLevel(string $level): \Monolog\Level

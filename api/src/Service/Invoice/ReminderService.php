@@ -10,6 +10,7 @@ use MyInvoice\Service\ActivityLogger;
 use MyInvoice\Service\Mail\InvoiceEmailVarsBuilder;
 use MyInvoice\Service\Mail\Mailer;
 use MyInvoice\Infrastructure\Config\Config;
+use MyInvoice\Service\Pdf\InvoicePdfRenderer;
 use MyInvoice\Service\Validation\InvoiceAmountPolicy;
 
 /**
@@ -27,6 +28,7 @@ final class ReminderService
         private readonly InvoiceRepository $repo,
         private readonly Connection $db,
         private readonly PublicInvoiceLinkFactory $linkFactory,
+        private readonly InvoicePdfRenderer $renderer,
         private readonly Mailer $mailer,
         private readonly InvoiceEmailVarsBuilder $varsBuilder,
         private readonly ActivityLogger $logger,
@@ -91,19 +93,36 @@ final class ReminderService
         $invoiceViewUrl = $this->linkFactory->build($publicToken);
 
         $locale = (string) ($invoice['language'] ?? 'cs');
-        $vars = $this->varsBuilder->buildReminder($invoice, $daysOverdue, $locale, $invoiceViewUrl);
 
-        $templateCode = $invoice['invoice_type'] === 'proforma' ? 'proforma_reminder' : 'invoice_reminder';
-        $this->mailer->sendTemplate(
-            $templateCode,
-            $locale,
-            $to,
-            $vars,
-            null,
-            $cc,
-            [],
-            [],
-        );
+        // Reálné selhání (PDF/SMTP) zalogujeme jako `invoice.reminder_failed`, ať je
+        // v přehledu odeslaných e-mailů vidět „nebylo odesláno". Validační DomainException
+        // výše se sem nedostanou (házejí dřív). Po zalogování chybu propustíme dál —
+        // caller (manual/bulk/cron) si ji ošetří jako dosud.
+        try {
+            $pdfPath = $this->renderer->render($invoiceId, false, $userId);
+            $vars = $this->varsBuilder->buildReminder($invoice, $daysOverdue, $locale);
+            $vars['invoice_view_url'] = $invoiceViewUrl;
+            $templateCode = $invoice['invoice_type'] === 'proforma' ? 'proforma_reminder' : 'invoice_reminder';
+            $this->mailer->sendTemplate(
+                $templateCode,
+                $locale,
+                $to,
+                $vars,
+                null,
+                $cc,
+                [],
+                [['path' => $pdfPath, 'name' => basename($pdfPath), 'contentType' => 'application/pdf']],
+                $userId,
+            );
+        } catch (\Throwable $e) {
+            $this->logger->log('invoice.reminder_failed', $userId, 'invoice', $invoiceId, [
+                'to'           => $to,
+                'cc'           => $cc,
+                'days_overdue' => $daysOverdue,
+                'error'        => mb_substr($e->getMessage(), 0, 500),
+            ], $ip, $userAgent);
+            throw $e;
+        }
 
         // Status → 'reminded' (z 'paid' nepřechází, protože jsme to vyloučili výše)
         $this->db->pdo()->prepare(

@@ -15,6 +15,7 @@ use MyInvoice\Service\Invoice\PublicInvoiceLinkFactory;
 use MyInvoice\Service\IpMatcher;
 use MyInvoice\Service\Mail\InvoiceEmailVarsBuilder;
 use MyInvoice\Service\Mail\Mailer;
+use MyInvoice\Service\Pdf\InvoicePdfRenderer;
 use Psr\Http\Message\ResponseInterface as Response;
 use Psr\Http\Message\ServerRequestInterface as Request;
 
@@ -29,6 +30,7 @@ final class SendTestEmailAction
 {
     public function __construct(
         private readonly InvoiceRepository $repo,
+        private readonly InvoicePdfRenderer $renderer,
         private readonly Mailer $mailer,
         private readonly InvoiceEmailVarsBuilder $varsBuilder,
         private readonly PublicInvoiceLinkFactory $linkFactory,
@@ -60,11 +62,23 @@ final class SendTestEmailAction
             return Json::error($response, 'no_test_recipient', 'Supplier nemá email a cfg.smtp.from_email není nastaveno.', 500);
         }
 
+        $user = (array) $request->getAttribute(AuthMiddleware::ATTR_USER, []);
+        $userId = isset($user['id']) ? (int) $user['id'] : null;
+
+        try {
+            $pdfPath = $this->renderer->render($id, false, $userId);
+        } catch (\Throwable $e) {
+            return Json::error($response, 'pdf_failed', 'Nepodařilo se vygenerovat PDF: ' . $e->getMessage(), 500);
+        }
+        $emailAttachments = [
+            ['path' => $pdfPath, 'name' => basename($pdfPath), 'contentType' => 'application/pdf'],
+        ];
         $publicToken = $this->repo->rotatePublicViewToken($id);
         $invoiceViewUrl = $this->linkFactory->build($publicToken);
 
         $locale = (string) ($invoice['language'] ?? 'cs');
-        $vars = $this->varsBuilder->build($invoice, true, $locale, $invoiceViewUrl);
+        $vars = $this->varsBuilder->build($invoice, true, $locale);
+        $vars['invoice_view_url'] = $invoiceViewUrl;
 
         $smtpResponse = '';
         try {
@@ -76,13 +90,19 @@ final class SendTestEmailAction
                 null,
                 [],
                 [],
-                [],
+                $emailAttachments,
+                $userId,
             );
         } catch (\Throwable $e) {
+            $user = (array) $request->getAttribute(AuthMiddleware::ATTR_USER, []);
+            $ip = $this->ipMatcher->clientIpFromRequest($request->getServerParams());
+            $this->logger->log('email.test_failed', $user['id'] ?? null, 'invoice', $id, [
+                'to' => $testRecipient,
+                'error' => mb_substr($e->getMessage(), 0, 500),
+            ], $ip, $request->getHeaderLine('User-Agent'));
             return Json::error($response, 'send_failed', 'Email se nepodařilo odeslat: ' . $e->getMessage(), 502);
         }
 
-        $user = (array) $request->getAttribute(AuthMiddleware::ATTR_USER, []);
         $ip = $this->ipMatcher->clientIpFromRequest($request->getServerParams());
         $this->logger->log('email.sent_test', $user['id'] ?? null, 'invoice', $id, [
             'to'            => $testRecipient,

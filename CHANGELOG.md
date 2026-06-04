@@ -5,6 +5,152 @@ All notable changes to MyInvoice.cz are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.13.1] — 2026-06-03
+
+Nové systémové parsery bankovních e-mailových avíz **UniCredit Bank** a **ČSOB** (díky [@blondak](https://github.com/blondak), [#106](https://github.com/radekhulan/myinvoice/pull/106), navazuje na [#58](https://github.com/radekhulan/myinvoice/issues/58)) + zpevnění celé parser registry.
+
+### Added
+
+- **Systémové parsery UniCredit Bank („Informace o pohybu na účtu") a ČSOB („Moje info - Avízo") ([#106](https://github.com/radekhulan/myinvoice/pull/106)).** Vedle Raiffeisenbank a České spořitelny tak avíza fungují out-of-the-box pro čtyři banky. Registr parserů je nově **typovaný a rozšiřitelný přes `cfg.php`** (`bank_email.notice_parsers` — slot lze vypnout `null`/`false`), systémové parsery dodávají svůj provider z kódu bez DB řádku a v UI se vybírají přes jednotnou referenci (`system:<kód>` / `db:<id>`). Unit testy parserů, migrace `parser_type` ENUM → VARCHAR.
+
+### Changed
+
+- **Test parseru umí explicitně otestovat i vypnutý provider** (ladění konfigurace před zapnutím); automatický výběr i scan používají dál jen zapnuté.
+- **Výběr parseru v mapování účtů nabízí jen zapnuté providery**; aktuálně vybraný vypnutý zůstává viditelný se suffixem „vypnutý".
+
+### Fixed
+
+- **Přísnější ověření odesílatele u systémových parserů.** Doména se kontroluje na konci adresy (vč. subdomén) místo pouhého výskytu v textu — `attacker@csob.cz.evil.com` už neprojde.
+- **Validace `system:` referencí v mapování** proti registru parserů — neznámý kód degraduje na automatický výběr místo slepého uložení.
+
+## [4.13.0] — 2026-06-02
+
+Velká novinka: **automatické párování plateb z bankovních e-mailových avíz přes IMAP** ([#104](https://github.com/radekhulan/myinvoice/issues/104)). K tomu sjednocení správy měn a bankovních účtů do jedné stránky, nová sekce **E-maily** v menu a řada oprav.
+
+### Added
+
+- **Bankovní e-mailová avíza přes IMAP ([#104](https://github.com/radekhulan/myinvoice/issues/104)).** Příchozí platby se umí spárovat na faktury z bankovních e-mailových avíz. Read-only IMAP polling (zprávy se neoznačují jako přečtené), **registr parserů** (předkonfigurovaný Raiffeisenbank „Pohyb na účtě" + univerzální **regex parser** s vlastními poli), mapování **bankovní účet → IMAP účet → parser** s tolerancí částky, deduplikace zpráv a log zpracování. Více IMAP schránek (každá banka vlastní), akce po zpracování (flag / přesun / označit přečtené). Konfigurace na nové stránce **Systém → Bankovní účty**, cron `cron-bank-email-notices` (každých 30 min). Hesla schránek šifrovaná (AES‑256‑GCM).
+- **Ověření autenticity avíz (DKIM/DMARC).** Volitelně per IMAP účet: zpracují se jen e-maily, které přijímací server označil v hlavičce `Authentication-Results` jako `dkim`/`dmarc=pass` se správnou doménou odesílatele — ostatní se zamítnou (`security_rejected`). Volitelné připnutí důvěryhodného `authserv-id` proti podvržení hlavičky. Brání podvržení falešného avíza vedoucímu k automatickému označení faktury jako zaplacené.
+- **Sekce „E-maily" v menu (Systém).** Záložky **Odeslané e-maily**, **E-mail šablony** a **Elektronické podpisy** sloučené pod jednu položku (vzor Číselníků).
+
+### Changed
+
+- **Sjednocení správy měn a bankovních účtů.** Měny i bankovní účty se nově spravují výhradně na stránce **Bankovní účty** (přesun z Nastavení a z Číselníku — tab „Měny" v Číselníku odebrán). Editor účtu je plnohodnotný (kód, symbol, desetinná místa) včetně načtení účtu z registru plátců DPH (zobrazí se jen když má dodavatel vyplněné DIČ).
+- **Reorganizace menu Systém.** „E-maily" za „Uživatelé", „Externí integrace" přesunuta za „Log".
+- **Sjednocení „e-mail" v celém UI** (dříve místy „email").
+- **`reset.php` maže databázi dynamicky.** Místo zastaralého napevno psaného seznamu maže všechny tabulky kromě keep-listu (globální číselníky + schéma) — nezaostává za schématem a vyčistí i nové tabulky včetně citlivých dat (IMAP hesla, podpisové certifikáty). Globální seedy (klasifikace DPH, výchozí parser) zůstávají.
+
+### Fixed
+
+- **Správné počítání použití měny.** Smazání měny se nově blokuje, pokud je použita na **kterémkoli** dokladu (vydané i přijaté faktury, zakázky, pravidelné fakturace) — dřív se počítaly jen vydané faktury a smazání pak selhalo až na úrovni databáze. Friendly hláška místo holé chyby.
+- **Chybové hlášky u operací s měnami/avízy.** Operace, které dřív při chybě selhaly tiše (uživatel nic neviděl), teď zobrazí konkrétní hlášku z backendu.
+- **Mobilní zobrazení Bankovních účtů.** Tabulka účtů má mobilní karty; hlavičky sekcí se zalomí a tlačítka nepřetékají.
+- **Admin-only přístup ke čtecím endpointům bankovních avíz** (dříve jen přes frontend guard).
+- **S/MIME test na Windows.** Testovací fixtura si dohledá `openssl.cnf`, takže neselhává mimo CI.
+
+## [4.12.2] — 2026-06-02
+
+Číslování interních čísel přijatých faktur je nově **konfigurovatelné per dodavatel** a dotažené ošetření kolizí (obdoba vydaných faktur). Plus oprava ověření DIČ u českých OSVČ. Navázáno na [#103](https://github.com/radekhulan/myinvoice/issues/103).
+
+### Added
+
+- **Vlastní šablona interního čísla přijaté faktury ([#103](https://github.com/radekhulan/myinvoice/issues/103)).** V **Nastavení → Číslování faktur** přibylo pole **„Šablona pro přijatou fakturu"** (stávající „Šablona pro fakturu" se přejmenovala na **„Šablona pro vydanou fakturu"**). Placeholdery: `{PP}` daňový prefix (PF/PN plný nárok, KU/KN krácený, NU/NN bez nároku), `{YYYY}`/`{YY}`/`{MM}` datum, `{C+}` čítač. Výchozí (a beze změny pro existující instalace) zůstává `{PP}{YY}{MM}{CCC}` → `PF2605001`; lze zadat i legacy `PF-{YYYY}{MM}-{CCCC}` → `PF-202605-0001`. Scope čítače plyne ze šablony (s `{MM}` měsíční řada, jinak roční). Živý náhled příštího čísla přímo u pole.
+
+### Fixed
+
+- **Ošetření kolize ručního interního čísla přijaté faktury ([#103](https://github.com/radekhulan/myinvoice/issues/103)).** Doteď ruční zadání už obsazeného čísla končilo holou chybou 500 a auto-generátor nepřeskakoval obsazená čísla (ručně zadané číslo „dopředu" mohlo shodit přechod na stav Přijatá). Nově je generátor **samoopravný** (přeskočí obsazená, skočí za nejvyšší použité číslo řady) a kolize ručního čísla vrátí srozumitelnou hlášku **409** místo 500 — stejně jako u vydaných faktur. Unikátní index zůstává definitivní pojistka proti duplicitám.
+- **Ověření DIČ u českých OSVČ (rodné číslo) ve VIES.** Tuzemská DIČ ve tvaru `CZ` + rodné číslo (9–10 číslic, typicky OSVČ) se chybně hlásila jako „neplatné / neexistuje", protože se číselná část posílala do ARES jako IČO (8 číslic). Nově se taková DIČ ověří přímo přes autoritativní VIES (např. `CZ8901311870` → platné).
+
+### Changed
+
+- **Upřesnění interního číslování přijatých faktur v manuálu a UI.** Zastaralý formát `PF-YYYYMM-NNNN` nahrazen aktuálním `PF2605001` (popisky pole, placeholder, manuál); doplněn popis prefixů dle daňového typu a chování čítače.
+
+## [4.12.1] — 2026-06-02
+
+Oprava AI extrakce přijatých dokladů: u faktur s více položkami se už **nezahazuje itemizace**. Návazné na [#99](https://github.com/radekhulan/myinvoice/issues/99).
+
+### Fixed
+
+- **AI extrakce zachová položky u dokladů s cenami včetně DPH.** Víceřádkový doklad, kde jsou jednotkové ceny ve skutečnosti brutto (e-shopy se sloupcem „Cena celkem s DPH"), se už neslučuje na jediný základový řádek. Rozpozná se podle konzistentní jednosazbové rekapitulace, kde součet řádků odpovídá celkové částce s DPH; faktura se vede v režimu „ceny s DPH" a DPH se dopočte shora koeficientem (§ 37 ZDPH), přesná rekapitulace dokladu se připne přes ruční override (§ 73). Všechny položky zůstanou zachované a celek sedí na haléř.
+- **AI extrakce respektuje řádkovou částku z dokladu (autoservisy).** Nové pole `line_total_without_vat` (sloupec „Částka" / „Celkem bez DPH" / „Základ"): když součin množství × jednotková cena neodpovídá řádkové částce na dokladu (typicky autoservisy, kde „Cena" není jednotková cena k násobení množstvím — např. „AW 8,29 × 1 980" má řádkovou částku 1 980), vezme se řádková částka jako pravda. Doklad si tak zachová všechny položky místo sloučení na jediný řádek.
+
+## [4.12.0] — 2026-06-02
+
+Velká novinka: **elektronické podpisy**. Vydané faktury a výkazy práce lze podepisovat certifikátem (**PAdES**) a odchozí e-maily přes **S/MIME** — vše přes nové podpisové profily s konfigurací per výstup. K tomu oprava daňově korektní AI extrakce přijatých dokladů a několik UX vylepšení.
+
+### Added
+
+- **Elektronický podpis PDF certifikátem (PAdES) ([#44](https://github.com/radekhulan/myinvoice/issues/44)).** Vydané faktury a samostatné výkazy práce lze podepsat certifikátem přes nové **podpisové profily** (firemní profil dodavatele i osobní profily uživatelů). Per-výstup **Konfigurace podpisů** (zda a odkud se bere profil), per-doklad výběr na detailu faktury, **PAdES-B** / **PAdES-T** s časovým razítkem (RFC 3161 TSA), politika hesla k certifikátu (šifrované uložení / passphrase file), volba chování při chybě (`fallback_unsigned` / `fail_closed` / `skip_when_unconfigured`) a kompletní audit. Vlastní admin stránka **Systém → Elektronické podpisy**; RBAC pro admina, účetního i readonly. Měkký fallback: když podpis selže nebo není nakonfigurovaný, doklad se vydá nepodepsaný (pokud není nastaveno tvrdé selhání). Detailní postup v [manuálu, kapitola 28](manual/28_Elektronicke_podpisy.md).
+- **S/MIME podepisování odchozích e-mailů ([#45](https://github.com/radekhulan/myinvoice/issues/45)).** Odesílané faktury, upomínky, schvalovací e-maily i poděkování za úhradu lze podepsat S/MIME přes tytéž podpisové profily (jednotný certifikát profilu pro PDF i e-mail). Opt-in a fail-open — selhání podpisu nikdy nezablokuje doručení e-mailu (mimo explicitní `fail_closed`).
+- **AI extrakce — plocha „Extrahovat z PDF" nad konfigurací ([#97](https://github.com/radekhulan/myinvoice/issues/97)).** Když je AI už nakonfigurované, je opakovaná akce (nahrání dokladu) primární a jde nahoru; konfigurace (API klíč + model) se sbalí do sekce „Nastavení AI".
+- **Faktura PDF — tlačítko „Stáhnout PDF" + indikace podpisu ([#92](https://github.com/radekhulan/myinvoice/issues/92)).** Přejmenované tlačítko (sjednoceno s manuálem) a pravdivý badge **„Podepsáno"**, který se ukáže jen když se daný doklad skutečně podepíše (zapnutý výstup + profil s certifikátem), plus tooltip že se PDF po úpravě automaticky přegeneruje a podepíše.
+
+### Fixed
+
+- **Daňově korektní AI extrakce přijatých dokladů ([#99](https://github.com/radekhulan/myinvoice/issues/99)).** Účtenky za PHM, kde je „cena/litr" ve skutečnosti brutto, se už nepřepočítávají na vlastní (mírně odlišný) základ s **uměle dopočítaným zaokrouhlením**. Když doklad obsahuje vnitřně konzistentní rekapitulaci DPH, eviduje se **verbatim přesně dle dokladu** (§ 73 odst. 6 / § 30 / § 100 ZDPH); jinak se dopočítá shora z celkové částky. Přijatý doklad je záznam, ne výsledek kalkulačky.
+- **Vlastní e-mailová šablona renderuje proměnné v předmětu ([#98](https://github.com/radekhulan/myinvoice/issues/98)).** Předmět vlastní DB šablony se nyní renderuje stejným sandboxovaným Twigem jako tělo e-mailu — místo literálu `{{ invoice.varsymbol }}` se doplní skutečné hodnoty.
+
+## [4.11.1] — 2026-06-01
+
+Oprava: pravidelná fakturace u **neplátce DPH** nově nevyplňuje DPH — chová se stejně jako jednorázové vystavení faktury.
+
+### Fixed
+
+- **Pravidelná fakturace u neplátce DPH nevyplňuje DPH ([#95](https://github.com/radekhulan/myinvoice/issues/95)).** Šablona pravidelné fakturace dříve vždy nasazovala výchozí (nenulovou) sazbu DPH, takže neplátci generovala faktury s DPH — na rozdíl od jednorázového editoru, který pro neplátce volí 0 % „Osvobozeno". Nově se formulář šablony řídí příznakem plátce u dodavatele stejně jako editor faktury (skrytý výběr DPH i přepínač „ceny s DPH", nulová sazba). Navíc to **autoritativně hlídá i generátor**: při vystavení faktury ze šablony u neplátce sjednotí sazby položek na 0 % — takže se opraví i šablony uložené dříve s nominální sazbou (vč. cron generování, otevřených konceptů i REST API). DPH na faktuře vždy určuje výhradně dodavatel, ne plátcovství odběratele.
+
+### Build
+
+- **Docker build kopíruje `pnpm-workspace.yaml`.** Multi-arch image build padal na `ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION` (vite@8.0.16), protože Dockerfile kopíroval jen `package.json` + `pnpm-lock.yaml`, ale ne supply-chain whitelist z `pnpm-workspace.yaml`. Novější `pnpm@latest` začalo defaultně vynucovat minimální stáří balíků; bez whitelistu odmítlo záměrně povýšenou (čerstvou) verzi vite. Workspace config se nově kopíruje před `pnpm install`.
+
+## [4.11.0] — 2026-06-01
+
+Přehled odeslaných e-mailů ([#88](https://github.com/radekhulan/myinvoice/issues/88)) nově ukazuje i **neúspěšná odeslání** — hned je vidět, co se nepodařilo doručit. Upomínky jsou konfigurovatelné ([#91](https://github.com/radekhulan/myinvoice/issues/91)): vypnutí u konkrétní faktury a nastavitelný práh „po kolika dnech po splatnosti". Plus drobná vylepšení použitelnosti a opravy pohledávkových přehledů.
+
+### Added
+
+- **Přehled odeslaných e-mailů ([#88](https://github.com/radekhulan/myinvoice/issues/88)).** Nová admin stránka **Systém → Odeslané e-maily** — všechny e-maily rozeslané aplikací (odeslání faktur, upomínky, schvalovací upomínky, poděkování za úhradu, připomínky konceptů, testovací odeslání) v jednom filtrovatelném pohledu s odkazem na fakturu a příjemci. Automatická (cron) odeslání jsou připsána „Systému". Čte se z existujícího auditního logu, žádná změna schématu.
+- **Viditelnost neúspěšných odeslání.** Přehled ukazuje i e-maily, které se **nepodařilo odeslat** (nedostupný SMTP, odmítnutý příjemce, chyba PDF) — červený stav **Neodesláno** s textem chyby, filtr stavu (Vše / Odesláno / Neodesláno) a zkratka „Neodesláno: N". Selhání se nově loguje napříč všemi cestami odeslání (ruční i hromadná upomínka, cron upomínek i schvalovacích upomínek, odeslání faktury, auto-odeslání po schválení, poděkování za úhradu, připomínka konceptu, testovací odeslání).
+- **Konfigurovatelné upomínky ([#91](https://github.com/radekhulan/myinvoice/issues/91)).** Per-faktura přepínač **Posílat automatické upomínky** v editoru (výchozí zapnuto) — vypnutím cron tu jednu fakturu přeskočí, i když má dodavatel a klient upomínky zapnuté; ruční i hromadné odeslání funguje dál. Navíc nastavitelný **práh dní po splatnosti** pro první upomínku per dodavatel (předvolby 3 dny / týden / měsíc / vlastní); CLI `--days` ho při potřebě přebije.
+- **Měsíční export — výchozí minulý měsíc.** Stránka měsíčního exportu nově předvyplní **předchozí** měsíc místo aktuálního (export se typicky dělá po uzávěrce skončeného měsíce).
+
+### Changed
+
+- **Přepínač upomínek v editoru faktury** se přesunul do pravého boxu *Datumy*, pod pole *Splatnost* — logicky vedle data, od kterého se upomínky odvíjejí.
+
+### Fixed
+
+- **Klon faktury bere splatnost stejně jako nová faktura ([#90](https://github.com/radekhulan/myinvoice/issues/90)).** Klon vydané faktury bez zakázky dříve dostal splatnost = datum vystavení (0 dní); nově se počítá stejnou prioritou zakázka → klient → dodavatel → 7 dní. Klon navíc zdědí i přepínač automatických upomínek ze zdrojové faktury.
+- **Doklad ze zaplacené zálohy už nestraší jako nezaplacený.** Finální daňový doklad vystavený z plně uhrazené proformy (`amount_to_pay = 0`) se přestal objevovat v přehledech „Po splatnosti", aging, cash-flow i v upomínkách. Pohledávkové dotazy nově vylučují plně uhrazené doklady a takový doklad se při vystavení rovnou označí jako zaplacený (kvůli kasovým reportům).
+- **Přehled odeslaných e-mailů padal na 500 (MariaDB).** Předchozí verze používala MySQL-only operátor `->>`, který MariaDB neumí; nahrazeno za `JSON_UNQUOTE(JSON_EXTRACT(...))`.
+
+## [4.10.0] — 2026-06-01
+
+Odolné a samoopravné číslování faktur ([#85](https://github.com/radekhulan/myinvoice/issues/85)) — automatické vyhnutí se kolizím čísel, dorovnání číselných řad po importu a srozumitelné hlášky místo chyby 500. Plus oprava jednotkové ceny s DPH v ISDOC u tuzemského reverse charge.
+
+### Added
+
+- **Samoopravné číslování faktur ([#85](https://github.com/radekhulan/myinvoice/issues/85)).** Když je interní počítadlo pozadu za již použitými čísly (po importu historických dokladů, ruční úpravě v DB nebo ručním číslování), generátor nově obsazené číslo nevezme: skočí za nejvyšší skutečně použité číslo dané řady (typ + období) a najde první volné. Místo žádné ruční administrace tak číslování „dožene" samo. Vše se opírá o unikátní index `(supplier_id, varsymbol)` jako definitivní pojistku.
+- **Dorovnání číselných řad po importu.** Po importu vydaných faktur (ISDOC/Pohoda) se počítadlo automaticky posune za nejvyšší importované číslo odpovídající aktuálnímu formátu, takže další vystavená faktura na něj plynule naváže.
+- **Upozornění u ručního čísla.** Když v editoru zadáš vlastní číslo faktury, objeví se hláška, že obchází automatickou řadu a za jeho jedinečnost a návaznost ručíš sám.
+
+### Fixed
+
+- **Kolize čísla dokladu už nekončí chybou 500.** Zadání čísla, které už u dodavatele existuje (ruční číslo při založení, úpravě i vystavení), nově vrací srozumitelnou hlášku „číslo už existuje" místo neošetřené databázové chyby. Generátor se duplicitám aktivně vyhýbá; tahle pojistka řeší i souběžné vystavení (race condition).
+- **ISDOC, tuzemský reverse charge — jednotková cena s DPH.** U faktur v režimu přenesení daňové povinnosti se `UnitPriceTaxInclusive` dopočítávala nominální sazbou (např. 121 000 z 100 000), ačkoli daň se přenáší na odběratele (= 0). Řádek si tak protiřečil s `LineExtensionAmountTaxInclusive`. Nově se jednotková cena s DPH odvozuje z řádkového součtu s DPH, takže u reverse charge správně odpovídá základu (daň 0). Rekapitulace DPH s příznakem přenesení i celkové částky byly korektní už dříve.
+
+## [4.9.4] — 2026-06-01
+
+Oprava vystavování faktur v režimu přenesení daňové povinnosti (reverse charge), zachování poznámky pod položkami při vzniku daňového dokladu ze zálohy a odolnost ukládání faktur vůči neproběhlé migraci.
+
+### Changed
+
+- **Reverse charge je volbou na faktuře, ne jen vlastností odběratele.** Checkbox „přenesení daňové povinnosti (DPH 0 %)" se v editoru vydané faktury nově nabízí vždy, když je dodavatel plátce DPH — dosud se zobrazil jen u klienta, který měl příznak `reverse_charge` ve svém profilu. Příznak v profilu klienta nadále funguje jako výchozí předvyplnění při výběru klienta, ale uživatel ho může na konkrétním dokladu přepnout (typicky tuzemský PDP u stavebních prací § 92e ZDPH). RC checkbox zůstává skrytý jen u neplátce DPH, který RC vystavit nemůže.
+
+### Fixed
+
+- **Daňový doklad ze zaplacené zálohy nepřenášel poznámku pod položkami.** Při vzniku finální faktury ze zaplacené zálohové faktury se kopírovala jen poznámka nad položkami (nahrazená textem „Daňový doklad k zálohové faktuře …"); spodní poznámka uživatele se ztrácela. Nově se `note_below_items` ze zálohy zachová napříč všemi cestami vzniku (ruční vystavení, bankovní auto-match).
+- **Ukládání faktury selhalo na instalaci pozadu s migracemi.** Po nasazení kódu se sloupci `income_tax_exempt` (migrace 0087), ale bez spuštění migrace, končilo každé uložení vydané faktury chybou „Unknown column 'income_tax_exempt'". Repozitář nyní existenci sloupce detekuje a fakturu uloží (jen bez příznaku osvobození), dokud migrace neproběhne.
+
 ## [4.9.3] — 2026-06-01
 
 Per-faktura příznak „Osvobozeno od daně z příjmů" pro doklady mimo základ daně z příjmů (§ 4 ZDP / přefakturace) a sada vylepšení navigace — rychlé vytváření dokladů z horní lišty i bočního menu, předvyplnění zálohové faktury z odkazu a zpřehlednění dashboardu.

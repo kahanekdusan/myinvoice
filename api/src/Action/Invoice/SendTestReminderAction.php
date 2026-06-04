@@ -15,6 +15,7 @@ use MyInvoice\Service\Invoice\PublicInvoiceLinkFactory;
 use MyInvoice\Service\IpMatcher;
 use MyInvoice\Service\Mail\InvoiceEmailVarsBuilder;
 use MyInvoice\Service\Mail\Mailer;
+use MyInvoice\Service\Pdf\InvoicePdfRenderer;
 use MyInvoice\Service\Validation\InvoiceAmountPolicy;
 use Psr\Http\Message\ResponseInterface as Response;
 use Psr\Http\Message\ServerRequestInterface as Request;
@@ -31,6 +32,7 @@ final class SendTestReminderAction
 {
     public function __construct(
         private readonly InvoiceRepository $repo,
+        private readonly InvoicePdfRenderer $renderer,
         private readonly Mailer $mailer,
         private readonly InvoiceEmailVarsBuilder $varsBuilder,
         private readonly PublicInvoiceLinkFactory $linkFactory,
@@ -75,11 +77,20 @@ final class SendTestReminderAction
             }
         }
 
-        $publicToken = $this->repo->rotatePublicViewToken($id);
-        $invoiceViewUrl = $this->linkFactory->build($publicToken);
+        $user = (array) $request->getAttribute(AuthMiddleware::ATTR_USER, []);
+        $userId = isset($user['id']) ? (int) $user['id'] : null;
+
+        try {
+            $pdfPath = $this->renderer->render($id, false, $userId);
+        } catch (\Throwable $e) {
+            return Json::error($response, 'pdf_failed', 'Nepodařilo se vygenerovat PDF: ' . $e->getMessage(), 500);
+        }
+    $publicToken = $this->repo->rotatePublicViewToken($id);
+    $invoiceViewUrl = $this->linkFactory->build($publicToken);
 
         $locale = (string) ($invoice['language'] ?? 'cs');
-        $vars = $this->varsBuilder->buildReminder($invoice, $daysOverdue, $locale, $invoiceViewUrl);
+    $vars = $this->varsBuilder->buildReminder($invoice, $daysOverdue, $locale);
+    $vars['invoice_view_url'] = $invoiceViewUrl;
         // Označ jako TEST v subjectu (na rozdíl od reálné upomínky)
         $vars['subject'] = ($locale === 'en' ? '[TEST] ' : '[TEST] ') . $vars['subject'];
 
@@ -94,13 +105,24 @@ final class SendTestReminderAction
                 null,
                 [],
                 [],
-                [],
+                [[
+                    'path' => $pdfPath,
+                    'name' => basename($pdfPath),
+                    'contentType' => 'application/pdf',
+                ]],
+                $userId,
             );
         } catch (\Throwable $e) {
+            $user = (array) $request->getAttribute(AuthMiddleware::ATTR_USER, []);
+            $ip = $this->ipMatcher->clientIpFromRequest($request->getServerParams());
+            $this->logger->log('email.test_reminder_failed', $user['id'] ?? null, 'invoice', $id, [
+                'to' => $testRecipient,
+                'days_overdue' => $daysOverdue,
+                'error' => mb_substr($e->getMessage(), 0, 500),
+            ], $ip, $request->getHeaderLine('User-Agent'));
             return Json::error($response, 'send_failed', 'Email se nepodařilo odeslat: ' . $e->getMessage(), 502);
         }
 
-        $user = (array) $request->getAttribute(AuthMiddleware::ATTR_USER, []);
         $ip = $this->ipMatcher->clientIpFromRequest($request->getServerParams());
         $this->logger->log('email.sent_test_reminder', $user['id'] ?? null, 'invoice', $id, [
             'to'            => $testRecipient,

@@ -472,6 +472,251 @@ final class AiPdfExtractorUnitTest extends TestCase
         self::assertNull(\MyInvoice\Service\Import\AiPdfExtractor::collapseToSummaryBaseLine($items, [], false));
     }
 
+    // ── authoritativeRecapBaseLine (#99 — doklad s rekapitulací = záznam, ne kalkulačka) ──
+
+    /** Reálný případ issue #99: účtenka za naftu, „cena/litr" 35,90 je BRUTTO. */
+    private function fuelReceiptData(): array
+    {
+        return [
+            'currency'         => 'CZK',
+            'total_without_vat' => 2219.59,
+            'total_with_vat'    => 2685.70,
+            'vat_recap'         => [['rate' => 21, 'base' => 2219.59, 'vat' => 466.11]],
+            'items'             => [['description' => 'DIESEL', 'quantity' => 74.81, 'unit' => 'L', 'unit_price_without_vat' => 35.90, 'vat_rate' => 21]],
+        ];
+    }
+
+    public function testAuthoritativeRecap_fuelReceipt_grossUnitPrice_usesDocumentBase(): void
+    {
+        $data = $this->fuelReceiptData();
+        // řádek tak, jak ho extractor postaví z AI (35,90 = brutto cena/litr)
+        $items = [['description' => 'DIESEL', 'quantity' => 74.81, 'unit' => 'L', 'unit_price_without_vat' => 35.90, 'vat_rate_id' => 7, 'order_index' => 0]];
+
+        $out = \MyInvoice\Service\Import\AiPdfExtractor::authoritativeRecapBaseLine($items, $data, false);
+
+        self::assertNotNull($out);
+        self::assertCount(1, $out);
+        self::assertSame(1.0, $out[0]['quantity']);
+        self::assertSame(2219.59, $out[0]['unit_price_without_vat']); // základ z rekapitulace, NE 2 685,68
+        self::assertSame('DIESEL', $out[0]['description']);
+
+        // A přes InvoiceMath sedí přesně na doklad: 2 219,59 / 466,11 / 2 685,70 (žádné zaokrouhlení).
+        $r = \MyInvoice\Service\Invoice\InvoiceMath::compute([
+            ['quantity' => 1.0, 'unit_price_without_vat' => 2219.59, 'vat_rate_snapshot' => 21],
+        ]);
+        self::assertSame(2219.59, $r['totals']['without_vat']);
+        self::assertSame(466.11,  $r['totals']['vat']);
+        self::assertSame(2685.70, $r['totals']['with_vat']);
+    }
+
+    public function testAuthoritativeRecap_linesAlreadyMatchBase_keepsLines(): void
+    {
+        // Běžná faktura: řádky bez DPH sedí na základ z rekapitulace → NEslučovat (zachovej detail).
+        $data = [
+            'currency' => 'CZK', 'total_without_vat' => 200.0, 'total_with_vat' => 242.0,
+            'vat_recap' => [['rate' => 21, 'base' => 200.0, 'vat' => 42.0]],
+        ];
+        $items = [
+            ['description' => 'A', 'quantity' => 1.0, 'unit' => 'ks', 'unit_price_without_vat' => 120.0, 'vat_rate_id' => 7, 'order_index' => 0],
+            ['description' => 'B', 'quantity' => 1.0, 'unit' => 'ks', 'unit_price_without_vat' => 80.0, 'vat_rate_id' => 7, 'order_index' => 1],
+        ];
+        self::assertNull(\MyInvoice\Service\Import\AiPdfExtractor::authoritativeRecapBaseLine($items, $data, false));
+    }
+
+    public function testAuthoritativeRecap_inconsistentRecap_returnsNull(): void
+    {
+        // Rekapitulace NESEDÍ na celkem (200+42 ≠ 999) → nedůvěřuj, ať to vyřeší mismatch varování.
+        $data = [
+            'currency' => 'CZK', 'total_without_vat' => 200.0, 'total_with_vat' => 999.0,
+            'vat_recap' => [['rate' => 21, 'base' => 200.0, 'vat' => 42.0]],
+        ];
+        $items = [['description' => 'X', 'quantity' => 10.0, 'unit' => 'ks', 'unit_price_without_vat' => 100.0, 'vat_rate_id' => 7, 'order_index' => 0]];
+        self::assertNull(\MyInvoice\Service\Import\AiPdfExtractor::authoritativeRecapBaseLine($items, $data, false));
+        self::assertNull(\MyInvoice\Service\Import\AiPdfExtractor::singleRateConsistentRecap($data));
+    }
+
+    public function testSingleRateConsistentRecap_ignoresEmptyTemplateRows(): void
+    {
+        // AI běžně vrátí šablonu rekapitulace s nulovými řádky 0 %/12 % vedle reálné 21 %
+        // (případ Axigon) — prázdné řádky musí jít stranou, ať zůstane „jednosazbové".
+        $data = [
+            'currency' => 'CZK', 'total_without_vat' => 1554.88, 'total_with_vat' => 1881.40,
+            'vat_recap' => [
+                ['rate' => 0, 'base' => 0, 'vat' => 0],
+                ['rate' => 12, 'base' => 0, 'vat' => 0],
+                ['rate' => 21, 'base' => 1554.88, 'vat' => 326.52],
+            ],
+        ];
+        $recap = \MyInvoice\Service\Import\AiPdfExtractor::singleRateConsistentRecap($data);
+        self::assertNotNull($recap);
+        self::assertSame(21.0, $recap['rate']);
+        self::assertSame(1554.88, $recap['base']);
+        self::assertSame(326.52, $recap['vat']);
+    }
+
+    public function testAuthoritativeRecap_multiRate_returnsNull(): void
+    {
+        $data = [
+            'currency' => 'CZK', 'total_without_vat' => 150.0, 'total_with_vat' => 180.5,
+            'vat_recap' => [['rate' => 21, 'base' => 100.0, 'vat' => 21.0], ['rate' => 12, 'base' => 50.0, 'vat' => 6.0]],
+        ];
+        $items = [['description' => 'X', 'quantity' => 1.0, 'unit' => 'ks', 'unit_price_without_vat' => 999.0, 'vat_rate_id' => 7, 'order_index' => 0]];
+        self::assertNull(\MyInvoice\Service\Import\AiPdfExtractor::authoritativeRecapBaseLine($items, $data, false));
+    }
+
+    public function testAuthoritativeRecap_noRecap_returnsNull(): void
+    {
+        $data = ['currency' => 'CZK', 'total_without_vat' => 950.0];
+        $items = [['description' => 'X', 'quantity' => 10.0, 'unit' => 'ks', 'unit_price_without_vat' => 100.0, 'vat_rate_id' => 7, 'order_index' => 0]];
+        self::assertNull(\MyInvoice\Service\Import\AiPdfExtractor::authoritativeRecapBaseLine($items, $data, false));
+    }
+
+    public function testAuthoritativeRecap_creditNote_returnsNull(): void
+    {
+        self::assertNull(\MyInvoice\Service\Import\AiPdfExtractor::authoritativeRecapBaseLine(
+            [['description' => 'DIESEL', 'quantity' => 74.81, 'unit' => 'L', 'unit_price_without_vat' => 35.90, 'vat_rate_id' => 7, 'order_index' => 0]],
+            $this->fuelReceiptData(),
+            true,
+        ));
+    }
+
+    // ── linesAreGrossSingleRate (víceřádkový e-shop s brutto cenami → ceny s DPH) ──
+
+    /** Doklad se sloupcem „Cena celkem s DPH": jednotkové ceny řádků jsou brutto. */
+    private function grossEshopData(): array
+    {
+        return [
+            'currency'          => 'CZK',
+            'total_without_vat' => 15766.11,
+            'total_with_vat'    => 19077.0,
+            'vat_recap'         => [['rate' => 21, 'base' => 15766.11, 'vat' => 3310.89]],
+            'items'             => [
+                ['description' => 'Zboží A', 'quantity' => 4, 'unit_price_without_vat' => 4603, 'vat_rate' => 21],
+                ['description' => 'Zboží B', 'quantity' => 4, 'unit_price_without_vat' => 149, 'vat_rate' => 21],
+                ['description' => 'Služba C', 'quantity' => 1, 'unit_price_without_vat' => 69, 'vat_rate' => 21],
+            ],
+        ];
+    }
+
+    /** Řádky tak, jak je staví createDraft z AI (brutto v unit_price_without_vat). */
+    private function grossEshopItems(): array
+    {
+        return [
+            ['description' => 'Zboží A', 'quantity' => 4.0, 'unit' => 'ks', 'unit_price_without_vat' => 4603.0, 'vat_rate_id' => 7, 'order_index' => 0],
+            ['description' => 'Zboží B', 'quantity' => 4.0, 'unit' => 'ks', 'unit_price_without_vat' => 149.0, 'vat_rate_id' => 7, 'order_index' => 1],
+            ['description' => 'Služba C', 'quantity' => 1.0, 'unit' => 'ks', 'unit_price_without_vat' => 69.0, 'vat_rate_id' => 7, 'order_index' => 2],
+        ];
+    }
+
+    public function testLinesAreGross_multiLineGrossEshop_true(): void
+    {
+        // Σ řádků 19 077 = CELKEM s DPH (≠ základ 15 766,11) → brutto ceny → true.
+        self::assertTrue(\MyInvoice\Service\Import\AiPdfExtractor::linesAreGrossSingleRate(
+            $this->grossEshopItems(), $this->grossEshopData(), false,
+        ));
+    }
+
+    public function testLinesAreGross_keptAsPricesInclVat_matchesRecapExactly(): void
+    {
+        // Konec-konců přes InvoiceMath (shora) + override sedí na doklad přesně,
+        // a hlavně všechny 3 řádky zůstanou zachované.
+        $r = \MyInvoice\Service\Invoice\InvoiceMath::compute(
+            array_map(static fn ($i) => [
+                'quantity' => $i['quantity'],
+                'unit_price_without_vat' => $i['unit_price_without_vat'],
+                'vat_rate_snapshot' => 21,
+            ], $this->grossEshopItems()),
+            false,
+            true, // prices_include_vat
+            [['rate' => 21, 'base' => 15766.11, 'vat' => 3310.89]], // override § 73
+        );
+        self::assertCount(3, $r['items']);
+        self::assertSame(15766.11, $r['totals']['without_vat']);
+        self::assertSame(3310.89,  $r['totals']['vat']);
+        self::assertSame(19077.0,  $r['totals']['with_vat']);
+    }
+
+    public function testLinesAreGross_linesAlreadyNet_false(): void
+    {
+        // Běžná faktura: řádky bez DPH sedí na základ (ne na celkem s DPH) → false.
+        $data = [
+            'currency' => 'CZK', 'total_without_vat' => 200.0, 'total_with_vat' => 242.0,
+            'vat_recap' => [['rate' => 21, 'base' => 200.0, 'vat' => 42.0]],
+        ];
+        $items = [
+            ['description' => 'A', 'quantity' => 1.0, 'unit' => 'ks', 'unit_price_without_vat' => 120.0, 'vat_rate_id' => 7, 'order_index' => 0],
+            ['description' => 'B', 'quantity' => 1.0, 'unit' => 'ks', 'unit_price_without_vat' => 80.0, 'vat_rate_id' => 7, 'order_index' => 1],
+        ];
+        self::assertFalse(\MyInvoice\Service\Import\AiPdfExtractor::linesAreGrossSingleRate($items, $data, false));
+    }
+
+    public function testLinesAreGross_noRecap_false(): void
+    {
+        $items = $this->grossEshopItems();
+        self::assertFalse(\MyInvoice\Service\Import\AiPdfExtractor::linesAreGrossSingleRate($items, ['currency' => 'CZK'], false));
+    }
+
+    public function testLinesAreGross_creditNote_false(): void
+    {
+        self::assertFalse(\MyInvoice\Service\Import\AiPdfExtractor::linesAreGrossSingleRate(
+            $this->grossEshopItems(), $this->grossEshopData(), true,
+        ));
+    }
+
+    public function testLinesAreGross_multiRate_false(): void
+    {
+        // Vícesazbový doklad → singleRateConsistentRecap vrací null → false.
+        $data = [
+            'currency' => 'CZK', 'total_without_vat' => 150.0, 'total_with_vat' => 180.5,
+            'vat_recap' => [['rate' => 21, 'base' => 100.0, 'vat' => 21.0], ['rate' => 12, 'base' => 50.0, 'vat' => 6.0]],
+        ];
+        self::assertFalse(\MyInvoice\Service\Import\AiPdfExtractor::linesAreGrossSingleRate($this->grossEshopItems(), $data, false));
+    }
+
+    // ── reconcileLineAmount (NC Auto/BMW: „Cena" ≠ jednotková cena → vezmi částku) ──
+
+    public function testReconcile_bmwMismatchedLine_usesLineTotal(): void
+    {
+        // AW 8,29 × 1 980 = 16 414, ale řádková částka je 1 980 → 1 ks × 1 980.
+        self::assertSame([1.0, 1980.0],
+            \MyInvoice\Service\Import\AiPdfExtractor::reconcileLineAmount(8.29, 1980.0, 1980.0));
+    }
+
+    public function testReconcile_consistentLine_keepsQtyAndPrice(): void
+    {
+        // 6 × 239 = 1 434 = částka přesně → neměnit (zachovej qty/cenu pro itemizaci).
+        self::assertSame([6.0, 239.0],
+            \MyInvoice\Service\Import\AiPdfExtractor::reconcileLineAmount(6.0, 239.0, 1434.0));
+    }
+
+    public function testReconcile_noLineTotal_keepsQtyAndPrice(): void
+    {
+        self::assertSame([4.0, 4603.0],
+            \MyInvoice\Service\Import\AiPdfExtractor::reconcileLineAmount(4.0, 4603.0, null));
+    }
+
+    public function testReconcile_haléřDrift_snapsToLineTotal(): void
+    {
+        // 0,5 × 235,05 = 117,525 → 117,53 vs částka 117,52: i haléřový drift snapneme
+        // na řádkovou částku (jinak by součet řádků rozhodil základ a spustil collapse).
+        self::assertSame([1.0, 117.52],
+            \MyInvoice\Service\Import\AiPdfExtractor::reconcileLineAmount(0.5, 235.05, 117.52));
+    }
+
+    public function testReconcile_negativeLineTotal_preservesSign(): void
+    {
+        // Záporný řádek (sleva/storno) s nesedícím součinem (5 × −23 = −115 ≠ −69)
+        // → 1 ks × záporná částka.
+        self::assertSame([1.0, -69.0],
+            \MyInvoice\Service\Import\AiPdfExtractor::reconcileLineAmount(5.0, -23.0, -69.0));
+    }
+
+    public function testReconcile_zeroLineTotal_keepsQtyAndPrice(): void
+    {
+        self::assertSame([2.0, 100.0],
+            \MyInvoice\Service\Import\AiPdfExtractor::reconcileLineAmount(2.0, 100.0, 0.0));
+    }
+
     // ── Helper: reflection invokers ────────────────────────────────────────
 
     private function invokeResolvePricesInclVat(array $data, string $documentKind): bool

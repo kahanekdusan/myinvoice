@@ -90,9 +90,12 @@ final class RequestApprovalAction
             return Json::error($response, 'allocation_failed', 'Nepodařilo se alokovat číslo faktury: ' . $e->getMessage(), 500);
         }
 
+        $user = (array) $request->getAttribute(AuthMiddleware::ATTR_USER, []);
+        $userId = isset($user['id']) ? (int) $user['id'] : null;
+
         // Render PDF výkazu (Vykaz-XYZ.pdf)
         try {
-            $pdfPath = $this->renderer->render($id);
+            $pdfPath = $this->renderer->render($id, $userId);
         } catch (\Throwable $e) {
             return Json::error($response, 'pdf_failed', 'Nepodařilo se vygenerovat PDF výkazu: ' . $e->getMessage(), 500);
         }
@@ -126,6 +129,7 @@ final class RequestApprovalAction
                 [],
                 $bcc,
                 [['path' => $pdfPath, 'name' => basename($pdfPath), 'contentType' => 'application/pdf']],
+                $userId,
             );
         } catch (\Throwable $e) {
             return Json::error($response, 'send_failed', 'Email se nepodařilo odeslat: ' . $e->getMessage(), 502);
@@ -142,7 +146,6 @@ final class RequestApprovalAction
             sentTo: $sentToAll,
         );
 
-        $user = (array) $request->getAttribute(AuthMiddleware::ATTR_USER, []);
         $ip = $this->ipMatcher->clientIpFromRequest($request->getServerParams());
         $this->logger->log('invoice.approval_requested', $user['id'] ?? null, 'invoice', $id, [
             'to' => $to,

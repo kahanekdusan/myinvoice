@@ -9,12 +9,14 @@ use MyInvoice\Http\SupplierGuard;
 use MyInvoice\Infrastructure\Config\Config;
 use MyInvoice\Infrastructure\Database\Connection;
 use MyInvoice\Middleware\AuthMiddleware;
+use MyInvoice\Repository\InvoiceAttachmentRepository;
 use MyInvoice\Repository\InvoiceRepository;
 use MyInvoice\Service\ActivityLogger;
-use MyInvoice\Service\Invoice\PublicInvoiceLinkFactory;
 use MyInvoice\Service\IpMatcher;
 use MyInvoice\Service\Mail\InvoiceEmailVarsBuilder;
 use MyInvoice\Service\Mail\Mailer;
+use MyInvoice\Service\Pdf\InvoicePdfRenderer;
+use MyInvoice\Service\Pdf\PdfArchiveService;
 use Psr\Http\Message\ResponseInterface as Response;
 use Psr\Http\Message\ServerRequestInterface as Request;
 
@@ -23,12 +25,14 @@ final class SendEmailAction
     public function __construct(
         private readonly InvoiceRepository $repo,
         private readonly Connection $db,
+        private readonly InvoicePdfRenderer $renderer,
         private readonly Mailer $mailer,
         private readonly InvoiceEmailVarsBuilder $varsBuilder,
-        private readonly PublicInvoiceLinkFactory $linkFactory,
         private readonly ActivityLogger $logger,
         private readonly IpMatcher $ipMatcher,
         private readonly Config $config,
+        private readonly PdfArchiveService $pdfArchive,
+        private readonly InvoiceAttachmentRepository $attachments,
     ) {}
 
     public function __invoke(Request $request, Response $response, array $args): Response
@@ -91,13 +95,36 @@ final class SendEmailAction
             }
         }
 
-        $publicToken = $this->repo->rotatePublicViewToken($id);
-        $invoiceViewUrl = $this->linkFactory->build($publicToken);
+        $user = (array) $request->getAttribute(AuthMiddleware::ATTR_USER, []);
+        $userId = isset($user['id']) ? (int) $user['id'] : null;
+
+        try {
+            $pdfPath = $this->renderer->render($id, false, $userId);
+        } catch (\Throwable $e) {
+            return Json::error($response, 'pdf_failed', 'Nepodařilo se vygenerovat PDF: ' . $e->getMessage(), 500);
+        }
 
         $locale = (string) ($invoice['language'] ?? 'cs');
-        $vars = $this->varsBuilder->build($invoice, false, $locale, $invoiceViewUrl);
+        $vars = $this->varsBuilder->build($invoice, false, $locale);
         $vars['note_lines'] = $noteLines;
         $vars['note_text']  = $noteRaw;
+
+        $supplierId = (int) ($invoice['supplier_id'] ?? 0);
+        $emailAttachments = [
+            ['path' => $pdfPath, 'name' => basename($pdfPath), 'contentType' => 'application/pdf'],
+        ];
+        $extraAttachments = $this->attachments->listForInvoice($id);
+        $sentAttachmentIds = [];
+        foreach ($extraAttachments as $att) {
+            $path = $this->attachments->pathFor($supplierId, $id, (string) $att['filename']);
+            if (!is_file($path)) continue;
+            $emailAttachments[] = [
+                'path'        => $path,
+                'name'        => (string) $att['original_name'],
+                'contentType' => (string) $att['mime_type'],
+            ];
+            $sentAttachmentIds[] = (int) $att['id'];
+        }
 
         $smtpResponse = '';
         try {
@@ -109,9 +136,16 @@ final class SendEmailAction
                 $subjectOverride,
                 $cc,
                 $bcc,
-                [],
+                $emailAttachments,
+                $userId,
             );
         } catch (\Throwable $e) {
+            $user = (array) $request->getAttribute(AuthMiddleware::ATTR_USER, []);
+            $ip = $this->ipMatcher->clientIpFromRequest($request->getServerParams());
+            $this->logger->log('invoice.send_failed', $user['id'] ?? null, 'invoice', $id, [
+                'to' => $to, 'cc' => $cc, 'bcc' => $bcc,
+                'error' => mb_substr($e->getMessage(), 0, 500),
+            ], $ip, $request->getHeaderLine('User-Agent'));
             return Json::error($response, 'send_failed', 'Email se nepodařilo odeslat: ' . $e->getMessage(), 502);
         }
 
@@ -119,12 +153,17 @@ final class SendEmailAction
         $this->db->pdo()->prepare('UPDATE invoices SET status = ?, sent_at = NOW(), public_link_sent_at = NOW() WHERE id = ?')
             ->execute([$newStatus, $id]);
 
-        $user = (array) $request->getAttribute(AuthMiddleware::ATTR_USER, []);
+        // Archivuj kopii PDF jako 'sent' verzi — důkaz toho, co klient skutečně dostal
+        // (zachová se i kdyby se faktura později editovala). Aktivní cache zůstává nedotčená.
+        $sentToAll = array_values(array_unique(array_merge($to, $cc, $bcc)));
+        $archiveId = $this->pdfArchive->archiveCopy($id, $pdfPath, 'sent', wasSent: true, sentTo: $sentToAll);
+
         $ip = $this->ipMatcher->clientIpFromRequest($request->getServerParams());
         $this->logger->log('invoice.sent', $user['id'] ?? null, 'invoice', $id, [
             'to' => $to, 'cc' => $cc, 'bcc' => $bcc,
-            'delivery_mode'  => 'public_link',
-            'invoice_view_url' => $invoiceViewUrl,
+            'pdf_path' => basename($pdfPath),
+            'pdf_archive_id' => $archiveId,
+            'attachment_ids' => $sentAttachmentIds,
             'smtp_response'  => $smtpResponse,
             'note_chars'     => mb_strlen($noteRaw),
         ], $ip, $request->getHeaderLine('User-Agent'));

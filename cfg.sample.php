@@ -208,6 +208,25 @@ return [
         'sessions_dir' => __DIR__ . '/storage/sessions',  // jen pokud session.driver = 'db' (file fallback)
         'cache_dir'    => __DIR__ . '/storage/cache',     // file cache (ARES/VIES odpovědi, PDF mezikroky)
     ],
+    'pdf_signing' => [
+        // Platform-level switch pro podpisovou infrastrukturu. Konkrétní certifikáty
+        // a TSA se nastavují přes podpisové profily v administraci.
+        'enabled'        => true,
+        'default_backend'=> 'native',                  // první iterace: pouze native backend nad PdfSigner
+        'failure_policy' => 'fallback_unsigned',       // fallback_unsigned | fail_closed | skip_when_unconfigured
+        'enabled_outputs'=> [
+            'invoices'     => true,
+            'work_reports' => true,
+        ],
+    ],
+    'signing' => [
+        // Volitelný passphrase file pro podpisové profily s politikou passphrase_file.
+        // Soubor může být Docker secret (/run/secrets/...) nebo relativní cesta vůči data dir.
+        // Formát INI:
+        //   [profile_code]
+        //   passphrase=heslo
+        'passphrase_file' => '',
+    ],
     'qr' => [
         'czk_constant_symbol' => '0308',             // KS pro CZK platby (0308 = běžný platební styk)
     ],
@@ -283,6 +302,19 @@ return [
             // '10.0.0.0/8',
         ],
         'header' => 'X-Forwarded-For',               // hlavička se skutečnou klient IP (přepíše REMOTE_ADDR za trusted proxy)
+    ],
+
+    // Registry parserů bankovních e-mailových avíz. Klíč pole je konfigurační
+    // slot pro override; skutečný parser_type dodává parser metodou key().
+    // Hodnotou je class name služby, kterou DI container vytvoří a ověří proti
+    // BankEmailNoticeParserInterface. Hodnota null/false daný slot vypne.
+    'bank_email' => [
+        'notice_parsers' => [
+            'regex' => \MyInvoice\Service\Bank\EmailNotice\Parser\RegexBankEmailNoticeParser::class,
+            'raiffeisenbank' => \MyInvoice\Service\Bank\EmailNotice\Parser\RaiffeisenbankEmailNoticeParser::class,
+            'unicredit' => \MyInvoice\Service\Bank\EmailNotice\Parser\UnicreditBankEmailNoticeParser::class,
+            'csob' => \MyInvoice\Service\Bank\EmailNotice\Parser\CsobBankEmailNoticeParser::class,
+        ],
     ],
 
     // Auto-import bankovních výpisů (GPC/ABO) z monitorovaného adresáře.

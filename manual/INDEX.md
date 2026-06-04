@@ -37,7 +37,7 @@ nasazuje). Zbytek je psaný pro běžného uživatele — bez programátorského
 
 ### Platby a komunikace
 
-13. [Banka — import výpisů a párování plateb](13_Banka.md)
+13. [Banka — import výpisů, e-mailová avíza a párování plateb](13_Banka.md)
 14. [Upomínky po splatnosti](14_Upominky.md)
 15. [Pravidelné fakturace (recurring invoices)](15_Pravidelne_fakturace.md)
 
@@ -61,6 +61,7 @@ nasazuje). Zbytek je psaný pro běžného uživatele — bez programátorského
 25. [Daň z příjmů (DPFO / DPPO)](25_Dan_z_prijmu.md) — **nové ve v4.0.0** (MVP foundation)
 26. [Daňový optimalizátor (OSVČ)](26_Danovy_optimalizator.md) — **nové**
 27. [Dokumenty (úložiště souborů, ZFO, párování)](27_Dokumenty.md) — **nové**
+28. [Elektronické podpisy](28_Elektronicke_podpisy.md) — **nové**
 
 ### Reference
 

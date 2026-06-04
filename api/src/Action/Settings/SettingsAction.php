@@ -36,7 +36,6 @@ final class SettingsAction
         private readonly IpMatcher $ipMatcher,
         private readonly InvoicePdfRenderer $pdf,
         private readonly Config $config,
-        private readonly \MyInvoice\Service\Auth\SecretEncryption $secrets,
         private readonly \MyInvoice\Service\Ares\SupplierRegistryEnricher $enricher,
     ) {}
 
@@ -219,11 +218,12 @@ final class SettingsAction
             // dedikované endpointy EmailBrandingAction::uploadLogo (multipart, processed by
             // SupplierLogoConverter do storage/branding/sup-N/). Mass-assign by umožnil
             // admin-planted LFI (security report @andrejtomci #2).
-            'default_hourly_rate', 'auto_send_reminders', 'auto_generate_recurring', 'embed_isdoc',
+            'default_hourly_rate', 'auto_send_reminders', 'reminder_days_after_due', 'auto_generate_recurring', 'embed_isdoc',
             'default_prices_include_vat',
             'pohoda_account_code', 'pohoda_centre_code', 'pohoda_activity_code', 'pohoda_contract_code',
-            // Per-supplier konfigurace číslování faktur (migrace 0014)
-                'invoice_number_format', 'quote_number_format', 'proforma_number_format', 'credit_note_number_format',
+            // Per-supplier konfigurace číslování faktur (migrace 0014; přijaté 0095)
+            'invoice_number_format', 'quote_number_format', 'proforma_number_format', 'credit_note_number_format',
+            'purchase_invoice_number_format',
             'invoice_number_period',
             // Per-supplier branding emailů (migrace 0016) + PDF logo+název (migrace 0058)
             'email_branding_enabled', 'email_accent_color', 'pdf_logo_show_name',
@@ -234,10 +234,6 @@ final class SettingsAction
             // Doplňky pro DPH/KH XML VetaP (migrace 0043)
             'street_number_pop', 'street_number_orient',
             'opr_jmeno', 'opr_prijmeni', 'opr_postaveni',
-            // Podpis PDF certifikátem (migrace 0076) — toggle/TSA/důvod. Cert+heslo se
-            // NIKDY nemění mass-assignmentem (jen přes SigningCertAction multipart upload).
-            // signing_tsa_password (heslo k TSA) taky NE mass-assign — řešeno níže (encrypt).
-            'pdf_signing_enabled', 'signing_tsa_url', 'signing_reason', 'signing_tsa_username',
             // Děkovný e-mail za úhradu (issue #57)
             'payment_thanks_enabled', 'payment_thanks_auto_send', 'payment_thanks_default_checked', 'payment_thanks_attach_paid_pdf',
         ];
@@ -295,7 +291,7 @@ final class SettingsAction
         }
         // Validace per-supplier varsymbol templatů: prázdný string → NULL (= fallback na cfg);
         // jinak max 60 znaků a musí obsahovat alespoň jeden counter placeholder {C+}.
-        foreach (['invoice_number_format', 'quote_number_format', 'proforma_number_format', 'credit_note_number_format'] as $f) {
+        foreach (['invoice_number_format', 'quote_number_format', 'proforma_number_format', 'credit_note_number_format', 'purchase_invoice_number_format'] as $f) {
             if (array_key_exists($f, $body)) {
                 $v = trim((string) ($body[$f] ?? ''));
                 if ($v === '') {
@@ -329,21 +325,20 @@ final class SettingsAction
             $stmt->execute([$id, strtoupper((string) $body['default_currency'])]);
             $body['default_currency_id'] = (int) $stmt->fetchColumn();
         }
+        // Práh dní pro první upomínku je INT — clamp zrcadlí rozsah UI (1–365 dní),
+        // ať přímý API caller neuloží nesmyslnou hodnotu.
+        if (array_key_exists('reminder_days_after_due', $body)) {
+            $body['reminder_days_after_due'] = max(1, min(365, (int) $body['reminder_days_after_due']));
+        }
         $sets = [];
         $params = [];
         foreach ($allowed as $f) {
             if (array_key_exists($f, $body)) {
                 $sets[] = "$f = ?";
-                $params[] = in_array($f, ['is_vat_payer', 'auto_send_reminders', 'auto_generate_recurring', 'embed_isdoc', 'default_prices_include_vat', 'email_branding_enabled', 'pdf_logo_show_name', 'pdf_signing_enabled', 'payment_thanks_enabled', 'payment_thanks_auto_send', 'payment_thanks_default_checked', 'payment_thanks_attach_paid_pdf'], true)
+                $params[] = in_array($f, ['is_vat_payer', 'auto_send_reminders', 'auto_generate_recurring', 'embed_isdoc', 'default_prices_include_vat', 'email_branding_enabled', 'pdf_logo_show_name', 'payment_thanks_enabled', 'payment_thanks_auto_send', 'payment_thanks_default_checked', 'payment_thanks_attach_paid_pdf'], true)
                     ? ((int) (bool) $body[$f])
                     : $body[$f];
             }
-        }
-        // TSA heslo (HTTP Basic auth) — NIKDY mass-assign: šifruj, prázdné = vymaž.
-        if (array_key_exists('signing_tsa_password', $body)) {
-            $tsaPw = (string) $body['signing_tsa_password'];
-            $sets[] = 'signing_tsa_password_enc = ?';
-            $params[] = $tsaPw !== '' ? $this->secrets->encrypt($tsaPw) : null;
         }
 
         if (empty($sets)) return $this->respondSupplier($response, $id);
@@ -357,12 +352,6 @@ final class SettingsAction
         if (array_key_exists('email_accent_color', $body)
             || array_key_exists('email_branding_enabled', $body)
             || array_key_exists('pdf_logo_show_name', $body)
-            // Podpis PDF se renderuje živě → po změně toggle/TSA invaliduj cached PDF
-            || array_key_exists('pdf_signing_enabled', $body)
-            || array_key_exists('signing_tsa_url', $body)
-            || array_key_exists('signing_tsa_username', $body)
-            || array_key_exists('signing_tsa_password', $body)
-            || array_key_exists('signing_reason', $body)
         ) {
             $this->pdf->invalidateDraftsBySupplier($id);
         }
@@ -455,6 +444,7 @@ final class SettingsAction
         $row['default_payment_due_unit'] = (string) ($row['default_payment_due_unit'] ?? 'days');
         $row['default_hourly_rate']      = (float) $row['default_hourly_rate'];
         $row['auto_send_reminders']      = (bool) $row['auto_send_reminders'];
+        $row['reminder_days_after_due']  = (int) ($row['reminder_days_after_due'] ?? 3);
         $row['auto_generate_recurring']  = (bool) ($row['auto_generate_recurring'] ?? true);
         $row['default_prices_include_vat'] = (bool) ($row['default_prices_include_vat'] ?? false);
         $row['embed_isdoc']              = (bool) ($row['embed_isdoc'] ?? true);
@@ -462,28 +452,19 @@ final class SettingsAction
         $row['email_accent_color']       = (string) ($row['email_accent_color'] ?? '#3B2D83');
         $row['pdf_logo_show_name']       = (bool) ($row['pdf_logo_show_name'] ?? false);
         $row['has_email_logo']           = is_file(\MyInvoice\Infrastructure\Config\RuntimePaths::storage('supplier-logos') . '/sup-' . $row['id'] . '.png');
-        // Podpis PDF (migrace 0076): heslo k certifikátu NIKDY neposílat do API.
-        $row['pdf_signing_enabled']      = (bool) ($row['pdf_signing_enabled'] ?? false);
-        $row['signing_tsa_url']          = $row['signing_tsa_url'] ?? null;
-        $row['signing_reason']           = (string) ($row['signing_reason'] ?? '');
-        $signingRel                      = (string) ($row['signing_cert_path'] ?? '');
-        $row['has_signing_cert']         = $signingRel !== '' && is_file(\MyInvoice\Service\Pdf\SigningConfig::absCertPath($signingRel));
-        $row['signing_tsa_username']     = $row['signing_tsa_username'] ?? null;
-        $row['has_tsa_password']         = !empty($row['signing_tsa_password_enc']);
         $row['payment_thanks_enabled']        = (bool) ($row['payment_thanks_enabled'] ?? false);
         $row['payment_thanks_auto_send']      = (bool) ($row['payment_thanks_auto_send'] ?? false);
         $row['payment_thanks_default_checked']= (bool) ($row['payment_thanks_default_checked'] ?? false);
         $row['payment_thanks_attach_paid_pdf']= (bool) ($row['payment_thanks_attach_paid_pdf'] ?? false);
         // Bezpečnost: do API NIKDY neposílat žádná tajemství. Redakce vzorem `*_enc`
         // je odolná vůči nově přidaným šifrovaným sloupcům (původní explicitní výčet
-        // nechával unikat idoklad/fakturoid/anthropic credentials). Plus explicitně
-        // živý nešifrovaný token a serverová cesta k certifikátu.
+        // nechával unikat idoklad/fakturoid/anthropic credentials).
         foreach (array_keys($row) as $k) {
             if (str_ends_with((string) $k, '_enc')) {
                 unset($row[$k]);
             }
         }
-        unset($row['signing_cert_path'], $row['idoklad_access_token']);
+        unset($row['idoklad_access_token']);
         // Globální cfg fallback pro varsymbol — UI ho použije jako placeholder
         // u prázdných per-supplier polí (aby uživatel viděl, jaká šablona by se
         // použila kdyby ponechal pole prázdné).
@@ -492,6 +473,8 @@ final class SettingsAction
             'quote'       => (string) $this->config->get('varsymbol.templates.quote', '2{YY}{MM}{CCC}'),
             'proforma'    => (string) $this->config->get('varsymbol.templates.proforma', ''),
             'credit_note' => (string) $this->config->get('varsymbol.templates.credit_note', ''),
+            // Přijaté faktury nemají cfg fallback — výchozí je vestavěná šablona generátoru.
+            'purchase'    => \MyInvoice\Repository\PurchaseInvoiceRepository::PURCHASE_DEFAULT_TEMPLATE,
         ];
         return Json::ok($response, $row);
     }
@@ -509,7 +492,12 @@ final class SettingsAction
             'SELECT c.id, c.code, c.label, c.symbol, c.name_cs, c.name_en, c.decimals,
                     c.is_active, c.is_default,
                     c.account_number, c.bank_code, c.bank_name, c.iban, c.bic,
-                    (SELECT COUNT(*) FROM invoices i WHERE i.currency_id = c.id) AS invoices_count
+                    (
+                        (SELECT COUNT(*) FROM invoices i WHERE i.currency_id = c.id)
+                      + (SELECT COUNT(*) FROM purchase_invoices pi WHERE pi.currency_id = c.id OR pi.payment_currency_id = c.id)
+                      + (SELECT COUNT(*) FROM projects p WHERE p.currency_id = c.id)
+                      + (SELECT COUNT(*) FROM recurring_invoice_templates rit WHERE rit.currency_id = c.id)
+                    ) AS invoices_count
                FROM currencies c
               WHERE c.supplier_id = ?
            ORDER BY c.code, c.is_default DESC, c.label'
@@ -673,7 +661,7 @@ final class SettingsAction
         $code = (string) $row['code'];
 
         $body = (array) ($request->getParsedBody() ?? []);
-        $allowed = ['label', 'symbol', 'is_active', 'is_default', 'account_number', 'bank_code', 'bank_name', 'iban', 'bic'];
+        $allowed = ['label', 'symbol', 'decimals', 'is_active', 'is_default', 'account_number', 'bank_code', 'bank_name', 'iban', 'bic'];
         $sets = [];
         $params = [];
         foreach ($allowed as $f) {
@@ -681,6 +669,11 @@ final class SettingsAction
                 $sets[] = "$f = ?";
                 if (in_array($f, ['is_active', 'is_default'], true)) {
                     $params[] = (int) (bool) $body[$f];
+                } elseif ($f === 'decimals') {
+                    $params[] = max(0, min(6, (int) $body[$f]));
+                } elseif ($f === 'symbol') {
+                    // NOT NULL sloupec — prázdné ulož jako '' (ne null).
+                    $params[] = (string) $body[$f];
                 } else {
                     $params[] = ($body[$f] === '' || $body[$f] === null) ? null : $body[$f];
                 }
@@ -986,13 +979,29 @@ final class SettingsAction
         if ($ownerSid === 0) return Json::error($response, 'not_found', 'Měna nenalezena.', 404);
         if ($ownerSid !== $sid) return Json::error($response, 'wrong_supplier', 'Tato měna patří jinému supplier.', 403);
 
-        $stmt = $pdo->prepare('SELECT COUNT(*) FROM invoices WHERE currency_id = ?');
-        $stmt->execute([$id]);
-        $invoices = (int) $stmt->fetchColumn();
-        if ($invoices > 0) {
-            return Json::error($response, 'has_dependencies', "Měnu nelze smazat — má $invoices faktur.", 409);
+        // Použití napříč doklady (vydané, přijaté vč. platební měny, zakázky, pravidelné fakturace).
+        $stmt = $pdo->prepare(
+            'SELECT (
+                (SELECT COUNT(*) FROM invoices WHERE currency_id = ?)
+              + (SELECT COUNT(*) FROM purchase_invoices WHERE currency_id = ? OR payment_currency_id = ?)
+              + (SELECT COUNT(*) FROM projects WHERE currency_id = ?)
+              + (SELECT COUNT(*) FROM recurring_invoice_templates WHERE currency_id = ?)
+            ) AS cnt'
+        );
+        $stmt->execute([$id, $id, $id, $id, $id]);
+        $deps = (int) $stmt->fetchColumn();
+        if ($deps > 0) {
+            return Json::error($response, 'has_dependencies', "Měnu nelze smazat — je použita na $deps dokladech.", 409);
         }
-        $pdo->prepare('DELETE FROM currencies WHERE id = ?')->execute([$id]);
+        try {
+            $pdo->prepare('DELETE FROM currencies WHERE id = ?')->execute([$id]);
+        } catch (\PDOException $e) {
+            // Pojistka pro ostatní FK (cache přepočtů, výchozí měna klienta/dodavatele apod.).
+            if ($e->getCode() === '23000') {
+                return Json::error($response, 'has_dependencies', 'Měnu nelze smazat — je použita v jiných záznamech.', 409);
+            }
+            throw $e;
+        }
         $this->log($request, 'currency.deleted', $id, []);
         return Json::ok($response, ['deleted' => true]);
     }

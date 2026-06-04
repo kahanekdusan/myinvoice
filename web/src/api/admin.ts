@@ -21,6 +21,33 @@ export interface ActivityLogResponse {
   actions: Array<{ action: string; cnt: number }>
 }
 
+export interface SentEmail {
+  id: number
+  action: string
+  /** Logický typ e-mailu = success akce (i u failed řádku) — podle něj se vybírá popisek/badge. */
+  type: string
+  status: 'sent' | 'failed'
+  created_at: string
+  user_name: string | null
+  user_email: string | null
+  invoice_id: number | null
+  invoice_varsymbol: string | null
+  client_company_name: string | null
+  recipients: string[]
+  smtp_response: string | null
+  /** Chybový text u status='failed', jinak null. */
+  error: string | null
+}
+
+export interface SentEmailsResponse {
+  data: SentEmail[]
+  total: number
+  limit: number
+  offset: number
+  types: Array<{ action: string; cnt: number; failed: number }>
+  failed_total: number
+}
+
 export interface AdminUser {
   id: number
   email: string
@@ -35,6 +62,9 @@ export interface AdminUser {
 export const adminApi = {
   activityLog: (params: { action?: string; user_id?: number; entity_type?: string; entity_id?: number; limit?: number; offset?: number } = {}) =>
     api.get<ActivityLogResponse>('/admin/activity-log', { params }).then(r => r.data),
+
+  sentEmails: (params: { type?: string; status?: 'sent' | 'failed'; limit?: number; offset?: number } = {}) =>
+    api.get<SentEmailsResponse>('/admin/sent-emails', { params }).then(r => r.data),
 
   // Users
   listUsers: () => api.get<AdminUser[]>('/admin/users').then(r => r.data),
