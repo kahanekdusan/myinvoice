@@ -669,9 +669,6 @@ final class InvoiceRepository
             (invoice_type, parent_invoice_id, client_id, project_id, supplier_id,
              issue_date, tax_date, due_date, currency_id, reverse_charge, prices_include_vat, language,
              note_above_items, note_below_items, advance_paid_amount, discount_percent, varsymbol,
-             payment_method, numbering_type, status, vat_classification_code, revenue_category,
-             revenue_category_id, income_tax_exempt, income_tax_exempt_reason, created_by)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)';
              payment_method, numbering_type, status, vat_classification_code, revenue_category, revenue_category_id,'
             . ($hasExempt ? ' income_tax_exempt, income_tax_exempt_reason,' : '')
             . ($hasReminders ? ' auto_send_reminders,' : '')
