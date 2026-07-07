@@ -60,6 +60,7 @@ export interface Invoice {
   id: number
   varsymbol: string | null
   invoice_type: InvoiceType
+  numbering_type?: 'default' | 'quote'
   parent_invoice_id: number | null
   client_id: number
   project_id: number | null
@@ -83,6 +84,7 @@ export interface Invoice {
   // Cross-link na související doklady (z find()): u proformy → vystavený daňový doklad;
   // u dokladu s parent_invoice_id → rodič (proforma / původní faktura).
   final_invoice?: { id: number; varsymbol: string | null; status: InvoiceStatus } | null
+  advance_invoice?: { id: number; varsymbol: string | null; status: InvoiceStatus } | null
   parent_invoice?: { id: number; varsymbol: string | null; status: InvoiceStatus; invoice_type: InvoiceType } | null
   // U daňového dokladu bez vazby: existují u odběratele nespárované zálohy k propojení?
   has_advance_candidates?: boolean
@@ -184,6 +186,7 @@ export interface InvoiceListItem {
   id: number
   varsymbol: string | null
   invoice_type: InvoiceType
+  numbering_type?: 'default' | 'quote'
   parent_invoice_id: number | null
   recurring_template_id?: number | null
   client_id: number
@@ -199,6 +202,7 @@ export interface InvoiceListItem {
   advance_paid_amount: number
   amount_to_pay: number
   status: InvoiceStatus
+  approval_status?: ApprovalStatus
   payment_method: PaymentMethod
   sent_at: string | null
   public_link_sent_at: string | null
@@ -217,6 +221,8 @@ export interface InvoiceListItem {
   project_name: string | null
   project_requires_approval?: boolean
   has_work_report?: boolean
+  has_final_invoice?: boolean
+  has_advance_invoice?: boolean
   month_bucket: string
 }
 
@@ -391,7 +397,13 @@ export const invoicesApi = {
     api.post<Invoice>(`/invoices/${id}/link-advance`, { advance_id: advanceId }).then(r => r.data),
   unlinkAdvance: (id: number) =>
     api.delete<Invoice>(`/invoices/${id}/link-advance`).then(r => r.data),
-  clone: (id: number, opts?: { increment_month_in_descriptions?: boolean; issue_date?: string }) =>
+  clone: (id: number, opts?: {
+    increment_month_in_descriptions?: boolean
+    issue_date?: string
+    target_invoice_type?: 'invoice' | 'proforma'
+    target_numbering_type?: 'default' | 'quote'
+    parent_invoice_id?: number | null
+  }) =>
     api.post<{ draft_id: number }>(`/invoices/${id}/clone`, opts || {}).then(r => r.data),
   bulkReissue: (invoiceIds: number[], opts?: { increment_month_in_descriptions?: boolean; issue_date?: string }) =>
     api.post<{ created: Array<{ source_id: number; draft_id: number }>; errors: Array<{ source_id: number; error: string }> }>(

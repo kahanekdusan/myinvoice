@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, watch } from 'vue'
 import { useRouter, useRoute, RouterLink } from 'vue-router'
-import { invoicesApi, type MonthGroup, type InvoiceListItem } from '@/api/invoices'
-import { formatMoney, formatDate, formatMonth, statusLabel, typeLabel, statusBadgeClass, isOverdue, invoiceRowClass } from '@/composables/useFormat'
+import { invoicesApi, type MonthGroup, type InvoiceListItem, type ApprovalStatus } from '@/api/invoices'
+import { formatMoney, formatDate, formatMonth, isOverdue, invoiceRowClass } from '@/composables/useFormat'
+import { quoteStatusLabel, quoteTypeLabel, quoteStatusBadgeClass } from '@/composables/useQuotePresentation'
 import { useHotkey } from '@/composables/useHotkey'
 import { useToast } from '@/composables/useToast'
 import { useI18n } from 'vue-i18n'
@@ -17,6 +18,7 @@ import SearchableSelect from '@/components/ui/SearchableSelect.vue'
 const { t, tm, rt } = useI18n()
 const toast = useToast()
 const auth = useAuthStore()
+const isAdmin = computed(() => auth.user?.role === 'admin')
 
 const router = useRouter()
 const route = useRoute()
@@ -58,6 +60,10 @@ let searchTimeout: ReturnType<typeof setTimeout> | null = null
 function hasPositiveAmountToPay(inv: InvoiceListItem): boolean {
   if (!['invoice', 'proforma'].includes(inv.invoice_type)) return true
   return Number(inv.amount_to_pay ?? 0) > 0
+}
+
+function canManageQuoteState(inv: InvoiceListItem): boolean {
+  return inv.status !== 'draft' && !inv.has_final_invoice && !inv.has_advance_invoice
 }
 
 function toggleSelected(id: number) {
@@ -105,6 +111,13 @@ const issuableSelected = computed(() => {
     .flatMap(g => g.invoices)
     .filter(inv => ids.has(inv.id) && inv.status === 'draft')
     .sort((a, b) => (a.issue_date || '').localeCompare(b.issue_date || '') || (a.id - b.id))
+})
+
+const quoteStateSelected = computed(() => {
+  const ids = new Set(selectedIds.value)
+  return groups.value
+    .flatMap(g => g.invoices)
+    .filter(inv => ids.has(inv.id) && canManageQuoteState(inv))
 })
 
 // Hromadné označení za zaplacené — jen issued/sent/reminded (ne paid, ne cancelled, ne draft, ne cancellation)
@@ -258,12 +271,53 @@ async function bulkSend() {
   }
 }
 
+async function bulkUpdateQuoteStatus(status: Extract<ApprovalStatus, 'none' | 'approved' | 'rejected'>) {
+  const list = quoteStateSelected.value
+  if (list.length === 0) {
+    toast.warning(t('invoice.quote_state.bulk_no_eligible'))
+    return
+  }
+
+  let reason: string | undefined
+  if (status === 'rejected') {
+    const input = window.prompt(t('invoice.quote_state.bulk_rejected_reason_prompt') as string, '')
+    if (input === null) return
+    reason = input.trim()
+    if (!reason) {
+      toast.error(t('invoice.quote_state.reason_required'))
+      return
+    }
+  }
+
+  bulkBusy.value = true
+  let okCount = 0
+  const errors: string[] = []
+  try {
+    for (const inv of list) {
+      try {
+        await invoicesApi.updateApprovalStatus(inv.id, status, reason)
+        okCount++
+      } catch (e: any) {
+        errors.push(`${inv.varsymbol || `#${inv.id}`}: ${e?.response?.data?.error?.message || 'chyba'}`)
+      }
+    }
+    if (errors.length) {
+      toast.warning(t('invoice.quote_state.bulk_status_partial', { ok: okCount, err: errors.length }) + '\n' + errors.join('\n'))
+    } else {
+      toast.success(t('invoice.quote_state.bulk_status_success', { n: okCount }))
+    }
+    await load(true)
+  } finally {
+    bulkBusy.value = false
+  }
+}
+
 async function exportCsv() {
   try {
     const r = await invoicesApi.exportCsv({
       q: search.value || undefined,
       status: statusFilter.value || undefined,
-      type: quoteMode.value ? 'proforma' : (typeFilter.value || undefined),
+      type: quoteMode.value ? 'quote' : (typeFilter.value || undefined),
       year: dateFrom.value || dateTo.value ? undefined : (yearFilter.value === '' ? undefined : Number(yearFilter.value)),
       month: dateFrom.value || dateTo.value || yearFilter.value === '' || monthFilter.value === '' ? undefined : Number(monthFilter.value),
       date_from: dateFrom.value || undefined,
@@ -319,7 +373,7 @@ async function load(reset = true) {
     const result = await invoicesApi.listGrouped({
       q: search.value || undefined,
       status: statusFilter.value || undefined,
-      type: quoteMode.value ? 'proforma' : (typeFilter.value || undefined),
+      type: quoteMode.value ? 'quote' : (typeFilter.value || undefined),
       client_id: clientFilter.value === '' ? undefined : Number(clientFilter.value),
       year: dateFrom.value || dateTo.value ? undefined : (yearFilter.value === '' ? undefined : Number(yearFilter.value)),
       month: dateFrom.value || dateTo.value || yearFilter.value === '' || monthFilter.value === '' ? undefined : Number(monthFilter.value),
@@ -360,7 +414,7 @@ onMounted(async () => {
 
 function loadFiltersFromQuery(q: typeof route.query) {
   statusFilter.value = typeof q.status === 'string' ? q.status : ''
-  typeFilter.value   = quoteMode.value ? 'proforma' : (typeof q.type === 'string' ? q.type : '')
+  typeFilter.value   = quoteMode.value ? 'quote' : (typeof q.type === 'string' ? q.type : '')
   clientFilter.value = typeof q.client_id === 'string' && q.client_id !== '' ? Number(q.client_id) : ''
   overdueOnly.value  = q.overdue === '1' || q.overdue === 'true'
   unpaidOnly.value   = q.unpaid === '1' || q.unpaid === 'true'
@@ -411,7 +465,7 @@ watch(() => route.query, (newQ) => {
   if (Object.keys(newQ).length === 0) {
     suppressUrlSync = true
     statusFilter.value = ''
-    typeFilter.value = quoteMode.value ? 'proforma' : ''
+    typeFilter.value = quoteMode.value ? 'quote' : ''
     clientFilter.value = ''
     yearFilter.value = DEFAULT_YEAR
     monthFilter.value = ''
@@ -468,6 +522,24 @@ const monthOptions = computed(() => (tm('common.months_short') as unknown as str
           class="cursor-pointer inline-flex items-center gap-1.5 h-9 px-3 border border-primary-500 text-primary-700 hover:bg-primary-50 disabled:opacity-50 text-sm font-medium rounded-md">
           <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M8 16H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v2m-6 12h8a2 2 0 0 0 2-2v-8a2 2 0 0 0-2-2h-8a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2z"/></svg>
           {{ bulkBusy ? '…' : t('invoice.bulk_reissue', { n: selectedIds.length }) }}
+        </button>
+        <button v-if="(quoteStateSelected.length > 0) && isAdmin"
+          @click="bulkUpdateQuoteStatus('none')"
+          :disabled="bulkBusy"
+          class="cursor-pointer inline-flex items-center gap-1.5 h-9 px-3 border border-neutral-300 text-neutral-700 hover:bg-neutral-50 disabled:opacity-50 text-sm font-medium rounded-md">
+          {{ bulkBusy ? '…' : t('invoice.quote_state.bulk_set_draft', { n: quoteStateSelected.length }) }}
+        </button>
+        <button v-if="(quoteStateSelected.length > 0) && isAdmin"
+          @click="bulkUpdateQuoteStatus('approved')"
+          :disabled="bulkBusy"
+          class="cursor-pointer inline-flex items-center gap-1.5 h-9 px-3 border border-success-500 text-success-600 hover:bg-success-50 disabled:opacity-50 text-sm font-medium rounded-md">
+          {{ bulkBusy ? '…' : t('invoice.quote_state.bulk_set_approved', { n: quoteStateSelected.length }) }}
+        </button>
+        <button v-if="(quoteStateSelected.length > 0) && isAdmin"
+          @click="bulkUpdateQuoteStatus('rejected')"
+          :disabled="bulkBusy"
+          class="cursor-pointer inline-flex items-center gap-1.5 h-9 px-3 border border-danger-500 text-danger-500 hover:bg-danger-50 disabled:opacity-50 text-sm font-medium rounded-md">
+          {{ bulkBusy ? '…' : t('invoice.quote_state.bulk_set_rejected', { n: quoteStateSelected.length }) }}
         </button>
         <button v-if="(markPayableSelected.length > 0) && auth.canWrite"
           @click="bulkMarkPaid"
@@ -638,7 +710,7 @@ const monthOptions = computed(() => (tm('common.months_short') as unknown as str
                   <div class="font-medium text-neutral-900">{{ inv.client_company_name }}</div>
                   <div v-if="inv.project_name" class="text-xs text-neutral-500 truncate max-w-md">{{ inv.project_name }}</div>
                 </td>
-                <td class="px-4 py-2.5 text-center text-xs text-neutral-600">{{ typeLabel(inv.invoice_type) }}</td>
+                <td class="px-4 py-2.5 text-center text-xs text-neutral-600">{{ quoteTypeLabel() }}</td>
                 <td class="px-4 py-2.5 text-center text-xs text-neutral-600">
                   {{ formatDate(inv.tax_date || inv.issue_date) }}
                 </td>
@@ -651,8 +723,8 @@ const monthOptions = computed(() => (tm('common.months_short') as unknown as str
                   {{ formatMoney(inv.amount_to_pay ?? inv.total_with_vat, inv.currency) }}
                 </td>
                 <td class="px-4 py-2.5 text-center" @click.stop>
-                  <span class="text-xs px-2 py-0.5 rounded" :class="statusBadgeClass(inv.status)">
-                    {{ statusLabel(inv.status) }}
+                  <span class="text-xs px-2 py-0.5 rounded" :class="quoteStatusBadgeClass(inv)">
+                    {{ quoteStatusLabel(inv) }}
                   </span>
                   <span v-if="inv.sent_at" class="ml-1 text-xs px-1 py-0.5 rounded bg-success-50 text-success-600"
                     :title="t('invoice.sent_at', { date: formatDate(inv.sent_at) })">✉</span>
@@ -698,7 +770,7 @@ const monthOptions = computed(() => (tm('common.months_short') as unknown as str
                       <span v-else class="text-neutral-400">{{ t('invoice.draft_id_short', { id: inv.id }) }}</span>
                     </span>
                     <span class="text-neutral-400"> · </span>
-                    <span>{{ typeLabel(inv.invoice_type) }}</span>
+                    <span>{{ quoteTypeLabel() }}</span>
                     <span v-if="inv.project_name" class="text-neutral-400"> · </span>
                     <span v-if="inv.project_name" class="truncate">{{ inv.project_name }}</span>
                   </div>
@@ -718,8 +790,8 @@ const monthOptions = computed(() => (tm('common.months_short') as unknown as str
                       :title="t('invoice.viewed_at', { date: formatDate(inv.public_first_viewed_at) })">👁</span>
                     <span v-if="inv.reminder_count > 0" class="text-xs px-1 py-0.5 rounded bg-warning-50 text-warning-600 font-semibold"
                       :title="t('invoice.reminder_at', { count: inv.reminder_count, date: formatDate(inv.last_reminder_at) })">⚠ {{ inv.reminder_count }}</span>
-                    <span class="text-xs px-2 py-0.5 rounded" :class="statusBadgeClass(inv.status)">
-                      {{ statusLabel(inv.status) }}
+                    <span class="text-xs px-2 py-0.5 rounded" :class="quoteStatusBadgeClass(inv)">
+                      {{ quoteStatusLabel(inv) }}
                     </span>
                   </div>
                 </div>

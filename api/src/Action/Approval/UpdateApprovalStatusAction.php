@@ -81,8 +81,9 @@ final class UpdateApprovalStatusAction
             return Json::ok($response, ['invoice' => $this->repo->find($id)]);
         }
 
-        // approved → uložit status (volitelný komentář sdílí sloupec rejection_reason),
-        // vystavit + poslat fakturu
+        // approved → uložit status (volitelný komentář sdílí sloupec rejection_reason).
+        // U cenové nabídky tím jen nastavíme stav; auto-issue + send dává smysl
+        // pouze pro workflow schválení výkazu na běžné faktuře.
         $approveComment = $reason !== '' ? $reason : null;
         $this->repo->setApprovalDecision($id, 'approved', (string) ($user['email'] ?? null), $approveComment);
         $this->logger->log('invoice.approval_approved', $user['id'] ?? null, 'invoice', $id, [
@@ -90,6 +91,14 @@ final class UpdateApprovalStatusAction
             'decided_by_email' => $user['email'] ?? null,
             'comment' => $approveComment,
         ], $ip, $ua);
+
+        $isQuote = ($invoice['invoice_type'] ?? null) === 'proforma'
+            && ($invoice['numbering_type'] ?? 'default') === 'quote';
+        if ($isQuote) {
+            return Json::ok($response, [
+                'invoice' => $this->repo->find($id),
+            ]);
+        }
 
         // Auto-issue + send (idempotentní pokud faktura už není draft)
         try {

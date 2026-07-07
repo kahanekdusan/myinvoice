@@ -140,7 +140,8 @@ final class InvoiceRepository
         // Související doklady (pro cross-link v detailu):
         //  - u proformy: vystavený daňový doklad k záloze (dítě, invoice_type='invoice')
         //  - u dokladu s parent_invoice_id: rodič (proforma / původní faktura u storna/dobropisu)
-        $row['final_invoice'] = null;
+                $row['final_invoice'] = null;
+                $row['advance_invoice'] = null;
         if (($row['invoice_type'] ?? '') === 'proforma') {
             $ch = $pdo->prepare(
                 "SELECT id, varsymbol, status FROM invoices
@@ -152,6 +153,19 @@ final class InvoiceRepository
             $row['final_invoice'] = $c === false ? null : [
                 'id' => (int) $c['id'], 'varsymbol' => $c['varsymbol'], 'status' => $c['status'],
             ];
+            if (($row['numbering_type'] ?? 'default') === 'quote') {
+                $advance = $pdo->prepare(
+                    "SELECT id, varsymbol, status FROM invoices
+                      WHERE parent_invoice_id = ? AND invoice_type = 'proforma'
+                        AND COALESCE(numbering_type, 'default') = 'default'
+                      ORDER BY id LIMIT 1"
+                );
+                $advance->execute([$id]);
+                $a = $advance->fetch(PDO::FETCH_ASSOC);
+                $row['advance_invoice'] = $a === false ? null : [
+                    'id' => (int) $a['id'], 'varsymbol' => $a['varsymbol'], 'status' => $a['status'],
+                ];
+            }
         }
         $row['parent_invoice'] = null;
         if (!empty($row['parent_invoice_id'])) {
@@ -454,9 +468,22 @@ final class InvoiceRepository
 
         if (!empty($filters['type'])) {
             $types = is_array($filters['type']) ? $filters['type'] : [$filters['type']];
-            $place = implode(',', array_fill(0, count($types), '?'));
-            $where[] = "i.invoice_type IN ($place)";
-            foreach ($types as $t) $params[] = $t;
+            $typeClauses = [];
+            foreach ($types as $type) {
+                if ($type === 'quote') {
+                    $typeClauses[] = "(i.invoice_type = ? AND COALESCE(i.numbering_type, 'default') = 'quote')";
+                    $params[] = 'proforma';
+                    continue;
+                }
+                if ($type === 'proforma') {
+                    $typeClauses[] = "(i.invoice_type = ? AND COALESCE(i.numbering_type, 'default') != 'quote')";
+                    $params[] = 'proforma';
+                    continue;
+                }
+                $typeClauses[] = 'i.invoice_type = ?';
+                $params[] = $type;
+            }
+            $where[] = '(' . implode(' OR ', $typeClauses) . ')';
         }
         if (!empty($filters['status'])) {
             $statuses = is_array($filters['status']) ? $filters['status'] : [$filters['status']];
@@ -527,18 +554,23 @@ final class InvoiceRepository
             $total = (int) $cntStmt->fetchColumn();
         }
 
-        $sql = "SELECT i.id, i.varsymbol, i.invoice_type, i.parent_invoice_id, i.recurring_template_id,
+                $sql = "SELECT i.id, i.varsymbol, i.invoice_type, i.numbering_type, i.parent_invoice_id, i.recurring_template_id,
                        i.client_id, i.project_id, i.supplier_id,
                        i.issue_date, i.tax_date, i.due_date,
                        i.currency_id, cur.code AS currency, cur.symbol AS currency_symbol, cur.decimals AS currency_decimals,
                        i.total_without_vat, i.total_vat, i.total_with_vat,
                        i.advance_paid_amount, i.amount_to_pay,
-                       i.status, i.payment_method, i.revenue_category_id,
+                                             i.status, i.approval_status, i.payment_method, i.revenue_category_id,
                        i.sent_at, i.last_reminder_at, i.reminder_count,
                        i.public_link_sent_at,
                        i.public_first_opened_at, i.public_last_opened_at, i.public_open_count,
                        i.public_first_viewed_at, i.public_last_viewed_at, i.public_view_count, i.public_viewed_seconds,
                        i.paid_at, i.cancelled_at,
+                                             EXISTS (SELECT 1 FROM invoices ch
+                                                                WHERE ch.parent_invoice_id = i.id AND ch.invoice_type = 'invoice') AS has_final_invoice,
+                                             EXISTS (SELECT 1 FROM invoices ch
+                                                                WHERE ch.parent_invoice_id = i.id AND ch.invoice_type = 'proforma'
+                                                                    AND COALESCE(ch.numbering_type, 'default') = 'default') AS has_advance_invoice,
                        c.company_name AS client_company_name,
                        p.name AS project_name,
                        p.requires_work_report_approval AS project_requires_approval,
@@ -780,7 +812,6 @@ final class InvoiceRepository
             !empty($data['vat_classification_code']) ? (string) $data['vat_classification_code'] : null,
             !empty($data['revenue_category']) ? (string) $data['revenue_category'] : null,
             isset($data['revenue_category_id']) && $data['revenue_category_id'] ? (int) $data['revenue_category_id'] : null,
-                (($data['numbering_type'] ?? 'default') === 'quote') ? 'quote' : 'default',
         ];
         if ($hasExempt) {
             $params[] = !empty($data['income_tax_exempt']) ? 1 : 0;
@@ -789,6 +820,7 @@ final class InvoiceRepository
         if ($hasReminders) {
             $params[] = array_key_exists('auto_send_reminders', $data) ? ((int) (bool) $data['auto_send_reminders']) : 1;
         }
+        $params[] = (($data['numbering_type'] ?? 'default') === 'quote') ? 'quote' : 'default';
         if ($hasVarsymbol) $params[] = $manualVarsymbol;
         if ($hasPaymentMethod) $params[] = $paymentMethod;
         if ($hasType) $params[] = (string) $data['invoice_type'];
@@ -1081,6 +1113,12 @@ final class InvoiceRepository
         }
         if (array_key_exists('has_work_report', $row)) {
             $row['has_work_report'] = (bool) $row['has_work_report'];
+        }
+        if (array_key_exists('has_final_invoice', $row)) {
+            $row['has_final_invoice'] = (bool) $row['has_final_invoice'];
+        }
+        if (array_key_exists('has_advance_invoice', $row)) {
+            $row['has_advance_invoice'] = (bool) $row['has_advance_invoice'];
         }
         if (array_key_exists('revenue_category_id', $row)) {
             $row['revenue_category_id'] = $row['revenue_category_id'] !== null ? (int) $row['revenue_category_id'] : null;

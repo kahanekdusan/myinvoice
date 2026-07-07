@@ -94,14 +94,31 @@ final class BulkReissueAction
         ], 201);
     }
 
-    public function cloneOne(int $sourceId, string $issueDate, bool $incrementMonth, int $userId): int
+    public function cloneOne(
+        int $sourceId,
+        string $issueDate,
+        bool $incrementMonth,
+        int $userId,
+        ?string $targetInvoiceType = null,
+        ?string $targetNumberingType = null,
+        ?int $parentInvoiceId = null,
+    ): int
     {
         $source = $this->repo->find($sourceId);
         if ($source === null) {
             throw new \RuntimeException("Faktura #$sourceId nenalezena");
         }
 
-        $type = $source['invoice_type'] === 'proforma' ? 'proforma' : 'invoice';
+        $type = $targetInvoiceType ?? ($source['invoice_type'] === 'proforma' ? 'proforma' : 'invoice');
+        if (!in_array($type, ['invoice', 'proforma'], true)) {
+            throw new \RuntimeException('Nepodporovaný cílový typ klonu.');
+        }
+        $numberingType = $targetNumberingType
+            ?? ((($source['numbering_type'] ?? 'default') === 'quote' && $type === 'proforma') ? 'quote' : 'default');
+        $numberingType = $numberingType === 'quote' ? 'quote' : 'default';
+        if ($type !== 'proforma' && $numberingType === 'quote') {
+            throw new \RuntimeException('Číslování quote lze použít jen pro proforma doklad.');
+        }
 
         // Splatnost: stejná priorita jako u nové faktury (InvoiceDefaults::apply) —
         // zakázka → klient → dodavatel → 7. Bez tohoto fallbacku dostal klon faktury
@@ -156,18 +173,19 @@ final class BulkReissueAction
         try {
             $stmt = $pdo->prepare(
                 'INSERT INTO invoices
-                   (invoice_type, client_id, project_id, supplier_id,
+                   (invoice_type, parent_invoice_id, client_id, project_id, supplier_id,
                     issue_date, tax_date, due_date, currency_id, reverse_charge, prices_include_vat, language,
                     note_above_items, note_below_items, discount_percent, payment_method,
                     numbering_type, revenue_category_id,'
                 . ($hasReminders ? ' auto_send_reminders,' : '')
                 . ' status, created_by)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,'
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,'
                 . ($hasReminders ? ' ?,' : '')
                 . ' "draft", ?)'
             );
             $params = [
                 $type,
+                $parentInvoiceId,
                 $source['client_id'],
                 $source['project_id'],
                 (int) $source['supplier_id'],
@@ -184,7 +202,7 @@ final class BulkReissueAction
                 $source['note_below_items'],
                 (float) ($source['discount_percent'] ?? 0),
                 (string) ($source['payment_method'] ?? 'bank_transfer'),
-                (($source['numbering_type'] ?? 'default') === 'quote') ? 'quote' : 'default',
+                $numberingType,
                 // Reissue zachová kategorii tržby zdrojové faktury.
                 $source['revenue_category_id'] ?? null,
             ];

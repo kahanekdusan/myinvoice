@@ -12,6 +12,7 @@ use MyInvoice\Middleware\AuthMiddleware;
 use MyInvoice\Repository\InvoiceAttachmentRepository;
 use MyInvoice\Repository\InvoiceRepository;
 use MyInvoice\Service\ActivityLogger;
+use MyInvoice\Service\Invoice\PublicInvoiceLinkFactory;
 use MyInvoice\Service\IpMatcher;
 use MyInvoice\Service\Mail\InvoiceEmailVarsBuilder;
 use MyInvoice\Service\Mail\Mailer;
@@ -33,6 +34,7 @@ final class SendEmailAction
         private readonly Config $config,
         private readonly PdfArchiveService $pdfArchive,
         private readonly InvoiceAttachmentRepository $attachments,
+        private readonly PublicInvoiceLinkFactory $linkFactory,
     ) {}
 
     public function __invoke(Request $request, Response $response, array $args): Response
@@ -104,15 +106,32 @@ final class SendEmailAction
             return Json::error($response, 'pdf_failed', 'Nepodařilo se vygenerovat PDF: ' . $e->getMessage(), 500);
         }
 
+        // Cenová nabídka (proforma + numbering_type=quote) chodí jako příloha.
+        // Všechny ostatní typy (daňový doklad, zálohovka) chodí jako veřejný odkaz
+        // pro trackování zobrazení.
+        $isQuote = ($invoice['invoice_type'] ?? '') === 'proforma'
+            && ($invoice['numbering_type'] ?? 'default') === 'quote';
+
+        $invoiceViewUrl = null;
+        if (!$isQuote) {
+            $publicToken = $this->repo->rotatePublicViewToken($id);
+            $invoiceViewUrl = $this->linkFactory->build($publicToken);
+        }
+
         $locale = (string) ($invoice['language'] ?? 'cs');
         $vars = $this->varsBuilder->build($invoice, false, $locale);
         $vars['note_lines'] = $noteLines;
         $vars['note_text']  = $noteRaw;
+        if ($invoiceViewUrl !== null) {
+            $vars['invoice_view_url'] = $invoiceViewUrl;
+        }
 
         $supplierId = (int) ($invoice['supplier_id'] ?? 0);
-        $emailAttachments = [
-            ['path' => $pdfPath, 'name' => basename($pdfPath), 'contentType' => 'application/pdf'],
-        ];
+        // Pro odkaz (non-quote) se PDF neposílá jako příloha — klient fakturu otevře
+        // přes link, čímž se trackovatelně zaloguje zobrazení.
+        $emailAttachments = $isQuote
+            ? [['path' => $pdfPath, 'name' => basename($pdfPath), 'contentType' => 'application/pdf']]
+            : [];
         $extraAttachments = $this->attachments->listForInvoice($id);
         $sentAttachmentIds = [];
         foreach ($extraAttachments as $att) {
@@ -166,6 +185,8 @@ final class SendEmailAction
             'attachment_ids' => $sentAttachmentIds,
             'smtp_response'  => $smtpResponse,
             'note_chars'     => mb_strlen($noteRaw),
+            'delivery_mode'  => $isQuote ? 'attachment' : 'public_link',
+            'invoice_view_url' => $invoiceViewUrl,
         ], $ip, $request->getHeaderLine('User-Agent'));
 
         return Json::ok($response, [

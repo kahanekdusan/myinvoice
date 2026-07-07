@@ -16,7 +16,13 @@ use Psr\Http\Message\ServerRequestInterface as Request;
 /**
  * POST /api/invoices/{id}/clone
  * Body (volitelně):
- *   { "increment_month_in_descriptions": true, "issue_date": "YYYY-MM-DD" }
+ *   {
+ *     "increment_month_in_descriptions": true,
+ *     "issue_date": "YYYY-MM-DD",
+ *     "target_invoice_type": "invoice|proforma",
+ *     "target_numbering_type": "default|quote",
+ *     "parent_invoice_id": 123
+ *   }
  *
  * Vrací: { draft_id: int }
  */
@@ -38,12 +44,25 @@ final class CloneInvoiceAction
         $body = (array) ($request->getParsedBody() ?? []);
         $incrementMonth = (bool) ($body['increment_month_in_descriptions'] ?? false);
         $issueDate = !empty($body['issue_date']) ? (string) $body['issue_date'] : date('Y-m-d');
+        $targetInvoiceType = !empty($body['target_invoice_type']) ? (string) $body['target_invoice_type'] : null;
+        $targetNumberingType = !empty($body['target_numbering_type']) ? (string) $body['target_numbering_type'] : null;
+        $parentInvoiceId = array_key_exists('parent_invoice_id', $body) && $body['parent_invoice_id'] !== null
+            ? (int) $body['parent_invoice_id']
+            : null;
 
         $user = (array) $request->getAttribute(AuthMiddleware::ATTR_USER, []);
         $userId = (int) ($user['id'] ?? 0);
 
         try {
-            $newId = $this->bulk->cloneOne($id, $issueDate, $incrementMonth, $userId);
+            $newId = $this->bulk->cloneOne(
+                $id,
+                $issueDate,
+                $incrementMonth,
+                $userId,
+                $targetInvoiceType,
+                $targetNumberingType,
+                $parentInvoiceId,
+            );
         } catch (\Throwable $e) {
             return Json::error($response, 'clone_failed', $e->getMessage(), 500);
         }

@@ -313,8 +313,10 @@ final class SetupAction
         if ($current === '') {
             return true;
         }
+        if (str_starts_with($current, 'http://localhost')) {
+            return true;
+        }
         $placeholders = [
-            'http://localhost:8080',  // cfg.docker.php default
             'https://dev.example.com',// cfg.sample.php default
             'https://example.com',    // generic sample
         ];

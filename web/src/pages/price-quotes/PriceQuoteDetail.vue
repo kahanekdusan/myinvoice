@@ -5,6 +5,7 @@ import { useI18n } from 'vue-i18n'
 import { invoicesApi, type Invoice, type WorkReport, type ApprovalStatus, type InvoiceAttachment } from '@/api/invoices'
 import { apiErrorMessage } from '@/api/errors'
 import { formatMoney, formatDate, formatPercent, statusLabel, typeLabel, statusBadgeClass } from '@/composables/useFormat'
+import { isQuoteDocument, quoteStatusLabel, quoteStatusBadgeClass, quoteTypeLabel } from '@/composables/useQuotePresentation'
 import { useAuthStore } from '@/stores/auth'
 import { useSupplierStore } from '@/stores/supplier'
 import { useHotkey } from '@/composables/useHotkey'
@@ -145,6 +146,9 @@ function formatBytes(n: number): string {
 onMounted(load)
 
 function actionLabel(a: string): string {
+  if (isQuote.value && a === 'invoice.issued') {
+    return t('invoice.actions.quote_issued') as string
+  }
   const map: Record<string, string> = {
     'invoice.created': 'invoice.actions.created',
     'invoice.updated': 'invoice.actions.updated',
@@ -179,6 +183,17 @@ function actionColor(a: string): string {
   if (a.includes('cancelled') || a.includes('force')) return 'bg-warning-50 text-warning-600'
   if (a.includes('credit_note') || a.includes('cloned')) return 'bg-primary-100 text-primary-700'
   return 'bg-neutral-100 text-neutral-600'
+}
+
+function formatActivityPayload(payload: Record<string, unknown> | null): string {
+  if (!payload) return ''
+  return Object.entries(payload).map(([key, value]) => {
+    let rendered = typeof value === 'object' ? JSON.stringify(value) : String(value)
+    if (isQuote.value && (key === 'type' || key === 'invoice_type') && rendered === 'proforma') {
+      rendered = 'quote'
+    }
+    return `${key}=${rendered}`
+  }).join(' · ')
 }
 
 async function deleteInvoice() {
@@ -329,6 +344,32 @@ async function cloneInvoice() {
   }
 }
 
+async function createDocumentFromQuote(targetType: 'invoice' | 'proforma') {
+  if (!invoice.value) return
+  const confirmKey = targetType === 'invoice'
+    ? 'invoice.create_invoice_from_quote_confirm'
+    : 'invoice.create_proforma_from_quote_confirm'
+  if (!confirm(t(confirmKey, { varsymbol: invoice.value.varsymbol || `#${invoice.value.id}` }))) return
+  busy.value = targetType === 'invoice' ? 'create-invoice' : 'create-proforma'
+  try {
+    const result = await invoicesApi.clone(invoice.value.id, {
+      increment_month_in_descriptions: false,
+      issue_date: invoice.value.issue_date,
+      target_invoice_type: targetType,
+      target_numbering_type: 'default',
+      parent_invoice_id: invoice.value.id,
+    })
+    router.push(`/invoices/${result.draft_id}/edit`)
+  } catch (e: any) {
+    const fallback = targetType === 'invoice'
+      ? t('invoice.create_invoice_from_quote_failed')
+      : t('invoice.create_proforma_from_quote_failed')
+    toast.error(e?.response?.data?.error?.message || fallback)
+  } finally {
+    busy.value = null
+  }
+}
+
 function editIssued(force = false) {
   if (!invoice.value) return
   const ok = confirm(t('invoice.edit_issued_confirm_quote', {
@@ -393,6 +434,39 @@ const canSendTestReminder = computed(() =>
   && Number(invoice.value.amount_to_pay ?? 0) > 0
 )
 
+const isQuote = computed(() => isQuoteDocument(invoice.value))
+const quoteDisplayStatusLabel = computed(() => isQuote.value ? quoteStatusLabel(invoice.value) : statusLabel(invoice.value?.status ?? 'draft'))
+const quoteDisplayStatusClass = computed(() => isQuote.value ? quoteStatusBadgeClass(invoice.value) : statusBadgeClass(invoice.value?.status ?? 'draft'))
+const quoteDisplayTypeLabel = computed(() => isQuote.value ? quoteTypeLabel() : typeLabel(invoice.value?.invoice_type ?? 'proforma'))
+
+const canCreateInvoiceFromQuote = computed(() =>
+  !!invoice.value
+  && isQuote.value
+  && !isDraft.value
+  && invoice.value.status !== 'cancelled'
+  && !invoice.value.final_invoice
+  && !invoice.value.advance_invoice
+)
+
+const canCreateAdvanceFromQuote = computed(() =>
+  !!invoice.value
+  && isQuote.value
+  && !isDraft.value
+  && invoice.value.status !== 'cancelled'
+  && !invoice.value.final_invoice
+  && !invoice.value.advance_invoice
+)
+
+const canManageQuoteStatus = computed(() =>
+  !!invoice.value
+  && isQuote.value
+  && isAdmin.value
+  && !isDraft.value
+  && invoice.value.status !== 'cancelled'
+  && !invoice.value.final_invoice
+  && !invoice.value.advance_invoice
+)
+
 function openSendModal() {
   if (!invoice.value) return
   // Pre-fill recipients: client_main_email + project billing emails (de-duplikováno).
@@ -432,7 +506,7 @@ async function send() {
 
 const isDraft = computed(() => invoice.value?.status === 'draft')
 const isProforma = computed(() => invoice.value?.invoice_type === 'proforma')
-const canCancel = computed(() => invoice.value && ['issued', 'sent', 'reminded', 'paid'].includes(invoice.value.status)
+const canCancel = computed(() => invoice.value && !isQuote.value && ['issued', 'sent', 'reminded', 'paid'].includes(invoice.value.status)
   && invoice.value.invoice_type !== 'cancellation')
 // Dobropisu nelze vystavit další dobropis — v modalu skryjeme tu volbu.
 const isCreditNoteSource = computed(() => invoice.value?.invoice_type === 'credit_note')
@@ -548,11 +622,11 @@ async function updateApprovalStatus() {
       <h1 class="text-2xl font-semibold flex items-center gap-3 flex-wrap min-w-0">
         <span v-if="invoice.varsymbol" class="font-mono">{{ invoice.varsymbol }}</span>
         <span v-else class="text-neutral-400 font-mono">{{ t('invoice.draft_id', { id: invoice.id }) }}</span>
-        <span class="text-xs px-2 py-0.5 rounded font-normal" :class="statusBadgeClass(invoice.status)">
-          {{ statusLabel(invoice.status) }}
+        <span class="text-xs px-2 py-0.5 rounded font-normal" :class="quoteDisplayStatusClass">
+          {{ quoteDisplayStatusLabel }}
         </span>
         <span class="text-xs px-2 py-0.5 rounded font-normal bg-neutral-100 text-neutral-600">
-          {{ typeLabel(invoice.invoice_type) }}
+          {{ quoteDisplayTypeLabel }}
         </span>
         <span v-if="invoice.sent_at" class="text-xs px-1.5 py-0.5 rounded bg-success-50 text-success-600"
           :title="t('invoice.sent_at', { date: formatDate(invoice.sent_at) })">✉</span>
@@ -616,6 +690,11 @@ async function updateApprovalStatus() {
           class="cursor-pointer px-3 h-9 text-sm bg-primary-600 hover:bg-primary-700 disabled:bg-neutral-300 text-white font-medium rounded-md inline-flex items-center gap-1.5">
           <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M3 8l7.89 5.26a2 2 0 0 0 2.22 0L21 8M5 19h14a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2z"/></svg>
           {{ t('invoice.send_to_client') }}
+        </button>
+        <button v-if="canManageQuoteStatus" @click="openApprovalStatusModal" :disabled="busy !== null"
+          class="cursor-pointer px-3 h-9 text-sm border border-neutral-300 text-neutral-700 hover:bg-neutral-50 rounded-md inline-flex items-center gap-1.5">
+          <svg class="w-4 h-4 text-neutral-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12h6m-6 4h6M7 4h10a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z"/></svg>
+          {{ t('invoice.quote_state.change_status') }}
         </button>
       </div>
     </div>
@@ -747,7 +826,7 @@ async function updateApprovalStatus() {
         </dl>
       </div>
 
-      <div class="bg-white border border-neutral-200 rounded-lg p-5 shadow-sm">
+      <div v-if="!isQuote" class="bg-white border border-neutral-200 rounded-lg p-5 shadow-sm">
         <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-500 mb-3">{{ t('settings.account_cz') }}</h3>
           <dl class="space-y-1 text-sm">
           <div v-if="invoice.bank_account_number" class="font-mono text-xs">
@@ -915,6 +994,64 @@ async function updateApprovalStatus() {
       <p class="text-sm text-neutral-700 whitespace-pre-wrap">{{ invoice.note_below_items }}</p>
     </div>
 
+    <div v-if="isQuote" class="bg-white border border-neutral-200 rounded-lg shadow-sm">
+      <header class="px-5 py-3 border-b border-neutral-200 flex items-center justify-between gap-3">
+        <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-500">{{ t('invoice.quote_state.section_title') }}</h3>
+        <button v-if="canManageQuoteStatus" @click="openApprovalStatusModal" :disabled="busy !== null"
+          class="cursor-pointer px-3 h-9 text-sm border border-neutral-300 text-neutral-700 hover:bg-neutral-50 rounded-md">
+          {{ t('invoice.quote_state.change_status') }}
+        </button>
+      </header>
+      <div class="px-5 py-4">
+        <dl class="space-y-2 text-sm">
+          <div class="flex items-center justify-between gap-4">
+            <dt class="text-neutral-500">{{ t('invoice.quote_state.current_status') }}</dt>
+            <dd>
+              <span class="inline-block px-2 py-0.5 rounded text-xs font-medium" :class="quoteDisplayStatusClass">
+                {{ quoteDisplayStatusLabel }}
+              </span>
+            </dd>
+          </div>
+          <div v-if="invoice.sent_at" class="flex items-center justify-between gap-4">
+            <dt class="text-neutral-500">{{ t('invoice.quote_state.sent_at') }}</dt>
+            <dd>{{ formatDate(invoice.sent_at) }}</dd>
+          </div>
+          <div class="flex items-center justify-between gap-4">
+            <dt class="text-neutral-500">{{ t('invoice.quote_state.valid_until') }}</dt>
+            <dd>{{ formatDate(invoice.due_date) }}</dd>
+          </div>
+          <div v-if="invoice.advance_invoice" class="flex items-center justify-between gap-4">
+            <dt class="text-neutral-500">{{ t('invoice.quote_state.linked_advance_invoice') }}</dt>
+            <dd>
+              <RouterLink :to="`/invoices/${invoice.advance_invoice.id}`" class="text-primary-700 hover:text-primary-800 hover:underline">
+                {{ invoice.advance_invoice.varsymbol || `#${invoice.advance_invoice.id}` }}
+              </RouterLink>
+            </dd>
+          </div>
+          <div v-if="invoice.final_invoice" class="flex items-center justify-between gap-4">
+            <dt class="text-neutral-500">{{ t('invoice.quote_state.linked_invoice') }}</dt>
+            <dd>
+              <RouterLink :to="`/invoices/${invoice.final_invoice.id}`" class="text-primary-700 hover:text-primary-800 hover:underline">
+                {{ invoice.final_invoice.varsymbol || `#${invoice.final_invoice.id}` }}
+              </RouterLink>
+            </dd>
+          </div>
+          <div v-if="invoice.approval_rejection_reason" class="border-t border-neutral-200 pt-2">
+            <dt class="text-neutral-500 mb-1">
+              {{ approvalStatus === 'rejected' ? t('invoice.quote_state.rejection_reason') : t('invoice.quote_state.comment') }}
+            </dt>
+            <dd class="whitespace-pre-wrap" :class="approvalStatus === 'rejected' ? 'text-danger-600' : 'text-neutral-700'">
+              {{ invoice.approval_rejection_reason }}
+            </dd>
+          </div>
+        </dl>
+        <div class="mt-4 text-xs text-neutral-500 space-y-1">
+          <p>{{ t('invoice.quote_state.expired_hint') }}</p>
+          <p>{{ t('invoice.quote_state.invoiced_hint') }}</p>
+        </div>
+      </div>
+    </div>
+
 
     <!-- Stav schválení výkazu — viditelné jen pokud projekt vyžaduje + výkaz existuje -->
     <div v-if="requiresApproval" class="bg-white border border-neutral-200 rounded-lg shadow-sm">
@@ -984,27 +1121,27 @@ async function updateApprovalStatus() {
     <!-- Approval status modal (admin) -->
     <div v-if="approvalStatusOpen" class="fixed inset-0 bg-neutral-900/40 z-50 flex items-center justify-center p-4">
       <div class="bg-white rounded-xl shadow-lg max-w-md w-full p-5">
-        <h3 class="text-lg font-semibold mb-3">{{ t('invoice.approval.modal_title') }}</h3>
-        <p class="text-sm text-neutral-600 mb-3">{{ t('invoice.approval.modal_hint') }}</p>
+        <h3 class="text-lg font-semibold mb-3">{{ isQuote ? t('invoice.quote_state.modal_title') : t('invoice.approval.modal_title') }}</h3>
+        <p class="text-sm text-neutral-600 mb-3">{{ isQuote ? t('invoice.quote_state.modal_hint') : t('invoice.approval.modal_hint') }}</p>
         <div class="space-y-2 mb-4">
           <label v-for="opt in (['none','approved','rejected'] as const)" :key="opt"
             class="flex items-start gap-2 p-3 border rounded-md cursor-pointer"
             :class="approvalStatusDraft === opt ? 'border-primary-500 bg-primary-50' : 'border-neutral-200'">
             <input type="radio" v-model="approvalStatusDraft" :value="opt" class="mt-1" />
             <div>
-              <div class="font-medium text-sm">{{ t('invoice.approval.status_' + opt) }}</div>
-              <div class="text-xs text-neutral-500">{{ t('invoice.approval.modal_desc_' + opt) }}</div>
+              <div class="font-medium text-sm">{{ isQuote ? t('invoice.quote_state.option_' + opt) : t('invoice.approval.status_' + opt) }}</div>
+              <div class="text-xs text-neutral-500">{{ isQuote ? t('invoice.quote_state.modal_desc_' + opt) : t('invoice.approval.modal_desc_' + opt) }}</div>
             </div>
           </label>
         </div>
         <div v-if="approvalStatusDraft === 'rejected'" class="mb-4">
-          <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('invoice.approval.rejection_reason') }} *</label>
+          <label class="block text-sm font-medium text-neutral-700 mb-1">{{ isQuote ? t('invoice.quote_state.rejection_reason') : t('invoice.approval.rejection_reason') }} *</label>
           <textarea v-model="approvalRejectReason" rows="2" required
             class="w-full px-3 py-2 border border-neutral-300 rounded-md text-sm"></textarea>
         </div>
         <div v-else-if="approvalStatusDraft === 'approved'" class="mb-4">
           <label class="block text-sm font-medium text-neutral-700 mb-1">
-            {{ t('invoice.approval.comment') }}
+            {{ isQuote ? t('invoice.quote_state.comment') : t('invoice.approval.comment') }}
             <span class="text-xs text-neutral-500 font-normal">({{ t('invoice.approval.comment_optional') }})</span>
           </label>
           <textarea v-model="approvalRejectReason" rows="2"
@@ -1139,7 +1276,7 @@ async function updateApprovalStatus() {
               <td class="px-3 py-2 font-mono text-xs text-neutral-400 whitespace-nowrap">{{ a.created_at.replace('T', ' ').slice(0, 19) }}</td>
               <td class="px-3 py-2 text-xs text-neutral-600 break-all whitespace-pre-wrap leading-snug">
                 <template v-if="a.payload">
-                  {{ Object.entries(a.payload).map(([k, v]) => k + '=' + (typeof v === 'object' ? JSON.stringify(v) : String(v))).join(' · ') }}
+                  {{ formatActivityPayload(a.payload) }}
                 </template>
               </td>
             </tr>
@@ -1185,10 +1322,22 @@ async function updateApprovalStatus() {
           {{ t('recurring.create_from_invoice') }}
         </RouterLink>
 
-        <button v-if="!isDraft && !['cancellation'].includes(invoice.invoice_type) && (isAdmin || invoice.invoice_type === 'proforma')" @click="editIssued(isAdmin && invoice.invoice_type !== 'proforma')" :disabled="busy !== null"
+        <button v-if="!isDraft && !isQuote && !['cancellation'].includes(invoice.invoice_type) && (isAdmin || invoice.invoice_type === 'proforma')" @click="editIssued(isAdmin && invoice.invoice_type !== 'proforma')" :disabled="busy !== null"
           class="cursor-pointer px-3 h-9 text-sm border border-warning-500/50 text-warning-600 hover:bg-warning-50 rounded-md inline-flex items-center gap-1.5">
           <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v2m0 4h.01M5.07 19h13.86c1.54 0 2.5-1.67 1.73-3L13.73 4a2 2 0 0 0-3.46 0L3.34 16c-.77 1.33.19 3 1.73 3z"/></svg>
           {{ t('invoice.edit_admin') }}
+        </button>
+
+        <button v-if="canCreateAdvanceFromQuote" @click="createDocumentFromQuote('proforma')" :disabled="busy !== null"
+          class="cursor-pointer px-3 h-9 text-sm border border-primary-500/40 text-primary-700 hover:bg-primary-50 rounded-md inline-flex items-center gap-1.5">
+          <svg class="w-4 h-4 text-primary-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4v16m8-8H4"/></svg>
+          {{ busy === 'create-proforma' ? '…' : t('invoice.create_proforma_from_quote') }}
+        </button>
+
+        <button v-if="canCreateInvoiceFromQuote" @click="createDocumentFromQuote('invoice')" :disabled="busy !== null"
+          class="cursor-pointer px-3 h-9 text-sm border border-success-500/40 text-success-600 hover:bg-success-50 rounded-md inline-flex items-center gap-1.5">
+          <svg class="w-4 h-4 text-success-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
+          {{ busy === 'create-invoice' ? '…' : t('invoice.create_invoice_from_quote') }}
         </button>
 
         <button v-if="canCancel" @click="openCancelModal" :disabled="busy !== null"
