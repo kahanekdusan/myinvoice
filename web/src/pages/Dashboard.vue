@@ -3,6 +3,7 @@ import { ref, onMounted, computed } from 'vue'
 import { useRouter, RouterLink } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { useAuthStore } from '@/stores/auth'
+import { useSupplierStore } from '@/stores/supplier'
 
 const { t } = useI18n()
 import { dashboardApi, type DashboardSummary } from '@/api/dashboard'
@@ -10,16 +11,28 @@ import { formatMoney, formatDate } from '@/composables/useFormat'
 import SparklineChart from '@/components/charts/SparklineChart.vue'
 import TopClientsPieChart from '@/components/charts/TopClientsPieChart.vue'
 import TaxNetWidget from '@/components/dashboard/TaxNetWidget.vue'
+import ActionItemsWidget from '@/components/dashboard/ActionItemsWidget.vue'
+import WorkReportModal from '@/components/modals/WorkReportModal.vue'
 
 const router = useRouter()
 const auth = useAuthStore()
+const supplierStore = useSupplierStore()
 const isAdmin = computed(() => auth.user?.role === 'admin')
+
+// Onboarding gate (#151): bez dodavatele je dashboard prázdný a všechny zakládací akce
+// padají → místo dat ukážeme výzvu k vytvoření prvního dodavatele.
+const hasSupplier = computed(() => supplierStore.hasSupplier)
 
 const summary = ref<DashboardSummary | null>(null)
 const loading = ref(true)
 const error = ref('')
 
-onMounted(async () => {
+async function loadSummary() {
+  // Žádný dodavatel → nenačítej summary (vrátilo by jen prázdná data), ukaž gate.
+  if (!hasSupplier.value) {
+    loading.value = false
+    return
+  }
   try {
     summary.value = await dashboardApi.summary()
   } catch (e: any) {
@@ -27,7 +40,17 @@ onMounted(async () => {
   } finally {
     loading.value = false
   }
-})
+}
+
+onMounted(loadSummary)
+
+// Výkaz práce modal — otevíráno z tlačítka „Výkaz" na kartě konceptu (stejný popup jako v /invoices).
+const wrModalOpen = ref(false)
+const wrModalInvoiceId = ref(0)
+function openWorkReport(id: number) {
+  wrModalInvoiceId.value = id
+  wrModalOpen.value = true
+}
 
 const kpiGridCols = computed(() => {
   if (!summary.value) return 'lg:grid-cols-6'
@@ -99,6 +122,23 @@ const hasCostsData = computed(() => (summary.value?.purchase_costs_by_month ?? [
 
 <template>
   <div>
+    <!-- Onboarding gate (#151): dodavatel přeskočen v setupu → bez něj nelze nic založit -->
+    <div v-if="!hasSupplier" class="max-w-2xl mx-auto bg-surface border border-neutral-200 rounded-lg shadow-sm p-8 text-center">
+      <div class="w-14 h-14 bg-primary-100 rounded-full mx-auto mb-4 flex items-center justify-center">
+        <svg class="w-7 h-7 text-primary-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M19 21V5a2 2 0 0 0-2-2H7a2 2 0 0 0-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1v5m-4 0h4"/>
+        </svg>
+      </div>
+      <h2 class="text-xl font-semibold mb-2">{{ t('dashboard.no_supplier.title') }}</h2>
+      <p class="text-neutral-500 mb-6">{{ t('dashboard.no_supplier.intro') }}</p>
+      <RouterLink v-if="isAdmin" to="/admin/codebooks?create=supplier"
+        class="px-5 h-10 inline-flex items-center bg-primary-600 hover:bg-primary-700 text-white text-sm font-medium rounded-md">
+        {{ t('dashboard.no_supplier.cta_admin') }}
+      </RouterLink>
+      <p v-else class="text-sm text-neutral-600">{{ t('dashboard.no_supplier.non_admin') }}</p>
+    </div>
+
+    <template v-else>
     <div v-if="loading" class="text-center text-neutral-500 py-12">{{ t('dashboard.loading_data') }}</div>
 
     <div v-else-if="error" class="rounded-md bg-danger-50 border border-danger-500/40 px-3 py-2 text-sm text-danger-500">
@@ -119,6 +159,52 @@ const hasCostsData = computed(() => (summary.value?.purchase_costs_by_month ?? [
     </div>
 
     <div v-else-if="summary && summary.kpi" class="space-y-6">
+      <!-- ═══ Akce pro tebe (přesunuto z CRM) — první část Přehledu (skryto pro readonly) ═══ -->
+      <ActionItemsWidget v-if="auth.canWrite" />
+
+      <!-- ═══ Výkazy práce — rozpracované (draft) vystavené faktury k doplnění (skryto pro readonly) ═══ -->
+      <section v-if="auth.canWrite && summary.draft_invoices && summary.draft_invoices.length" class="space-y-3">
+        <h2 class="flex items-center gap-2 flex-wrap">
+          <span class="inline-flex items-center px-2.5 py-1 rounded-md text-xs font-bold uppercase tracking-wider bg-primary-50 text-primary-700">
+            {{ t('dashboard.work_reports.title') }}
+          </span>
+          <span class="text-xs text-neutral-400">{{ t('dashboard.work_reports.hint') }}</span>
+        </h2>
+        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+          <div v-for="d in summary.draft_invoices" :key="d.id"
+            class="bg-surface border border-neutral-200 rounded-lg p-4 shadow-sm flex flex-col gap-2">
+            <div class="flex items-start justify-between gap-2">
+              <RouterLink :to="`/clients/${d.client_id}`" class="font-medium text-neutral-900 hover:text-primary-700 hover:underline truncate" :title="d.client_company_name">
+                {{ d.client_company_name }}
+              </RouterLink>
+              <span class="text-[10px] px-1.5 py-0.5 rounded bg-neutral-100 text-neutral-500 uppercase tracking-wide font-medium whitespace-nowrap">
+                {{ t('status.draft') }}
+              </span>
+            </div>
+            <div class="text-xs text-neutral-500 min-h-[1rem] truncate" :title="d.project_name || ''">
+              <span v-if="d.project_name">📁 {{ d.project_name }}</span>
+              <span v-else class="text-neutral-300">{{ t('dashboard.work_reports.no_project') }}</span>
+            </div>
+            <div class="flex items-center justify-between gap-2 mt-auto pt-2 border-t border-neutral-100">
+              <span class="text-xs font-mono text-neutral-600 truncate">
+                <span v-if="d.varsymbol">{{ d.varsymbol }} · </span>{{ formatMoney(d.total_with_vat, d.currency) }}
+              </span>
+              <div class="flex items-center gap-1.5 shrink-0">
+                <RouterLink :to="`/invoices/${d.id}/edit`"
+                  class="cursor-pointer inline-flex items-center justify-center h-6 px-2 rounded-md border border-neutral-300 text-neutral-700 hover:bg-neutral-50 text-xs font-medium">
+                  {{ t('common.edit') }}
+                </RouterLink>
+                <button type="button" @click="openWorkReport(d.id)"
+                  class="cursor-pointer inline-flex items-center gap-1 h-6 px-2 rounded-md bg-primary-600 hover:bg-primary-700 text-white text-xs font-medium">
+                  <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 17v-6m3 6v-4m3 4v-2"/></svg>
+                  {{ t('dashboard.work_reports.button') }}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
       <!-- Daňový widget „co mi zbyde" — jen pro OSVČ (komponenta se sama skryje jinak) -->
       <TaxNetWidget />
 
@@ -534,5 +620,12 @@ const hasCostsData = computed(() => (summary.value?.purchase_costs_by_month ?? [
       </div>
       </div>
     </div>
+    </template>
+
+    <!-- Výkaz práce modal — otevřený z tlačítka „Výkaz" na kartě konceptu. -->
+    <WorkReportModal v-if="wrModalInvoiceId > 0"
+      v-model="wrModalOpen"
+      :invoice-id="wrModalInvoiceId"
+      @saved="loadSummary" />
   </div>
 </template>

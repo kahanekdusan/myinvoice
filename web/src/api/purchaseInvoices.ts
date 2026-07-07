@@ -3,6 +3,31 @@ import { api } from './client'
 export type PurchaseInvoiceStatus = 'draft' | 'received' | 'booked' | 'paid' | 'cancelled'
 export type PurchaseDocumentKind = 'invoice' | 'receipt' | 'credit_note' | 'advance'
 export type ExchangeRateSource = 'cnb' | 'manual' | 'idoklad' | 'fakturoid'
+/** Provenience platebního účtu pro QR platbu (viz migrace 0107). */
+export type PaymentAccountSource = 'isdoc' | 'ai' | 'ai_reextract' | 'qr_image' | 'manual'
+
+/** Strukturovaný platební účet dodavatele (pro QR platbu / ruční editaci). */
+export interface PaymentQrAccount {
+  account_number: string | null
+  bank_code: string | null
+  iban: string | null
+  bic: string | null
+  variable_symbol: string | null
+}
+
+/** Odpověď „Zaplatit pomocí QR" endpointu. */
+export interface PaymentQrResponse {
+  ok: boolean
+  qr_data_uri: string | null
+  source: PaymentAccountSource | null
+  amount: number
+  currency: string
+  account: PaymentQrAccount
+  editable: boolean
+  needs_account: boolean
+  /** true → účet ještě nikdo nezkusil doplnit, frontend smí spustit extract-account. */
+  can_extract?: boolean
+}
 
 export interface PurchaseInvoiceItem {
   id?: number
@@ -127,6 +152,13 @@ export interface PurchaseInvoice {
   paid_amount_payment_ccy: number | null
   paid_amount_invoice_ccy: number | null
   exchange_diff_base: number | null
+  // Platební účet dodavatele pro „Zaplatit pomocí QR" (migrace 0107)
+  payment_account_number: string | null
+  payment_bank_code: string | null
+  payment_iban: string | null
+  payment_bic: string | null
+  payment_variable_symbol: string | null
+  payment_account_source: PaymentAccountSource | null
   status: PurchaseInvoiceStatus
   booked_at: string | null
   paid_at: string | null
@@ -136,6 +168,13 @@ export interface PurchaseInvoice {
   pdf_size_bytes: number | null
   pdf_original_name: string | null
   pdf_uploaded_at: string | null
+  /** Strojově čitelný zdrojový originál (ISDOC/ISDOCX/…) — důkazní stopa. */
+  source_path: string | null
+  source_hash: string | null
+  source_size_bytes: number | null
+  source_original_name: string | null
+  source_format: 'isdoc' | 'isdocx' | 'pdf' | 'pohoda_xml' | 'idoklad_json' | 'fakturoid_json' | null
+  source_uploaded_at: string | null
   vat_classification_code: string | null
   expense_category_id: number | null
   /** Název + kód kategorie nákladu (join z expense_categories, jen v detailu). */
@@ -214,6 +253,7 @@ export interface PurchaseInvoiceListItem {
   vendor_ic: string | null
   month_bucket: string
   extraction_warning: string | null
+  payment_ordered_at: string | null
 }
 
 export interface PurchaseMonthGroup {
@@ -261,6 +301,15 @@ export interface PurchaseInvoicePayload {
   expense_category_id?: number | null
   /** Ruční rekapitulace DPH dle dokladu (§ 73). null/[] = počítat standardně. */
   vat_overrides?: PurchaseVatOverride[] | null
+  /** Platební účet dodavatele pro QR platbu (migrace 0107). */
+  payment?: {
+    account_number?: string | null
+    bank_code?: string | null
+    iban?: string | null
+    bic?: string | null
+    variable_symbol?: string | null
+    source?: PaymentAccountSource
+  }
   items: Array<{
     description: string
     quantity: number
@@ -284,6 +333,8 @@ export interface PurchaseListFilters {
   unpaid_only?: boolean
   overdue?: boolean
   needs_review?: boolean
+  /** '1' = předané k úhradě, '0' = nepředané (odvozeno z payment_ordered_at). */
+  payment_ordered?: '1' | '0'
   q?: string
   page?: number
   per_page?: number
@@ -335,6 +386,7 @@ export const purchaseInvoicesApi = {
     if (filters.unpaid_only)  params['filter[unpaid_only]']  = 1
     if (filters.overdue)      params['filter[overdue]']      = 1
     if (filters.needs_review) params['filter[needs_review]'] = 1
+    if (filters.payment_ordered) params['filter[payment_ordered]'] = filters.payment_ordered
     if (filters.page)        params.page                   = filters.page
     if (filters.per_page)    params.per_page               = filters.per_page
     return api.get<{ data: PurchaseMonthGroup[]; meta: PurchaseListMeta }>(
@@ -372,6 +424,15 @@ export const purchaseInvoicesApi = {
 
   dismissExtractionWarning: (id: number) =>
     api.post<PurchaseInvoice>(`/purchase-invoices/${id}/dismiss-extraction-warning`).then(r => r.data),
+
+  // „Zaplatit pomocí QR" — QR z uloženého účtu (GET), jednorázové lazy doplnění
+  // účtu z ISDOC/AI (POST), ruční editace účtu (PUT).
+  paymentQr: (id: number) =>
+    api.get<PaymentQrResponse>(`/purchase-invoices/${id}/payment-qr`).then(r => r.data),
+  extractPaymentAccount: (id: number) =>
+    api.post<PaymentQrResponse>(`/purchase-invoices/${id}/payment-qr/extract-account`).then(r => r.data),
+  updatePaymentAccount: (id: number, payload: Partial<PaymentQrAccount>) =>
+    api.put<PaymentQrResponse>(`/purchase-invoices/${id}/payment-account`, payload).then(r => r.data),
 
   // Propojení se zálohovou fakturou (advance) — proti dvojímu započtení nákladu
   advanceCandidates: (id: number) =>
@@ -420,6 +481,14 @@ export const purchaseInvoicesApi = {
     const qs = params.toString()
     return `/api/purchase-invoices/${id}/pdf${qs ? '?' + qs : ''}`
   },
+  /** URL ke stažení strojového zdrojového originálu (ISDOC/ISDOCX/…) — vždy attachment. */
+  sourceUrl: (id: number) => {
+    const sid = localStorage.getItem('myinvoice.current_supplier_id')
+    const params = new URLSearchParams()
+    if (sid && /^\d+$/.test(sid)) params.set('supplier_id', sid)
+    const qs = params.toString()
+    return `/api/purchase-invoices/${id}/source${qs ? '?' + qs : ''}`
+  },
 
   /** Naše vygenerované PDF (mPDF z dat). Když nemáme originál nebo chceme vlastní layout. */
   ourPdfUrl: (id: number, inline = false) => {
@@ -453,17 +522,26 @@ export const purchaseInvoicesApi = {
     api.post<InboxScanResult>('/purchase-invoices/scan-inbox', { dry_run: dryRun }).then(r => r.data),
 
   /**
-   * Export ZIP s archivovanými vendor PDF za měsíc.
-   * Priorita: pokud purchase_invoice.pdf_path je set, použije ho; jinak fakturu skipne.
+   * Export přijatých faktur za měsíc nebo čtvrtletí.
    * Vrací URL pro přímou navigaci (axios by stáhl jako blob).
    */
   exportUrl: (
-    month: string,
+    period: { type: 'monthly'; year: number; month: number } | { type: 'quarterly'; year: number; quarter: number },
     dateBy: 'tax' | 'issue' | 'received' = 'tax',
     format: 'pdf-zip' | 'pohoda' | 'isdoc' = 'pdf-zip',
   ) => {
     const sid = localStorage.getItem('myinvoice.current_supplier_id')
-    const params = new URLSearchParams({ month, format, date_by: dateBy })
+    const params = new URLSearchParams({
+      period: period.type,
+      year: String(period.year),
+      format,
+      date_by: dateBy,
+    })
+    if (period.type === 'quarterly') {
+      params.set('quarter', String(period.quarter))
+    } else {
+      params.set('month', String(period.month))
+    }
     if (sid && /^\d+$/.test(sid)) params.set('supplier_id', sid)
     return `/api/purchase-invoices/export?${params.toString()}`
   },

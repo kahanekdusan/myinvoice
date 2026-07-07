@@ -172,6 +172,14 @@ async function save() {
 
           <label class="flex items-center justify-between gap-2 py-2 border-t border-neutral-100 cursor-pointer">
             <span class="text-xs font-medium text-neutral-700">
+              {{ t('tax.secondary') }}
+              <small class="block font-normal text-neutral-400">{{ t('tax.secondary_hint') }}</small>
+            </span>
+            <input v-model="profile.is_secondary" type="checkbox" class="rounded border-neutral-300 text-primary-600 shrink-0">
+          </label>
+
+          <label class="flex items-center justify-between gap-2 py-2 border-t border-neutral-100 cursor-pointer">
+            <span class="text-xs font-medium text-neutral-700">
               {{ t('tax.spouse') }}
               <small class="block font-normal text-neutral-400">{{ t('tax.spouse_hint') }}</small>
             </span>
@@ -327,6 +335,19 @@ async function save() {
                 <div>
                   <b>{{ t('tax.limit_' + x.key) }}</b> · {{ formatMoney(x.val, 'CZK') }} —
                   {{ x.will ? t('tax.will_cross_in', { month: monthLabel(x.month) }) : t('tax.wont_cross') }}
+                </div>
+              </div>
+
+              <!-- Vedlejší činnost: rozhodná částka pro placení sociálního pojištění (měří se proti zisku) -->
+              <div v-if="pred.secondary"
+                class="flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm border"
+                :class="pred.secondary.will ? 'bg-danger-50 border-danger-500/30 text-danger-600' : 'bg-success-50 border-success-600/20 text-success-700'">
+                <span>{{ pred.secondary.will ? '⚠' : '✓' }}</span>
+                <div>
+                  <b>{{ t('tax.limit_social_secondary') }}</b> · {{ formatMoney(pred.secondary.threshold, 'CZK') }} —
+                  {{ pred.secondary.will
+                    ? t('tax.social_secondary_cross', { month: monthLabel(pred.secondary.month), profit: formatMoney(pred.secondary.profit, 'CZK') })
+                    : t('tax.social_secondary_ok', { profit: formatMoney(pred.secondary.profit, 'CZK') }) }}
                 </div>
               </div>
             </div>

@@ -6,6 +6,7 @@ import { recurringApi, type RecurringTemplate, type RecurringTemplatePayload, ty
 import { clientsApi, type Client, type ViesLookupResult } from '@/api/clients'
 import { projectsApi, type Project } from '@/api/projects'
 import { codebooksApi, type VatRate, type Currency, type Unit } from '@/api/codebooks'
+import { revenueCategoriesApi, type RevenueCategory } from '@/api/revenueCategories'
 import { useToast } from '@/composables/useToast'
 import { useSupplierStore } from '@/stores/supplier'
 import { formatMoney } from '@/composables/useFormat'
@@ -14,7 +15,7 @@ import SearchableSelect from '@/components/ui/SearchableSelect.vue'
 import ClientFormModal from '@/components/modals/ClientFormModal.vue'
 import ProjectFormModal from '@/components/modals/ProjectFormModal.vue'
 
-const { t } = useI18n()
+const { t, tm, rt } = useI18n()
 const toast = useToast()
 const route = useRoute()
 const router = useRouter()
@@ -24,6 +25,10 @@ const supplierStore = useSupplierStore()
 // jako u ruční faktury (InvoiceEditor). Backend (RecurringInvoiceGenerator) to navíc
 // vynucuje při generování, takže to platí i pro šablony uložené dřív.
 const supplierIsVatPayer = computed(() => supplierStore.currentSupplier?.is_vat_payer ?? true)
+// Identifikovaná osoba (§ 6g–6l ZDPH, #94) — neplátce s RC u služeb do EU.
+const supplierIsIdentified = computed(() => supplierStore.currentSupplier?.is_identified ?? false)
+// RC checkbox: plátce vždy, IO taky (její hlavní use-case); čistý neplátce ne.
+const showReverseChargeUI = computed(() => supplierIsVatPayer.value || supplierIsIdentified.value)
 
 const isEdit = computed(() => route.params.id !== undefined && route.params.id !== 'new')
 const tplId = computed(() => (isEdit.value ? Number(route.params.id) : null))
@@ -31,6 +36,12 @@ const tplId = computed(() => (isEdit.value ? Number(route.params.id) : null))
 const loading = ref(false)
 const submitting = ref(false)
 const error = ref('')
+
+// Inline nápověda placeholderů ({YYYY}, {DATE}…) v popisech položek — defaultně zabalená.
+const placeholdersHelpOpen = ref(false)
+const placeholderRows = computed(() =>
+  (tm('recurring.placeholders_rows') as { c: string; d: string }[]).map(r => ({ c: rt(r.c), d: rt(r.d) }))
+)
 
 const clients = ref<Client[]>([])  // akumulovaná cache (výsledky hledání + vybraný)
 // Server-side našeptávač klientů (zákazníků) — SearchableSelect remote.
@@ -70,6 +81,10 @@ const projects = ref<Project[]>([])
 const currencies = ref<Currency[]>([])
 const vatRates = ref<VatRate[]>([])
 const units = ref<Unit[]>([])
+const revenueCategories = ref<RevenueCategory[]>([])
+// Label kategorie načtené šablony — pro případ, že je mezitím archivovaná
+// (list(false) vrací jen aktivní) a v selectu by jinak „zmizela".
+const loadedCategoryLabel = ref<string | null>(null)
 
 function defaultItemUnit(): string {
   return units.value.find(u => u.is_default)?.code || units.value[0]?.code || 'ks'
@@ -100,6 +115,7 @@ const form = ref<{
   reverse_charge: boolean
   prices_include_vat: boolean
   discount_percent: number
+  revenue_category_id: number | null
   payment_due_days: number
   tax_date_mode: 'same_as_issue' | 'previous_month_last_day'
   draft_open_mode: 'at_issue' | 'period_start'
@@ -126,6 +142,7 @@ const form = ref<{
   reverse_charge: false,
   prices_include_vat: false,
   discount_percent: 0,
+  revenue_category_id: null,
   payment_due_days: 14,
   tax_date_mode: 'same_as_issue',
   draft_open_mode: 'at_issue',
@@ -322,6 +339,18 @@ watch(() => form.value.client_id, async (newId) => {
       if (formLoaded.value && typeof c.payment_due_default === 'number') {
         form.value.payment_due_days = c.payment_due_default
       }
+      // RC default dle klienta — zrcadlí InvoiceEditor.applyClientDefaults:
+      // plátce přebírá klientský flag; identifikovaná osoba (#94) RC zapne
+      // automaticky u EU klienta s DIČ (čl. 196, klasifikace řeší generátor);
+      // čistý neplátce nikdy. Jen po prvotním načtení (edit mód nepřepisovat).
+      if (formLoaded.value) {
+        if (supplierIsVatPayer.value) {
+          form.value.reverse_charge = c.reverse_charge
+        } else {
+          form.value.reverse_charge = supplierIsIdentified.value
+            && !!c.country_is_eu && c.country_iso2 !== 'CZ' && (c.dic || '').trim() !== ''
+        }
+      }
     }
     await verifyClientVies(newId)
   } else {
@@ -394,14 +423,16 @@ onMounted(async () => {
   loading.value = true
   try {
     // Klienti se hledají server-side (onClientSearch); cache se plní výsledky + vybraným.
-    const [cur, vat, un] = await Promise.all([
+    const [cur, vat, un, rcat] = await Promise.all([
       codebooksApi.currencies(),
       codebooksApi.vatRates(),
       codebooksApi.units(),
+      revenueCategoriesApi.list(false).catch(() => [] as RevenueCategory[]),  // jen aktivní
     ])
     currencies.value = cur
     vatRates.value = vat
     units.value = un
+    revenueCategories.value = rcat
 
     if (form.value.currency_id === 0) {
       const def = cur.find(c => c.is_default && c.code === 'CZK') || cur[0]
@@ -479,6 +510,7 @@ onMounted(async () => {
         reverse_charge: tpl.reverse_charge,
         prices_include_vat: (tpl as { prices_include_vat?: boolean }).prices_include_vat ?? false,
         discount_percent: tpl.discount_percent ?? 0,
+        revenue_category_id: tpl.revenue_category_id ?? null,
         payment_due_days: tpl.payment_due_days,
         tax_date_mode: tpl.tax_date_mode ?? 'same_as_issue',
         draft_open_mode: tpl.draft_open_mode ?? 'at_issue',
@@ -497,6 +529,7 @@ onMounted(async () => {
           order_index: it.order_index,
         })),
       })
+      loadedCategoryLabel.value = tpl.revenue_category_label ?? null
       if (tpl.client_id) await loadProjectsForClient(tpl.client_id)
     }
   } finally {
@@ -547,6 +580,7 @@ async function submit() {
       reverse_charge: form.value.reverse_charge,
       prices_include_vat: form.value.prices_include_vat,
       discount_percent: form.value.discount_percent || 0,
+      revenue_category_id: form.value.revenue_category_id,
       payment_due_days: form.value.payment_due_days,
       tax_date_mode: form.value.tax_date_mode,
       draft_open_mode: form.value.draft_open_mode,
@@ -759,6 +793,22 @@ async function submit() {
               <span class="absolute right-3 top-1/2 -translate-y-1/2 text-neutral-400 pointer-events-none">%</span>
             </div>
           </div>
+          <!-- Pevná kategorie tržby (#119) — přebíjí fallback zakázka → zákazník -->
+          <div>
+            <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('recurring.revenue_category') }}</label>
+            <select v-model="form.revenue_category_id"
+              class="w-full h-10 px-3 border border-neutral-300 rounded-md bg-surface">
+              <option :value="null">— {{ t('recurring.revenue_category_fallback') }} —</option>
+              <option v-for="c in revenueCategories" :key="c.id" :value="c.id">
+                {{ c.label }} ({{ c.code }})
+              </option>
+              <option v-if="form.revenue_category_id && !revenueCategories.some(c => c.id === form.revenue_category_id)"
+                :value="form.revenue_category_id">
+                {{ loadedCategoryLabel ?? `#${form.revenue_category_id}` }}
+              </option>
+            </select>
+            <p class="mt-1 text-xs text-neutral-500">{{ t('recurring.revenue_category_hint') }}</p>
+          </div>
           <div class="md:col-span-2">
             <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('recurring.tax_date_mode') }}</label>
             <select v-model="form.tax_date_mode"
@@ -780,7 +830,40 @@ async function submit() {
             {{ t('invoice.add_item') }}
           </button>
         </div>
-        <p class="mb-3 text-xs text-neutral-500">{{ t('invoice.negative_item_hint') }}</p>
+        <p class="mb-1 text-xs text-neutral-500">{{ t('invoice.negative_item_hint') }}</p>
+
+        <!-- Placeholdery období (#108) — defaultně zabalená nápověda -->
+        <div class="mb-3">
+          <button type="button" @click="placeholdersHelpOpen = !placeholdersHelpOpen"
+            class="cursor-pointer inline-flex items-center gap-1 text-xs text-primary-700 hover:text-primary-800">
+            <svg :class="['w-3 h-3 transition-transform', placeholdersHelpOpen ? 'rotate-90' : '']" viewBox="0 0 20 20" fill="currentColor">
+              <path fill-rule="evenodd" d="M7.21 14.77a.75.75 0 01.02-1.06L11.168 10 7.23 6.29a.75.75 0 111.04-1.08l4.5 4.25a.75.75 0 010 1.08l-4.5 4.25a.75.75 0 01-1.06-.02z" clip-rule="evenodd" />
+            </svg>
+            {{ t('recurring.placeholders_toggle') }}
+          </button>
+          <div v-if="placeholdersHelpOpen" class="mt-2 rounded-md border border-neutral-200 bg-neutral-50 px-3 py-2 text-xs text-neutral-600 space-y-2">
+            <p>{{ t('recurring.placeholders_intro') }}</p>
+            <dl class="space-y-1">
+              <div v-for="(row, i) in placeholderRows" :key="i" class="flex gap-2">
+                <dt class="font-mono shrink-0 text-neutral-800 whitespace-nowrap">{{ row.c }}</dt>
+                <dd>{{ row.d }}</dd>
+              </div>
+            </dl>
+            <p class="text-neutral-500">{{ t('recurring.placeholders_example') }}</p>
+          </div>
+        </div>
+        <!-- RC checkbox dřív v šabloně chyběl (flag se přenášel jen „z faktury") —
+             doplněno s IO podporou (#94); generátor RC přenáší do vystavených faktur
+             a auto-klasifikace položek dá EU službám kód 22 (souhrnné hlášení). -->
+        <div v-if="showReverseChargeUI" class="mb-3">
+          <label class="flex items-center gap-2 text-sm text-neutral-700 mb-1">
+            <input v-model="form.reverse_charge" type="checkbox" class="rounded border-neutral-300 text-primary-600" />
+            <span>{{ t('invoice.reverse_charge') }} ({{ t('invoice.totals.vat') }} 0 %)</span>
+          </label>
+          <p v-if="!supplierIsVatPayer && form.reverse_charge" class="text-xs text-neutral-500 ml-6">
+            {{ t('invoice.reverse_charge_io_hint') }}
+          </p>
+        </div>
         <template v-if="supplierIsVatPayer">
           <label class="flex items-center gap-2 text-sm text-neutral-700 mb-1">
             <input v-model="form.prices_include_vat" type="checkbox" class="rounded border-neutral-300 text-primary-600" />
@@ -880,6 +963,21 @@ async function submit() {
         <div v-if="hasNonPositiveAmountToPay" class="mt-3 rounded-md border border-warning-200 bg-warning-50 px-3 py-2 text-xs text-warning-700">
           {{ t('invoice.amount_positive_required') }}
         </div>
+      </div>
+
+      <!-- Poznámky nad/pod položkami — stejná editace jako u vydané faktury;
+           generátor je přenáší na fakturu a vyhodnocuje v nich placeholdery období. -->
+      <div class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm space-y-4">
+        <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-500">{{ t('recurring.section_notes') }}</h3>
+        <div>
+          <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('invoice.note_above') }}</label>
+          <textarea v-model="form.note_above_items" rows="2" class="w-full px-3 py-2 border border-neutral-300 rounded-md text-sm"></textarea>
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('invoice.note_below') }}</label>
+          <textarea v-model="form.note_below_items" rows="2" class="w-full px-3 py-2 border border-neutral-300 rounded-md text-sm"></textarea>
+        </div>
+        <p class="text-xs text-neutral-500">{{ t('recurring.notes_placeholders_hint') }}</p>
       </div>
 
       <!-- Automation -->

@@ -11,6 +11,7 @@ use MyInvoice\Middleware\AuthMiddleware;
 use MyInvoice\Middleware\SupplierScopeMiddleware;
 use MyInvoice\Service\ActivityLogger;
 use MyInvoice\Service\IpMatcher;
+use MyInvoice\Service\Mail\RecipientResolver;
 use MyInvoice\Service\Pdf\InvoicePdfRenderer;
 use Psr\Http\Message\ResponseInterface as Response;
 use Psr\Http\Message\ServerRequestInterface as Request;
@@ -121,11 +122,14 @@ final class SettingsAction
 
             $stmt = $pdo->prepare(
                 'INSERT INTO supplier (company_name, display_name, street, city, zip, country_id,
-                                       ic, dic, is_vat_payer, email, phone, web, tagline, commercial_register, taxpayer_type,
+                                       ic, dic, is_vat_payer, is_identified, email, phone, web, tagline, commercial_register, taxpayer_type,
                                        default_currency_id, default_vat_rate_id,
                                        default_payment_due_days, default_hourly_rate)
-                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)'
+                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)'
             );
+            // Heuristika „má DIČ → je plátce" neplatí pro identifikovanou osobu
+            // (§ 6g–6l, issue #94) — IO má DIČ, ale plátce není.
+            $isIdentified = !empty($b['is_identified']);
             $stmt->execute([
                 (string) $b['company_name'],
                 $this->nullable($b, 'display_name') ?: (string) $b['company_name'],
@@ -135,7 +139,8 @@ final class SettingsAction
                 $countryId,
                 $this->nullable($b, 'ic'),
                 $this->nullable($b, 'dic'),
-                !empty($b['is_vat_payer']) ? 1 : (!empty($b['dic']) ? 1 : 0),
+                $isIdentified ? 0 : (!empty($b['is_vat_payer']) ? 1 : (!empty($b['dic']) ? 1 : 0)),
+                $isIdentified ? 1 : 0,
                 (string) $b['email'],
                 $this->nullable($b, 'phone'),
                 $this->nullable($b, 'web'),
@@ -212,7 +217,7 @@ final class SettingsAction
 
         $allowed = [
             'company_name', 'display_name', 'street', 'city', 'zip', 'country_id',
-            'ic', 'dic', 'is_vat_payer', 'email', 'phone', 'web', 'tagline', 'commercial_register',
+            'ic', 'dic', 'is_vat_payer', 'is_identified', 'email', 'phone', 'web', 'tagline', 'commercial_register',
             'default_currency_id', 'default_vat_rate_id', 'default_payment_due_days', 'default_payment_due_unit',
             // logo_path / signature_path se NIKDY nemění přes mass-assignment — jen přes
             // dedikované endpointy EmailBrandingAction::uploadLogo (multipart, processed by
@@ -236,8 +241,24 @@ final class SettingsAction
             'opr_jmeno', 'opr_prijmeni', 'opr_postaveni',
             // Děkovný e-mail za úhradu (issue #57)
             'payment_thanks_enabled', 'payment_thanks_auto_send', 'payment_thanks_default_checked', 'payment_thanks_attach_paid_pdf',
+            // Kopie odchozích e-mailů dodavateli (migrace 0102) — JSON, validace níže
+            'self_copy',
         ];
 
+        // Identifikovaná osoba (§ 6g–6l ZDPH, issue #94) je z definice NEPLÁTCE
+        // v tuzemsku — kombinace obou flagů je nevalidní. Kontrolujeme efektivní
+        // stav po této změně (z body, jinak ze současného řádku).
+        if (array_key_exists('is_identified', $body) || array_key_exists('is_vat_payer', $body)) {
+            $stmt = $this->db->pdo()->prepare('SELECT is_vat_payer, is_identified FROM supplier WHERE id = ?');
+            $stmt->execute([$id]);
+            $cur = $stmt->fetch(\PDO::FETCH_ASSOC) ?: [];
+            $effVatPayer   = array_key_exists('is_vat_payer', $body) ? (bool) $body['is_vat_payer'] : (bool) ($cur['is_vat_payer'] ?? false);
+            $effIdentified = array_key_exists('is_identified', $body) ? (bool) $body['is_identified'] : (bool) ($cur['is_identified'] ?? false);
+            if ($effVatPayer && $effIdentified) {
+                return Json::error($response, 'validation_failed',
+                    'Identifikovaná osoba je z definice neplátce DPH — nelze kombinovat s plátcovstvím. Plátce DPH přepínač identifikované osoby vypne.', 422);
+            }
+        }
         // Validace tax fields
         if (array_key_exists('taxpayer_type', $body) && $body['taxpayer_type'] !== null
             && !in_array($body['taxpayer_type'], ['fo', 'po'], true)) {
@@ -330,12 +351,37 @@ final class SettingsAction
         if (array_key_exists('reminder_days_after_due', $body)) {
             $body['reminder_days_after_due'] = max(1, min(365, (int) $body['reminder_days_after_due']));
         }
+        // Kopie odchozích e-mailů dodavateli — JSON {typ: 'off'|'cc'|'bcc'},
+        // klíče = typy zpráv resolveru. Ukládají se jen explicitně zvolené typy;
+        // null/prázdný objekt → NULL = vše dle cfg (živý fallback).
+        if (array_key_exists('self_copy', $body)) {
+            $sc = $body['self_copy'];
+            if ($sc === null || $sc === [] || $sc === '') {
+                $body['self_copy'] = null;
+            } else {
+                if (!is_array($sc)) {
+                    return Json::error($response, 'validation_failed', 'self_copy musí být objekt {typ: off|cc|bcc} nebo null.', 400);
+                }
+                $validTypes = [RecipientResolver::TYPE_DOCUMENTS, RecipientResolver::TYPE_REMINDERS, RecipientResolver::TYPE_APPROVALS];
+                $clean = [];
+                foreach ($sc as $k => $v) {
+                    if (!in_array($k, $validTypes, true)) {
+                        return Json::error($response, 'validation_failed', "self_copy: neznámý typ zprávy '$k' (documents|reminders|approvals).", 400);
+                    }
+                    if (!in_array($v, RecipientResolver::SELF_COPY_MODES, true)) {
+                        return Json::error($response, 'validation_failed', "self_copy.$k: hodnota musí být off|cc|bcc.", 400);
+                    }
+                    $clean[$k] = $v;
+                }
+                $body['self_copy'] = $clean === [] ? null : json_encode($clean, JSON_UNESCAPED_UNICODE);
+            }
+        }
         $sets = [];
         $params = [];
         foreach ($allowed as $f) {
             if (array_key_exists($f, $body)) {
                 $sets[] = "$f = ?";
-                $params[] = in_array($f, ['is_vat_payer', 'auto_send_reminders', 'auto_generate_recurring', 'embed_isdoc', 'default_prices_include_vat', 'email_branding_enabled', 'pdf_logo_show_name', 'payment_thanks_enabled', 'payment_thanks_auto_send', 'payment_thanks_default_checked', 'payment_thanks_attach_paid_pdf'], true)
+                $params[] = in_array($f, ['is_vat_payer', 'is_identified', 'auto_send_reminders', 'auto_generate_recurring', 'embed_isdoc', 'default_prices_include_vat', 'email_branding_enabled', 'pdf_logo_show_name', 'payment_thanks_enabled', 'payment_thanks_auto_send', 'payment_thanks_default_checked', 'payment_thanks_attach_paid_pdf'], true)
                     ? ((int) (bool) $body[$f])
                     : $body[$f];
             }
@@ -438,6 +484,8 @@ final class SettingsAction
         if (!$row) return Json::error($response, 'not_found', 'Supplier nenalezen.', 404);
         $row['id']                       = (int) $row['id'];
         $row['is_vat_payer']             = (bool) $row['is_vat_payer'];
+        // Identifikovaná osoba (§ 6g–6l, issue #94) — doplněk k neplátci.
+        $row['is_identified']            = (bool) ($row['is_identified'] ?? false);
         $row['default_vat_rate_id']      = (int) $row['default_vat_rate_id'];
         $row['default_currency_id']      = (int) $row['default_currency_id'];
         $row['default_payment_due_days'] = (int) $row['default_payment_due_days'];
@@ -456,11 +504,33 @@ final class SettingsAction
         $row['payment_thanks_auto_send']      = (bool) ($row['payment_thanks_auto_send'] ?? false);
         $row['payment_thanks_default_checked']= (bool) ($row['payment_thanks_default_checked'] ?? false);
         $row['payment_thanks_attach_paid_pdf']= (bool) ($row['payment_thanks_attach_paid_pdf'] ?? false);
+        // Kopie odchozích e-mailů dodavateli (migrace 0102) — parsed objekt nebo null.
+        $sc = $row['self_copy'] !== null ? json_decode((string) $row['self_copy'], true) : null;
+        $row['self_copy'] = is_array($sc) && $sc !== [] ? $sc : null;
+        // Efektivní cfg fallback per typ — UI ho ukáže u volby „dle konfigurace".
+        // `approvals` má v cfg dva flagy (žádost/upomínka) — posíláme oba.
+        $row['cfg_self_copy_fallback'] = [
+            'documents'          => ((bool) $this->config->get('smtp.cc_supplier_on_send', false)) ? 'cc' : 'off',
+            'reminders'          => ((bool) $this->config->get('smtp.cc_supplier_on_reminder', false)) ? 'cc' : 'off',
+            'approvals'          => ((bool) $this->config->get('approval.cc_supplier_on_approval', true)) ? 'bcc' : 'off',
+            'approval_reminders' => ((bool) $this->config->get('approval.cc_supplier_on_approval_reminder', true)) ? 'bcc' : 'off',
+        ];
         // Bezpečnost: do API NIKDY neposílat žádná tajemství. Redakce vzorem `*_enc`
         // je odolná vůči nově přidaným šifrovaným sloupcům (původní explicitní výčet
-        // nechával unikat idoklad/fakturoid/anthropic credentials).
+        // nechával unikat idoklad/fakturoid/anthropic credentials). Doplněno o
+        // obecné secret-ish názvy, aby se případný budoucí tajný sloupec BEZ přípony
+        // `_enc` taky neprosákl (defense-in-depth — allowlist by byl křehčí, supplier
+        // má desítky legitimních polí, které FE potřebuje).
         foreach (array_keys($row) as $k) {
-            if (str_ends_with((string) $k, '_enc')) {
+            $lk = strtolower((string) $k);
+            if (str_ends_with($lk, '_enc')
+                || str_contains($lk, 'password')
+                || str_contains($lk, 'secret')
+                || str_contains($lk, 'api_key')
+                || str_contains($lk, 'access_token')
+                || str_contains($lk, 'passphrase')
+                || str_contains($lk, 'private_key')
+            ) {
                 unset($row[$k]);
             }
         }

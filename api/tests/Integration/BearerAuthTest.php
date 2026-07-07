@@ -142,6 +142,13 @@ final class BearerAuthTest extends TestCase
         self::assertStringContainsString('redoc', $r['body']);
     }
 
+    public function testScalarPagePublic(): void
+    {
+        $r = $this->request('GET', '/api/scalar', null, null, ['Accept: text/html']);
+        self::assertSame(200, $r['status']);
+        self::assertStringContainsString('@scalar/api-reference', $r['body']);
+    }
+
     public function testRateLimitHeadersPresent(): void
     {
         $token = $this->mkToken('read');
@@ -302,7 +309,6 @@ final class BearerAuthTest extends TestCase
         $resp = curl_exec($ch);
         $status = curl_getinfo($ch, CURLINFO_HTTP_CODE);
         $headerSize = curl_getinfo($ch, CURLINFO_HEADER_SIZE);
-        curl_close($ch);
 
         $respStr = is_string($resp) ? $resp : '';
         $headersRaw = substr($respStr, 0, $headerSize);

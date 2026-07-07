@@ -101,6 +101,8 @@ tags:
     description: CRM dashboard — KPI, aging, koncentrace, cash-flow, action-items
   - name: Tax
     description: Daňový optimalizátor (srovnání režimů, predikce ročních limitů)
+  - name: Logbook
+    description: Kniha jízd — vozidla, jízdy, tankování a daňové souhrny
 
 paths:
   /api/v1/health:
@@ -446,6 +448,76 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
 
+  /api/v1/invoices/export:
+    get:
+      tags: [Invoices]
+      summary: Hromadný export vystavených faktur za měsíc nebo čtvrtletí
+      description: |
+        Jeden soubor se všemi vystavenými doklady za období (status
+        issued/sent/reminded/paid), supplier scope dle `X-Supplier-Id`:
+
+        - `pdf-zip` — ZIP s jedním PDF na doklad (`Faktura-{vs}.pdf`, dobropisy
+          `Dobropis-{vs}.pdf` atd.)
+        - `isdoc` — ISDOC XML; jeden doklad = samostatný `.isdoc`, víc dokladů = ZIP
+        - `pohoda` — Pohoda XML dataPack
+        - `stereo` — Stereo (Ježek) XML
+
+        Období: `month=YYYY-MM`, nebo `period=quarterly&year=YYYY&quarter=1..4`.
+        `date_by=issue|tax` řídí zařazení do období (default issue; `tax` = DUZP,
+        shodné s výkazy DPH).
+      parameters:
+        - $ref: '#/components/parameters/SupplierIdHeader'
+        - { in: query, name: format, required: true, schema: { type: string, enum: [pdf-zip, isdoc, pohoda, stereo] } }
+        - { in: query, name: month, schema: { type: string, pattern: '^\d{4}-\d{2}$' } }
+        - { in: query, name: period, schema: { type: string, enum: [monthly, quarterly] } }
+        - { in: query, name: year, schema: { type: integer } }
+        - { in: query, name: quarter, schema: { type: integer, minimum: 1, maximum: 4 } }
+        - { in: query, name: date_by, schema: { type: string, enum: [issue, tax], default: issue } }
+        - { in: query, name: type, schema: { type: string, enum: [invoice, proforma, credit_note, cancellation], description: "Jen jeden typ dokladu (default všechny)" } }
+      responses:
+        '200':
+          description: ZIP / XML stream (Content-Disposition attachment)
+          content:
+            application/zip:
+              schema: { type: string, format: binary }
+            application/xml:
+              schema: { type: string, format: binary }
+        '400':
+          $ref: '#/components/responses/ValidationFailed'
+        '404':
+          description: Za období nejsou žádné vystavené faktury
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/v1/invoices/{id}/isdoc:
+    get:
+      tags: [Invoices]
+      summary: ISDOC XML jedné vystavené faktury
+      description: |
+        Strojově čitelná faktura (ISDOC) — symetrie
+        s `/api/v1/purchase-invoices/{id}/isdoc`. Koncept (draft) nelze
+        exportovat (400) — nemá přidělené číslo. Stornovanou fakturu (409)
+        také ne — stejné pravidlo jako u hromadného exportu.
+      parameters:
+        - $ref: '#/components/parameters/SupplierIdHeader'
+        - { in: path, name: id, required: true, schema: { type: integer, format: int64 } }
+      responses:
+        '200':
+          description: ISDOC XML (Content-Disposition attachment, Faktura-{vs}.isdoc)
+          content:
+            application/xml:
+              schema: { type: string, format: binary }
+        '400':
+          $ref: '#/components/responses/ValidationFailed'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Stornovanou fakturu nelze exportovat do ISDOC
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
   /api/v1/invoices/{id}:
     parameters:
       - $ref: '#/components/parameters/SupplierIdHeader'
@@ -541,6 +613,153 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Invoice' }
+
+  /api/v1/invoices/{id}/payments:
+    parameters:
+      - $ref: '#/components/parameters/SupplierIdHeader'
+      - in: path
+        name: id
+        required: true
+        schema: { type: integer, format: int64 }
+    get:
+      tags: [Invoices]
+      summary: Evidované platby faktury
+      description: |
+        Seznam plateb (částečných úhrad) faktury nebo zálohové faktury + souhrn:
+        `paid_total`, `remaining` (= `amount_to_pay - paid_total`) a odvozený
+        `payment_status` (`unpaid` / `partially_paid` / `paid` / `overpaid`).
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  payments:
+                    type: array
+                    items: { $ref: '#/components/schemas/InvoicePayment' }
+                  paid_total: { type: number, format: float }
+                  amount_to_pay: { type: number, format: float }
+                  remaining: { type: number, format: float }
+                  payment_status:
+                    type: string
+                    nullable: true
+                    enum: [unpaid, partially_paid, paid, overpaid]
+    post:
+      tags: [Invoices]
+      summary: Zaeviduje (částečnou) úhradu faktury
+      description: |
+        Přidá platbu v měně faktury. Pokud suma plateb pokryje `amount_to_pay`
+        (tolerance 0,05), faktura se označí jako zaplacená (`paid_at` = datum
+        poslední platby). Stávající `mark-paid` je zkratka „platba na zbytek".
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [amount]
+              properties:
+                amount:
+                  type: number
+                  format: float
+                  description: Částka platby v měně faktury (> 0)
+                paid_on:
+                  type: string
+                  format: date
+                  description: Datum platby (default = dnes)
+                variable_symbol: { type: string, nullable: true, maxLength: 20 }
+                bank_reference: { type: string, nullable: true, maxLength: 120 }
+                note: { type: string, nullable: true, maxLength: 255 }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  invoice: { $ref: '#/components/schemas/Invoice' }
+                  payments:
+                    type: array
+                    items: { $ref: '#/components/schemas/InvoicePayment' }
+                  payment: { $ref: '#/components/schemas/InvoicePayment' }
+                  became_paid: { type: boolean }
+                  remaining: { type: number, format: float }
+        '409':
+          description: Neplatný stav/částka (draft, storno, dobropis…)
+
+  /api/v1/invoices/{id}/payments/{paymentId}:
+    parameters:
+      - $ref: '#/components/parameters/SupplierIdHeader'
+      - in: path
+        name: id
+        required: true
+        schema: { type: integer, format: int64 }
+      - in: path
+        name: paymentId
+        required: true
+        schema: { type: integer, format: int64 }
+    delete:
+      tags: [Invoices]
+      summary: Smaže evidovanou platbu
+      description: |
+        Platbu navázanou na bankovní transakci nelze smazat (409) — ruší se přes
+        unmatch v detailu výpisu. Platbu s vystaveným daňovým dokladem k přijaté
+        platbě lze smazat až po smazání/stornu dokladu. Pokud po smazání přestane
+        být doklad pokrytý, vrátí se ze stavu `paid` zpět (`sent`/`issued`).
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  invoice: { $ref: '#/components/schemas/Invoice' }
+                  payments:
+                    type: array
+                    items: { $ref: '#/components/schemas/InvoicePayment' }
+                  became_unpaid: { type: boolean }
+                  remaining: { type: number, format: float }
+        '409':
+          description: Platba je zamčená (bankovní vazba / daňový doklad)
+
+  /api/v1/invoices/{id}/payments/{paymentId}/tax-document:
+    parameters:
+      - $ref: '#/components/parameters/SupplierIdHeader'
+      - in: path
+        name: id
+        required: true
+        schema: { type: integer, format: int64 }
+      - in: path
+        name: paymentId
+        required: true
+        schema: { type: integer, format: int64 }
+    post:
+      tags: [Invoices]
+      summary: Vystaví daňový doklad k přijaté platbě (DRAFT)
+      description: |
+        K platbě **zálohové faktury** vystaví koncept daňového dokladu k přijaté
+        platbě (`invoice_type = tax_document`, § 28 odst. 2 ZDPH): DUZP = datum
+        platby, DPH shora koeficientem (§ 37), částka rozdělená mezi sazby DPH
+        proformy poměrně. Jen plátce DPH a ne-reverse-charge plnění. Idempotentní —
+        existující nestornovaný doklad k platbě vrátí beze změny.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tax_document_id: { type: integer, format: int64 }
+                  payments:
+                    type: array
+                    items: { $ref: '#/components/schemas/InvoicePayment' }
+        '409':
+          description: Podmínky nesplněny (neplátce DPH, reverse charge, není proforma)
 
   /api/v1/invoices/{id}/pdf:
     parameters:
@@ -851,7 +1070,8 @@ paths:
           (faktura se po schválení vystaví bez dalších změn),
         - zákazník dostane email `invoice_approval` s **PDF výkazu** v příloze
           (ne fakturu — tu uvidí až po vystavení),
-        - příjemci: `project.billing_emails`, fallback `client.main_email`,
+        - příjemci: kontakty klienta s účelem `approvals` (viz `email_contacts`);
+          bez nich `project.billing_emails`, fallback `client.main_email`,
         - audit log: `invoice.approval_requested`.
 
         Po rozhodnutí zákazníka (přes veřejný link) můžeš stav zjistit
@@ -964,6 +1184,54 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
 
+  /api/v1/invoices/{id}/recipients:
+    parameters:
+      - $ref: '#/components/parameters/SupplierIdHeader'
+      - in: path
+        name: id
+        required: true
+        schema: { type: integer, format: int64 }
+    get:
+      tags: [InvoiceComms]
+      summary: Vyřešení e-mailoví příjemci pro odeslání
+      description: |
+        Vrátí příjemce, na které by se daný typ zprávy odeslal (#86) — jednotný
+        `RecipientResolver`: aktivní kontakty klienta s daným účelem
+        (`email_contacts`, u upomínek fallback na účel `documents`); bez kontaktů
+        dosavadní logika (`main_email` + `project.billing_emails`; u schvalování
+        e-maily zakázky NAHRAZUJÍ hlavní e-mail). Kombinaci s e-maily zakázky
+        řídí `project.billing_emails_mode`. Read-only — nic neodesílá; hodí se
+        pro náhled příjemců před voláním `/send`.
+      parameters:
+        - in: query
+          name: type
+          schema: { type: string, enum: [documents, reminders, approvals], default: documents }
+          description: Typ zprávy (doklad / upomínka / žádost o schválení výkazu).
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  type: { type: string, enum: [documents, reminders, approvals] }
+                  to:  { type: array, items: { type: string, format: email } }
+                  cc:  { type: array, items: { type: string, format: email } }
+                  bcc: { type: array, items: { type: string, format: email } }
+                  resolved:
+                    type: array
+                    description: Provenance každého příjemce (zdroj + účel + popisek).
+                    items:
+                      type: object
+                      properties:
+                        email: { type: string, format: email }
+                        recipient: { type: string, enum: [to, cc, bcc] }
+                        source: { type: string, enum: [contact, project, main_email] }
+                        usage: { type: string, nullable: true, enum: [communication, documents, reminders, approvals, null] }
+                        label: { type: string, nullable: true }
+        '404': { description: Faktura nenalezena }
+
   /api/v1/invoices/{id}/send:
     parameters:
       - $ref: '#/components/parameters/SupplierIdHeader'
@@ -979,8 +1247,11 @@ paths:
         být `issued` nebo navazující stav. Předmět + tělo z šablony `invoice_send`
         (per locale, per supplier override v Email šablonách).
 
-        Body je volitelné — když chybí, použijí se výchozí příjemci z klienta /
-        zakázky. Příjemce/CC/BCC jdou přepsat.
+        Body je volitelné — když chybí, příjemce vyřeší jednotný resolver (#86):
+        kontakty klienta s účelem `documents` (vč. cc/bcc rolí); bez kontaktů
+        `client.main_email` + `project.billing_emails`. Explicitní `to` v body
+        je autoritativní (resolver se přeskočí). Response obsahuje
+        `resolved_recipients` s provenancí každého příjemce.
       requestBody:
         content:
           application/json:
@@ -1014,6 +1285,17 @@ paths:
                   recipients:
                     type: array
                     items: { type: string, format: email }
+                  resolved_recipients:
+                    type: array
+                    description: "Provenance příjemců (#86) — prázdné při explicitním `to` v body."
+                    items:
+                      type: object
+                      properties:
+                        email: { type: string, format: email }
+                        recipient: { type: string, enum: [to, cc, bcc] }
+                        source: { type: string, enum: [contact, project, main_email] }
+                        usage: { type: string, nullable: true, enum: [communication, documents, reminders, approvals, null] }
+                        label: { type: string, nullable: true }
                   archived_pdf_id: { type: integer, format: int64 }
         '409':
           description: Faktura není ve stavu pro odeslání (draft)
@@ -1497,6 +1779,30 @@ paths:
     get:
       tags: [Bank]
       summary: Seznam nahraných bankovních výpisů
+      parameters:
+        - in: query
+          name: page
+          schema: { type: integer, minimum: 1, default: 1 }
+          description: Stránka (50 výpisů na stránku).
+        - in: query
+          name: filter
+          style: deepObject
+          explode: true
+          description: "Volitelné filtry, zadávané jako filter[year], filter[month], filter[account]."
+          schema:
+            type: object
+            properties:
+              year:
+                type: integer
+                description: "Rok dle statement_date."
+              month:
+                type: integer
+                minimum: 1
+                maximum: 12
+                description: "Měsíc dle statement_date."
+              account:
+                type: string
+                description: "Číslo účtu — porovnává se normalizovaně (padding, lomítko ani kód banky nevadí)."
       responses:
         '200':
           description: OK
@@ -1508,6 +1814,29 @@ paths:
                   items:
                     type: array
                     items: { $ref: '#/components/schemas/BankStatement' }
+                  total:
+                    type: integer
+                    description: "Celkový počet výpisů odpovídajících filtru."
+                  page: { type: integer }
+                  limit:
+                    type: integer
+                    description: "Počet položek na stránku (50)."
+                  years:
+                    type: array
+                    items: { type: integer }
+                    description: "Roky s alespoň jedním výpisem (volby filtru; přes celý scope, ne aktuální filtr)."
+                  accounts:
+                    type: array
+                    description: "Konfigurované bankovní účty s alespoň jedním výpisem (volby filtru)."
+                    items:
+                      type: object
+                      properties:
+                        account_number: { type: string }
+                        bank_code: { type: string, nullable: true }
+                        label: { type: string, nullable: true }
+                  scan_configured:
+                    type: boolean
+                    description: "Je nakonfigurované hostitelské adresářové skenování (cfg.bank_import.scan_root)? Interní příznak pro UI tlačítko Skenovat adresář."
 
   /api/v1/bank-statements/{id}:
     parameters:
@@ -1653,6 +1982,178 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/SupplierFull' }
+    put:
+      tags: [Settings]
+      summary: Úprava aktuálního dodavatele
+      description: |
+        Částečný update supplier-a v jehož scope token operuje — pošli jen pole,
+        která chceš změnit. Vyžaduje token se scope `read_write` patřící adminovi.
+
+        Zahrnuje i **číslování dokladů** (`invoice_number_format`,
+        `proforma_number_format`, `credit_note_number_format`,
+        `purchase_invoice_number_format`, `invoice_number_period`) a **branding
+        PDF/e-mailů** (`email_branding_enabled`, `email_accent_color`,
+        `pdf_logo_show_name`, `display_name`, `tagline`). Logo se nahrává zvlášť
+        (není součástí tohoto endpointu).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SupplierUpdate' }
+      responses:
+        '200':
+          description: Aktualizovaný supplier
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SupplierFull' }
+        '400':
+          $ref: '#/components/responses/ValidationFailed'
+        '403':
+          description: Uživatel není admin nebo token nemá scope `read_write`
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/v1/settings/supplier/invoice-counter:
+    put:
+      tags: [Settings]
+      summary: Nastavení counteru číselné řady dokladů
+      description: |
+        Nastaví supplier-wide counter tak, aby **příští vystavený doklad** daného
+        typu dostal číslo `next_number`. `date` určuje, do kterého období (dle
+        `invoice_number_period` supplier-a) se counter zapíše — default dnes.
+
+        Na rozdíl od samoopravné synchronizace umí counter i **snížit**; pokud by
+        nové číslo kolidovalo s už vystaveným dokladem, vystavení se automaticky
+        posune na první volné číslo (číslo se nikdy nezduplikuje).
+
+        Typický use-case: převzetí existující číselné řady při migraci z jiného
+        fakturačního software nebo napojení externího systému.
+      parameters:
+        - $ref: '#/components/parameters/SupplierIdHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [next_number]
+              properties:
+                type:
+                  type: string
+                  enum: [invoice, proforma, credit_note]
+                  default: invoice
+                next_number:
+                  type: integer
+                  minimum: 1
+                  maximum: 999999999
+                  example: 42
+                  description: Číslo, které dostane příští vystavený doklad.
+                date:
+                  type: string
+                  format: date
+                  description: Datum určující období řady (YYYY-MM-DD). Default = dnes.
+      responses:
+        '200':
+          description: Counter nastaven
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  type: { type: string, example: invoice }
+                  next_number: { type: integer, example: 42 }
+                  counter:
+                    type: integer
+                    example: 41
+                    description: Uložená hodnota `last_number` (= next_number - 1).
+                  period:
+                    type: string
+                    example: "202607"
+                    description: Klíč období counteru (YYYY / YYYYMM / ALL).
+                  preview:
+                    type: string
+                    example: "2607042"
+                    description: Jak bude vypadat příští vygenerované číslo.
+        '400':
+          $ref: '#/components/responses/ValidationFailed'
+        '403':
+          description: Uživatel není admin nebo token nemá scope `read_write`
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/v1/settings/supplier/logo:
+    parameters:
+      - $ref: '#/components/parameters/SupplierIdHeader'
+    post:
+      tags: [Settings]
+      summary: Nahrání loga dodavatele
+      description: |
+        Multipart upload loga (pole `file`). Formáty PNG / JPG / SVG / WebP,
+        max **1 MiB**. Rastr se zmenší na max 240×800 px; SVG se sanitizuje
+        a rasterizuje (vektorová kopie se zachová pro ostré PDF). Logo se
+        v e-mailech a PDF fakturách zobrazuje jen při
+        `email_branding_enabled = true` (nastavíš přes
+        `PUT /api/v1/settings/supplier`).
+
+        `logo_path` NELZE měnit přes mass-assign na supplier update — vždy jen
+        tímto endpointem (bezpečnost).
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: PNG / JPG / SVG / WebP, max 1 MiB
+      responses:
+        '200':
+          description: Logo uloženo
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  logo_path: { type: string, example: "storage/supplier-logos/sup-1.png" }
+                  width: { type: integer, example: 480 }
+                  height: { type: integer, example: 160 }
+        '400':
+          description: Chybí soubor / nepodporovaný formát / konverze selhala
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '403':
+          description: Uživatel není admin nebo token nemá scope `read_write`
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '413':
+          description: Soubor přes 1 MiB
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+    delete:
+      tags: [Settings]
+      summary: Odebrání loga dodavatele
+      responses:
+        '200':
+          description: Logo odstraněno
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deleted: { type: boolean, example: true }
+        '403':
+          description: Uživatel není admin nebo token nemá scope `read_write`
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
 
   /api/v1/suppliers:
     get:
@@ -1741,6 +2242,13 @@ paths:
       description: |
         Multipart upload. Server detekuje formát z obsahu a parsuje transakce.
         Auto-matching proti otevřeným fakturám se spustí po `POST /scan`.
+
+        GPC/ABO hlavička neobsahuje měnu. Pokud jedno číslo účtu evidujete ve více
+        měnách (např. Raiffeisenbank: CZK/EUR/USD = jedno číslo), je nutné zvolit
+        cílový měnový účet přes `account_id`. Když `account_id` chybí a číslo je
+        víceznačné, server vrátí `409` s kódem `ambiguous_account_currency` a polem
+        `candidates` (seznam měnových variant). Při jednoznačném čísle je `account_id`
+        nepovinné (zpětně kompatibilní).
       requestBody:
         required: true
         content:
@@ -1753,6 +2261,11 @@ paths:
                   type: string
                   format: binary
                   description: GPC, CSV (FIO/KB/MB formáty) nebo ABO výpis
+                account_id:
+                  type: integer
+                  description: |
+                    Cílový měnový účet (`currencies.id`). Povinné jen u víceměnového účtu
+                    se sdíleným číslem účtu (jinak server vrátí 409 `ambiguous_account_currency`).
       responses:
         '201':
           description: Naparsováno
@@ -1764,31 +2277,51 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          description: |
+            Číslo účtu není registrované u dodavatele (`wrong_supplier_account`),
+            nebo má více měnových variant a chybí `account_id` (`ambiguous_account_currency`
+            — `error.candidates` nese seznam `{account_id, code, label}`).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '422':
+          description: Zvolený `account_id` neodpovídá číslu účtu výpisu / dodavateli (`invalid_account`)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
 
-  /api/v1/bank-statements/scan:
+  /api/v1/bank-statements/{id}/rematch:
     parameters:
       - $ref: '#/components/parameters/SupplierIdHeader'
+      - in: path
+        name: id
+        required: true
+        schema: { type: integer, format: int64 }
+        description: ID výpisu (např. z odpovědi `/bank-statements/upload`).
     post:
       tags: [Bank]
-      summary: Auto-matching transakcí proti otevřeným fakturám
+      summary: Přepáruje nespárované transakce výpisu proti fakturám
       description: |
-        Pro všechny `unmatched` transakce zkusí najít fakturu podle:
+        Auto-matching nad transakcemi výpisu **přímo v databázi** — žádný
+        souborový import ani konfigurace serveru se nepoužívá. Vhodné po nahrání
+        výpisu přes `/bank-statements/upload`, nebo když uživatel ex-post doplnil
+        faktury, které by se daly napárovat.
+
+        Projde transakce výpisu ve stavu `unmatched` a `auto_partial` a pro každou
+        zkusí najít fakturu podle:
         - variabilního symbolu (přesný match) — preferovaná cesta,
         - částky + protiúčtu (fallback).
 
-        Pokud najde unikátní match, transakce se označí `matched`, faktura
-        `paid` s `paid_at = transaction.posted_at`. Multi-match transakce
-        zůstávají nepřiřazené pro manuální rozhodnutí.
-      requestBody:
-        content:
-          application/json:
-            schema:
-              type: object
-              properties:
-                statement_id:
-                  type: integer
-                  format: int64
-                  description: Pokud chybí, scan-uje všechny unmatched napříč všemi výpisy
+        Příchozí platba se páruje na vystavenou fakturu, odchozí na přijatou.
+        Při unikátní shodě se transakce označí jako spárovaná a faktura `paid`
+        s `paid_at = transaction.posted_at`; transakce s více kandidáty zůstávají
+        nepřiřazené pro manuální rozhodnutí. Stavy `auto_exact`, `manual`
+        a `ignored` zůstávají nedotčené.
+
+        Pozn.: hromadný **import výpisů z adresáře na serveru** (`scan_root`) je
+        hostitelská/cron záležitost a není součástí veřejného API — výpisy se přes
+        API nahrávají endpointem `/bank-statements/upload`.
       responses:
         '200':
           description: OK
@@ -1797,11 +2330,529 @@ paths:
               schema:
                 type: object
                 properties:
-                  matched_count: { type: integer }
-                  multi_match_count:
+                  considered:
                     type: integer
-                    description: Transakce s víc kandidáty (nepárované, vyžadují ruční rozhodnutí)
-                  remaining_unmatched: { type: integer }
+                    description: Počet transakcí, které se přepárovávaly (unmatched + auto_partial).
+                  newly_matched:
+                    type: integer
+                    description: Nově přesně spárované (auto_exact).
+                  newly_partial:
+                    type: integer
+                    description: Nově částečně spárované (auto_partial — částka v širší toleranci).
+                  still_unmatched:
+                    type: integer
+                    description: Po přepárování stále nespárované.
+        '404': { description: "Výpis nenalezen nebo nepatří current supplier" }
+
+  /api/v1/purchase-invoices/payment-orders/candidates:
+    parameters:
+      - $ref: '#/components/parameters/SupplierIdHeader'
+    get:
+      tags: [Purchase invoices]
+      summary: Kandidáti pro platební příkaz (nezaplacené přijaté faktury)
+      parameters:
+        - in: query
+          name: currency
+          schema: { type: string }
+          description: "ISO 4217 — omezí kandidáty i účty plátce na danou měnu."
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  candidates:
+                    type: array
+                    items: { type: object }
+                    description: "Nezaplacené přijaté faktury vhodné k zařazení do příkazu."
+                  payer_accounts:
+                    type: array
+                    items: { type: object }
+                    description: "Bankovní účty dodavatele (plátce) k výběru odesílacího účtu."
+                  supplier_currencies:
+                    type: array
+                    items: { type: object }
+
+  /api/v1/purchase-invoices/payment-orders/verify-account:
+    parameters:
+      - $ref: '#/components/parameters/SupplierIdHeader'
+    get:
+      tags: [Purchase invoices]
+      summary: Ověří bankovní účet dodavatele faktury (CRPDPH)
+      parameters:
+        - in: query
+          name: invoice_id
+          required: true
+          schema: { type: integer, format: int64 }
+      responses:
+        '200':
+          description: OK — výsledek ověření spolehlivosti účtu
+          content:
+            application/json:
+              schema: { type: object }
+        '404': { description: "Faktura nenalezena" }
+
+  /api/v1/purchase-invoices/payment-orders:
+    parameters:
+      - $ref: '#/components/parameters/SupplierIdHeader'
+    get:
+      tags: [Purchase invoices]
+      summary: Historie vytvořených platebních příkazů
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { type: object }
+    post:
+      tags: [Purchase invoices]
+      summary: Vytvoří platební příkaz z vybraných přijatých faktur
+      description: |
+        Vyžaduje roli `accountant` nebo vyšší. Sestaví příkaz k úhradě
+        (ke stažení jako ABO/KPC, CSV nebo PDF přes `/payment-orders/{id}/download`).
+        Volitelně rovnou označí faktury jako „předáno k úhradě" (`mark_paid`).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [invoice_ids, payer_currency_id, payment_date]
+              properties:
+                invoice_ids:
+                  type: array
+                  items: { type: integer, format: int64 }
+                payer_currency_id:
+                  type: integer
+                  format: int64
+                  description: "Účet plátce (currencies.id) — určuje odesílací účet a měnu."
+                payment_date:
+                  type: string
+                  format: date
+                  description: "Datum splatnosti / provedení příkazu."
+                constant_symbol: { type: string, nullable: true }
+                note: { type: string, nullable: true }
+                mark_paid:
+                  type: boolean
+                  description: "Označit zařazené faktury jako předané k úhradě."
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  order_id: { type: integer, format: int64 }
+                  view:
+                    type: object
+                    properties:
+                      item_count: { type: integer }
+                      total_amount: { type: number }
+                      currency: { type: string }
+                      mark_paid: { type: boolean }
+                  skipped:
+                    type: array
+                    items: { type: object }
+                    description: "Faktury vynechané z příkazu (s důvodem)."
+        '422':
+          description: Validace selhala
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/v1/purchase-invoices/payment-orders/mark:
+    parameters:
+      - $ref: '#/components/parameters/SupplierIdHeader'
+    post:
+      tags: [Purchase invoices]
+      summary: Označí faktury jako předané k úhradě (bez generování souboru)
+      description: "Vyžaduje roli `accountant` nebo vyšší. Nastaví příznak `payment_ordered_at` (NEmění stav faktury)."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [invoice_ids]
+              properties:
+                invoice_ids:
+                  type: array
+                  items: { type: integer, format: int64 }
+                mark_paid: { type: boolean }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  count: { type: integer }
+        '422':
+          description: Validace selhala
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/v1/purchase-invoices/payment-orders/{id}:
+    parameters:
+      - $ref: '#/components/parameters/SupplierIdHeader'
+      - in: path
+        name: id
+        required: true
+        schema: { type: integer, format: int64 }
+    get:
+      tags: [Purchase invoices]
+      summary: Detail platebního příkazu vč. položek
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  order_id: { type: integer, format: int64 }
+                  created_at: { type: string, format: date-time }
+                  items:
+                    type: array
+                    items: { type: object }
+        '404': { description: "Příkaz nenalezen" }
+
+  /api/v1/purchase-invoices/payment-orders/{id}/download:
+    parameters:
+      - $ref: '#/components/parameters/SupplierIdHeader'
+      - in: path
+        name: id
+        required: true
+        schema: { type: integer, format: int64 }
+      - in: query
+        name: format
+        schema: { type: string, enum: [abo, csv, pdf], default: abo }
+        description: "Formát ke stažení: abo (KPC/ABO), csv nebo pdf."
+    get:
+      tags: [Purchase invoices]
+      summary: Stáhne soubor platebního příkazu (ABO/CSV/PDF)
+      responses:
+        '200':
+          description: OK — binární soubor příkazu
+          content:
+            text/plain:
+              schema: { type: string, format: binary }
+            text/csv:
+              schema: { type: string, format: binary }
+            application/pdf:
+              schema: { type: string, format: binary }
+        '404': { description: "Příkaz nenalezen" }
+        '422': { description: "Export selhal" }
+
+  /api/v1/purchase-invoices/{id}/payment-qr:
+    parameters:
+      - $ref: '#/components/parameters/SupplierIdHeader'
+      - in: path
+        name: id
+        required: true
+        schema: { type: integer, format: int64 }
+    get:
+      tags: [Purchase invoices]
+      summary: QR platba a bankovní účet přijaté faktury
+      description: |
+        Vrátí QR platbu (SPAYD pro CZK, SEPA EPC jinak) a bankovní účet zjištěný
+        v pořadí ISDOC → AI → ruční edit. `needs_account=true` signalizuje, že
+        klient může spustit doplnění účtu přes `/payment-qr/extract-account`.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PurchasePaymentQr' }
+        '400': { description: "Neplatné ID" }
+        '404': { description: "Faktura nenalezena" }
+
+  /api/v1/purchase-invoices/{id}/payment-qr/extract-account:
+    parameters:
+      - $ref: '#/components/parameters/SupplierIdHeader'
+      - in: path
+        name: id
+        required: true
+        schema: { type: integer, format: int64 }
+    post:
+      tags: [Purchase invoices]
+      summary: Doplní bankovní účet přijaté faktury (lazy z ISDOC/AI)
+      description: "Vyžaduje roli `accountant` nebo vyšší."
+      responses:
+        '200':
+          description: OK — stejný tvar jako GET /payment-qr
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PurchasePaymentQr' }
+        '404': { description: "Faktura nenalezena" }
+
+  /api/v1/purchase-invoices/{id}/payment-account:
+    parameters:
+      - $ref: '#/components/parameters/SupplierIdHeader'
+      - in: path
+        name: id
+        required: true
+        schema: { type: integer, format: int64 }
+    put:
+      tags: [Purchase invoices]
+      summary: Ruční nastavení bankovního účtu přijaté faktury
+      description: "Vyžaduje roli `accountant` nebo vyšší. Uloží účet a nastaví `source=manual`."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                account_number: { type: string, maxLength: 34 }
+                bank_code: { type: string, maxLength: 10 }
+                iban: { type: string, maxLength: 34 }
+                bic: { type: string, maxLength: 11 }
+                variable_symbol: { type: string, maxLength: 20 }
+      responses:
+        '200':
+          description: OK — stejný tvar jako GET /payment-qr
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PurchasePaymentQr' }
+        '404': { description: "Faktura nenalezena" }
+
+  /api/v1/invoices/{id}/work-report/materials:
+    parameters:
+      - $ref: '#/components/parameters/SupplierIdHeader'
+      - in: path
+        name: id
+        required: true
+        schema: { type: integer, format: int64 }
+      - in: query
+        name: force
+        schema: { type: integer, enum: [1] }
+        description: "Jen admin — vynutí uložení i u vystavené faktury."
+    put:
+      tags: [WorkReports]
+      summary: Uloží materiálovou část výkazu práce
+      description: |
+        Vyžaduje roli `accountant` nebo vyšší. Standardně jen u konceptu faktury
+        (admin může vynutit u vystavené přes `?force=1`). Materiály jsou součástí
+        téhož výkazu práce jako práce a na faktuře se promítnou jako souhrnná položka.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [materials]
+              properties:
+                material_title: { type: string, default: "Materiál" }
+                material_vat_rate_id:
+                  type: integer
+                  nullable: true
+                  description: "Povinné, je-li alespoň jeden materiál; musí existovat v sazbách DPH."
+                project_id: { type: integer, nullable: true }
+                materials:
+                  type: array
+                  items:
+                    type: object
+                    required: [description, quantity, unit, unit_price]
+                    properties:
+                      description: { type: string }
+                      quantity: { type: number, description: "> 0" }
+                      unit: { type: string }
+                      unit_price: { type: number, description: ">= 0" }
+                      order_index: { type: integer }
+      responses:
+        '200':
+          description: OK — aktualizovaný výkaz práce
+          content:
+            application/json:
+              schema: { type: object }
+        '400': { description: "Validace selhala" }
+        '404': { description: "Faktura nenalezena" }
+        '409': { description: "Faktura není editovatelná (není koncept)" }
+
+  /api/v1/clients/{id}/work-report-link:
+    parameters:
+      - $ref: '#/components/parameters/SupplierIdHeader'
+      - in: path
+        name: id
+        required: true
+        schema: { type: integer, format: int64 }
+    get:
+      tags: [WorkReports]
+      summary: Stav veřejného sledovacího odkazu na výkaz (klient)
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WorkReportLinkStatus' }
+        '404': { description: "Klient nenalezen" }
+    delete:
+      tags: [WorkReports]
+      summary: Zneplatní sledovací odkaz klienta
+      description: "Vyžaduje roli `accountant` nebo vyšší."
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  exists: { type: boolean }
+        '404': { description: "Klient nenalezen" }
+
+  /api/v1/clients/{id}/work-report-link/recipients:
+    parameters:
+      - $ref: '#/components/parameters/SupplierIdHeader'
+      - in: path
+        name: id
+        required: true
+        schema: { type: integer, format: int64 }
+    get:
+      tags: [WorkReports]
+      summary: Příjemci pro odeslání odkazu (předvyplnění modalu) — klient
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WorkReportLinkRecipients' }
+        '404': { description: "Klient nenalezen" }
+
+  /api/v1/clients/{id}/work-report-link/send:
+    parameters:
+      - $ref: '#/components/parameters/SupplierIdHeader'
+      - in: path
+        name: id
+        required: true
+        schema: { type: integer, format: int64 }
+    post:
+      tags: [WorkReports]
+      summary: Odešle sledovací odkaz na výkaz e-mailem (klient)
+      description: "Vyžaduje roli `accountant` nebo vyšší. Vytvoří odkaz, pokud ještě neexistuje."
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                to: { type: array, items: { type: string } }
+                cc: { type: array, items: { type: string } }
+                bcc: { type: array, items: { type: string } }
+                note: { type: string, maxLength: 2000 }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  sent_to: { type: array, items: { type: string } }
+                  sent_at: { type: string, format: date-time }
+                  url: { type: string }
+        '422': { description: "Žádný příjemce (no_recipients)" }
+        '404': { description: "Klient nenalezen" }
+        '502': { description: "Odeslání selhalo (send_failed)" }
+
+  /api/v1/projects/{id}/work-report-link:
+    parameters:
+      - $ref: '#/components/parameters/SupplierIdHeader'
+      - in: path
+        name: id
+        required: true
+        schema: { type: integer, format: int64 }
+    get:
+      tags: [WorkReports]
+      summary: Stav veřejného sledovacího odkazu na výkaz (zakázka)
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WorkReportLinkStatus' }
+        '404': { description: "Zakázka nenalezena" }
+    delete:
+      tags: [WorkReports]
+      summary: Zneplatní sledovací odkaz zakázky
+      description: "Vyžaduje roli `accountant` nebo vyšší."
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  exists: { type: boolean }
+        '404': { description: "Zakázka nenalezena" }
+
+  /api/v1/projects/{id}/work-report-link/recipients:
+    parameters:
+      - $ref: '#/components/parameters/SupplierIdHeader'
+      - in: path
+        name: id
+        required: true
+        schema: { type: integer, format: int64 }
+    get:
+      tags: [WorkReports]
+      summary: Příjemci pro odeslání odkazu (předvyplnění modalu) — zakázka
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WorkReportLinkRecipients' }
+        '404': { description: "Zakázka nenalezena" }
+
+  /api/v1/projects/{id}/work-report-link/send:
+    parameters:
+      - $ref: '#/components/parameters/SupplierIdHeader'
+      - in: path
+        name: id
+        required: true
+        schema: { type: integer, format: int64 }
+    post:
+      tags: [WorkReports]
+      summary: Odešle sledovací odkaz na výkaz e-mailem (zakázka)
+      description: "Vyžaduje roli `accountant` nebo vyšší. Vytvoří odkaz, pokud ještě neexistuje."
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                to: { type: array, items: { type: string } }
+                cc: { type: array, items: { type: string } }
+                bcc: { type: array, items: { type: string } }
+                note: { type: string, maxLength: 2000 }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  sent_to: { type: array, items: { type: string } }
+                  sent_at: { type: string, format: date-time }
+                  url: { type: string }
+        '422': { description: "Žádný příjemce (no_recipients)" }
+        '404': { description: "Zakázka nenalezena" }
+        '502': { description: "Odeslání selhalo (send_failed)" }
 
   /api/v1/codebooks/countries:
     get:
@@ -1888,182 +2939,6 @@ paths:
                     items: { type: integer }
                     example: [2026, 2025, 2024, 2023, 2018]
                     description: Sjednocení obou množin + aktuální a minulý rok jako floor
-
-  # ------------------------------------------------------------
-  # Recurring invoice templates (pravidelné fakturace) — admin API
-  # ------------------------------------------------------------
-  /api/recurring:
-    get:
-      tags: [Recurring]
-      summary: Seznam šablon pravidelných faktur (scoped na aktuálního dodavatele)
-      parameters:
-        - in: query
-          name: client_id
-          schema: { type: integer }
-          description: Filtr na klienta
-        - in: query
-          name: status
-          schema:
-            type: string
-            enum: [active, paused, expired]
-      responses:
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  data:
-                    type: array
-                    items: { $ref: '#/components/schemas/RecurringTemplate' }
-    post:
-      tags: [Recurring]
-      summary: Vytvořit šablonu pravidelné faktury
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: { $ref: '#/components/schemas/RecurringTemplateInput' }
-      responses:
-        '201':
-          description: Created
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/RecurringTemplate' }
-
-  /api/recurring/{id}:
-    parameters:
-      - in: path
-        name: id
-        required: true
-        schema: { type: integer }
-    get:
-      tags: [Recurring]
-      summary: Detail šablony
-      responses:
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/RecurringTemplate' }
-        '404': { description: Nenalezena }
-    put:
-      tags: [Recurring]
-      summary: Update šablony
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: { $ref: '#/components/schemas/RecurringTemplateInput' }
-      responses:
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/RecurringTemplate' }
-    delete:
-      tags: [Recurring]
-      summary: Smazat šablonu (vygenerované faktury zůstanou, jen ztratí vazbu)
-      responses:
-        '200':
-          description: OK
-
-  /api/recurring/{id}/invoices:
-    get:
-      tags: [Recurring]
-      summary: Seznam faktur vygenerovaných z této šablony (poslední první)
-      parameters:
-        - in: path
-          name: id
-          required: true
-          schema: { type: integer }
-      responses:
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  data:
-                    type: array
-                    items:
-                      type: object
-                      properties:
-                        id: { type: integer }
-                        varsymbol: { type: string, nullable: true }
-                        invoice_type: { type: string }
-                        status: { type: string }
-                        issue_date: { type: string, format: date }
-                        due_date: { type: string, format: date }
-                        paid_at: { type: string, format: date, nullable: true }
-                        total_with_vat: { type: number, format: float }
-                        amount_to_pay: { type: number, format: float }
-                        currency: { type: string }
-
-  /api/recurring/{id}/pause:
-    post:
-      tags: [Recurring]
-      summary: Pozastavit šablonu (cron přeskočí, dokud není resumed)
-      parameters:
-        - in: path
-          name: id
-          required: true
-          schema: { type: integer }
-      responses:
-        '200':
-          description: OK
-
-  /api/recurring/{id}/resume:
-    post:
-      tags: [Recurring]
-      summary: Obnovit šablonu (vyžaduje next_run_date <= end_date)
-      parameters:
-        - in: path
-          name: id
-          required: true
-          schema: { type: integer }
-      responses:
-        '200':
-          description: OK
-        '409':
-          description: Šablona vypršela (next_run > end_date)
-
-  /api/recurring/{id}/run-now:
-    post:
-      tags: [Recurring]
-      summary: Manuálně vygenerovat fakturu ze šablony (pro testování)
-      parameters:
-        - in: path
-          name: id
-          required: true
-          schema: { type: integer }
-      requestBody:
-        required: false
-        content:
-          application/json:
-            schema:
-              type: object
-              properties:
-                issue_date:
-                  type: string
-                  format: date
-                  description: "Volitelný override; default = next_run_date šablony"
-      responses:
-        '201':
-          description: Faktura vygenerována
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  invoice_id: { type: integer }
-                  varsymbol: { type: string, nullable: true }
-                  issued:    { type: boolean }
-                  sent_to:   { type: array, items: { type: string } }
-                  new_next_run_date: { type: string, format: date, nullable: true }
-                  template_status:   { type: string, enum: [active, paused, expired] }
 
   # ============================================================================
   # Purchase invoices (přijaté faktury) — fáze 1 integrace forku
@@ -2812,7 +3687,7 @@ paths:
   /api/v1/purchase-invoices/export:
     get:
       tags: [Purchase invoices]
-      summary: Hromadný export přijatých faktur za měsíc (PDF ZIP / ISDOC ZIP / Pohoda dataPack)
+      summary: Hromadný export přijatých faktur za měsíc nebo čtvrtletí (PDF ZIP / ISDOC ZIP / Pohoda dataPack)
       description: |
         `pdf-zip`: ZIP s jedním PDF na fakturu. Preferuje archivovaný **originál**
         od dodavatele (`Prijata-{vs}-{vendor}.pdf`); pokud originál chybí, doplní
@@ -2820,9 +3695,15 @@ paths:
         Počet rekonstrukcí je v hlavičce `X-Export-Reconstructed`.
 
         `isdoc` / `pohoda`: generují XML z dat faktury (PDF nepotřebují).
+
+        Období lze zadat legacy parametrem `month=YYYY-MM`, nebo explicitně
+        `period=monthly&year=YYYY&month=M` / `period=quarterly&year=YYYY&quarter=1..4`.
       parameters:
         - $ref: '#/components/parameters/SupplierIdHeader'
-        - { in: query, name: month, required: true, schema: { type: string, pattern: '^\d{4}-\d{2}$' } }
+        - { in: query, name: month, schema: { oneOf: [{ type: string, pattern: '^\d{4}-\d{2}$' }, { type: integer, minimum: 1, maximum: 12 }] } }
+        - { in: query, name: period, schema: { type: string, enum: [monthly, quarterly] } }
+        - { in: query, name: year, schema: { type: integer, minimum: 1900, maximum: 2100 } }
+        - { in: query, name: quarter, schema: { type: integer, minimum: 1, maximum: 4 } }
         - { in: query, name: format, required: true, schema: { type: string, enum: [pdf-zip, isdoc, pohoda] } }
         - { in: query, name: date_by, schema: { type: string, enum: [tax, issue, received] } }
       responses:
@@ -2850,7 +3731,7 @@ paths:
   /api/v1/crm/overview:
     get:
       tags: [CRM]
-      summary: KPI overview (current month + last + YTD per currency)
+      summary: KPI overview (current month + last + YTD + trailing 12m + prev year per currency)
       parameters: [{ $ref: '#/components/parameters/SupplierIdHeader' }]
       responses: { '200': { description: KPI } }
 
@@ -2949,9 +3830,14 @@ paths:
   /api/v1/crm/action-items:
     get:
       tags: [CRM]
-      summary: Daily TODO (overdue, recurring due, tax deadlines, churn)
+      summary: Daily TODO (overdue, bank unmatched, recurring due, payables, purchase drafts, tax/SHV deadlines, churn)
+      description: |
+        Vrací položky `items[]` (typ `type`: `overdue_invoices`, `bank_unmatched`,
+        `recurring_due`, `overdue_payables`, `purchase_drafts`, `tax_deadline`,
+        `shv_deadline`, `churn_risk`), každá s `severity`, `title`, `hint`, `link`
+        a volitelně `count`/`days`. Plus `total` a `dismissed_count`.
       parameters: [{ $ref: '#/components/parameters/SupplierIdHeader' }]
-      responses: { '200': { description: 'items + total' } }
+      responses: { '200': { description: 'items + total + dismissed_count' } }
 
   /api/v1/crm/cash-flow-forecast:
     get:
@@ -3783,6 +4669,261 @@ paths:
             application/pdf:
               schema: { type: string, format: binary }
 
+  /api/v1/logbook/cars:
+    get:
+      tags: [Logbook]
+      summary: Seznam vozidel
+      parameters:
+        - $ref: '#/components/parameters/SupplierIdHeader'
+        - { in: query, name: include_archived, schema: { type: boolean, default: false } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/Car' } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      tags: [Logbook]
+      summary: Vytvoří vozidlo
+      parameters:
+        - $ref: '#/components/parameters/SupplierIdHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CarInput' }
+      responses:
+        '201':
+          description: Vytvořeno
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Car' }
+        '400': { $ref: '#/components/responses/ValidationFailed' }
+        '403': { $ref: '#/components/responses/InsufficientScope' }
+
+  /api/v1/logbook/cars/{id}:
+    parameters:
+      - $ref: '#/components/parameters/SupplierIdHeader'
+      - { in: path, name: id, required: true, schema: { type: integer, format: int64 } }
+    get:
+      tags: [Logbook]
+      summary: Detail vozidla
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Car' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    put:
+      tags: [Logbook]
+      summary: Upraví vozidlo
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CarInput' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Car' }
+        '400': { $ref: '#/components/responses/ValidationFailed' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [Logbook]
+      summary: Smaže vozidlo (nebo archivuje, je-li použito)
+      responses:
+        '200': { description: OK }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/logbook/trips:
+    get:
+      tags: [Logbook]
+      summary: Seznam jízd
+      parameters:
+        - $ref: '#/components/parameters/SupplierIdHeader'
+        - { in: query, name: car_id, schema: { type: integer } }
+        - { in: query, name: category_id, schema: { type: integer } }
+        - { in: query, name: year, schema: { type: integer } }
+        - { in: query, name: month, schema: { type: integer } }
+        - { in: query, name: date_from, schema: { type: string, format: date } }
+        - { in: query, name: date_to, schema: { type: string, format: date } }
+        - { in: query, name: q, schema: { type: string } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/Trip' } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      tags: [Logbook]
+      summary: Vytvoří jízdu
+      parameters:
+        - $ref: '#/components/parameters/SupplierIdHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TripInput' }
+      responses:
+        '201':
+          description: Vytvořeno
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Trip' }
+        '400': { $ref: '#/components/responses/ValidationFailed' }
+        '403': { $ref: '#/components/responses/InsufficientScope' }
+
+  /api/v1/logbook/trips/{id}:
+    parameters:
+      - $ref: '#/components/parameters/SupplierIdHeader'
+      - { in: path, name: id, required: true, schema: { type: integer, format: int64 } }
+    get:
+      tags: [Logbook]
+      summary: Detail jízdy
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Trip' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    put:
+      tags: [Logbook]
+      summary: Upraví jízdu
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TripInput' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Trip' }
+        '400': { $ref: '#/components/responses/ValidationFailed' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [Logbook]
+      summary: Smaže jízdu
+      responses:
+        '200': { description: OK }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/logbook/fuelings:
+    get:
+      tags: [Logbook]
+      summary: Seznam tankování
+      parameters:
+        - $ref: '#/components/parameters/SupplierIdHeader'
+        - { in: query, name: car_id, schema: { type: integer } }
+        - { in: query, name: source, schema: { type: string } }
+        - { in: query, name: year, schema: { type: integer } }
+        - { in: query, name: month, schema: { type: integer } }
+        - { in: query, name: date_from, schema: { type: string, format: date } }
+        - { in: query, name: date_to, schema: { type: string, format: date } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/Fueling' } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      tags: [Logbook]
+      summary: Vytvoří tankování (ruční)
+      parameters:
+        - $ref: '#/components/parameters/SupplierIdHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/FuelingInput' }
+      responses:
+        '201':
+          description: Vytvořeno
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Fueling' }
+        '400': { $ref: '#/components/responses/ValidationFailed' }
+        '403': { $ref: '#/components/responses/InsufficientScope' }
+
+  /api/v1/logbook/fuelings/{id}:
+    parameters:
+      - $ref: '#/components/parameters/SupplierIdHeader'
+      - { in: path, name: id, required: true, schema: { type: integer, format: int64 } }
+    get:
+      tags: [Logbook]
+      summary: Detail tankování
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Fueling' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    put:
+      tags: [Logbook]
+      summary: Upraví tankování
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/FuelingInput' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Fueling' }
+        '400': { $ref: '#/components/responses/ValidationFailed' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [Logbook]
+      summary: Smaže tankování
+      responses:
+        '200': { description: OK }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/logbook/trip-categories:
+    get:
+      tags: [Logbook]
+      summary: Číselník kategorií cest
+      parameters:
+        - $ref: '#/components/parameters/SupplierIdHeader'
+        - { in: query, name: include_archived, schema: { type: boolean, default: false } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/TripCategory' } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/v1/logbook/summary:
+    get:
+      tags: [Logbook]
+      summary: Roční daňový/účetní souhrn (per vozidlo)
+      description: |
+        Souhrn za zvolený rok: ujeto km, rozpad služební/soukromé (poměr pro krácení),
+        stav tachometru počítaný z jízd, tankování (litry, náklad, spotřeba),
+        kontrola návaznosti tachometru a informativní srovnání s paušálem na dopravu.
+      parameters:
+        - $ref: '#/components/parameters/SupplierIdHeader'
+        - { in: query, name: year, schema: { type: integer } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LogbookSummary' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
 components:
   securitySchemes:
     BearerAuth:
@@ -3885,11 +5026,15 @@ components:
         - health_assessment_pct
         - social_min_base_main
         - social_min_base_secondary
+        - social_secondary_participation_threshold
         - health_min_base
         - mortgage_cap
         - pension_cap
         - vat_limit_low
         - vat_limit_high
+        - vat_rate_standard
+        - vat_rate_reduced
+        - kh_item_threshold
         - pausal_annual
         - band_ceilings
         - expense_caps
@@ -3906,11 +5051,15 @@ components:
         health_assessment_pct: { type: number }
         social_min_base_main: { type: number }
         social_min_base_secondary: { type: number }
+        social_secondary_participation_threshold: { type: number, description: Rozhodná částka (zisk) pro povinnou účast na důch. pojištění u vedlejší SVČ }
         health_min_base: { type: number }
         mortgage_cap: { type: number, description: Strop odpočtu úroků z hypotéky }
         pension_cap: { type: number }
         vat_limit_low: { type: number, description: Limit obratu pro povinnou registraci DPH }
         vat_limit_high: { type: number }
+        vat_rate_standard: { type: number, description: Základní sazba DPH (%) — sloupce DPH výkazů, samovyměření RC, auto-klasifikace }
+        vat_rate_reduced: { type: number, description: Snížená sazba DPH (%) }
+        kh_item_threshold: { type: number, description: Limit KH (Kč vč. DPH) — nad limit doklad jednotlivě (A.4/B.2), do limitu sumace (A.5/B.3) }
         pausal_annual:
           type: object
           description: Měsíční/roční částky paušální daně per pásmo
@@ -4102,13 +5251,14 @@ components:
         first_name: { type: string, nullable: true }
         last_name: { type: string, nullable: true }
         ic: { type: string, nullable: true, description: IČO (8 číslic) }
-        dic: { type: string, nullable: true, description: DIČ }
+        dic: { type: string, nullable: true, description: "DIČ / VAT ID s country prefixem (u SK klienta = IČ DPH)" }
+        tax_number: { type: string, nullable: true, description: "Národní daňové číslo bez prefixu (SK DIČ, DE/AT Steuernummer, PL NIP, HU Adószám) — issue #120" }
         street: { type: string }
         city: { type: string }
         zip: { type: string }
         country_id: { type: integer }
         country_iso2: { type: string, description: "Denormalizovaný ISO2 kód země (alias z countries)" }
-        main_email: { type: string, format: email, description: "Hlavní email klienta — povinný, na něj chodí faktury." }
+        main_email: { type: string, format: email, description: "Hlavní email klienta — povinný. Bez e-mailových kontaktů (email_contacts) na něj chodí všechny zprávy; s kontakty slouží jako fallback a pro běžnou komunikaci." }
         phone: { type: string, nullable: true }
         language: { type: string, enum: [cs, en], description: "Jazyk faktur a emailů. Default cs." }
         currency_default_id: { type: integer, nullable: true, description: "Výchozí měna pro faktury klienta. Default = supplier.default_currency_id." }
@@ -4133,11 +5283,34 @@ components:
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
 
+    ClientEmailContact:
+      type: object
+      description: "E-mailový kontakt odběratele dle účelu (#86). Účely: communication (běžná komunikace), documents (faktury/dobropisy/poděkování za platbu), reminders (upomínky; bez nich fallback na documents), approvals (schvalování výkazů). Jakmile má klient aktivní kontakt s daným účelem, main_email se pro tento typ zprávy přestane automaticky přidávat (zůstává jen fallback)."
+      properties:
+        id: { type: integer, readOnly: true }
+        email: { type: string, format: email }
+        label: { type: string, nullable: true, maxLength: 80, description: 'Popisek (např. „účetní oddělení")' }
+        contact_name: { type: string, nullable: true, maxLength: 120, description: "Jméno kontaktní osoby" }
+        is_active: { type: boolean, default: true }
+        sort_order: { type: integer, readOnly: true, description: "Pořadí — odvozeno z pořadí v zaslaném poli" }
+        usages:
+          type: array
+          description: "Účely použití kontaktu + role příjemce."
+          items:
+            type: object
+            required: [usage]
+            properties:
+              usage: { type: string, enum: [communication, documents, reminders, approvals] }
+              recipient: { type: string, enum: [to, cc, bcc], default: to }
+
     ClientDetail:
       allOf:
         - $ref: '#/components/schemas/Client'
         - type: object
           properties:
+            email_contacts:
+              type: array
+              items: { $ref: '#/components/schemas/ClientEmailContact' }
             projects:
               type: array
               items: { $ref: '#/components/schemas/Project' }
@@ -4193,7 +5366,8 @@ components:
         first_name: { type: string, nullable: true }
         last_name: { type: string, nullable: true }
         ic: { type: string, nullable: true, description: "IČO — 8 číslic" }
-        dic: { type: string, nullable: true }
+        dic: { type: string, nullable: true, description: "DIČ / VAT ID s country prefixem (u SK = IČ DPH)" }
+        tax_number: { type: string, nullable: true, description: "Národní daňové číslo bez prefixu (SK DIČ, DE/AT Steuernummer, PL NIP, HU Adószám)" }
         street: { type: string }
         city: { type: string }
         zip: { type: string }
@@ -4218,6 +5392,10 @@ components:
         proforma_number_format: { type: string, nullable: true }
         credit_note_number_format: { type: string, nullable: true }
         invoice_number_period: { type: string, enum: [year, month, none], nullable: true }
+        email_contacts:
+          type: array
+          description: "E-mailové kontakty dle účelu (#86) — replace-all: pošli kompletní pole; klíč vynech, pokud kontakty neměníš. Max 10 kontaktů."
+          items: { $ref: '#/components/schemas/ClientEmailContact' }
 
     Invoice:
       type: object
@@ -4234,10 +5412,16 @@ components:
         varsymbol: { type: string, nullable: true, description: "Variabilní symbol = číslo faktury. Přiděluje se při issue (u draft je null nebo manuální override)." }
         invoice_type:
           type: string
-          enum: [invoice, proforma, credit_note, cancellation]
+          enum: [invoice, proforma, credit_note, cancellation, tax_document]
+          description: "tax_document = daňový doklad k přijaté platbě zálohy (§ 28/2 ZDPH); DUZP = datum platby, parent_invoice_id = proforma."
         status:
           type: string
           enum: [draft, issued, sent, reminded, paid, cancelled]
+        payment_status:
+          type: string
+          nullable: true
+          enum: [unpaid, partially_paid, paid, overpaid]
+          description: "Odvozený platební stav (#89) z paid_total vs. amount_to_pay (tolerance 0,05). Null pro draft/cancelled."
         payment_method:
           type: string
           enum: [bank_transfer, card, cash, other]
@@ -4268,6 +5452,7 @@ components:
         rounding: { type: number, format: float, description: "Zaokrouhlení (CZK)" }
         advance_paid_amount: { type: number, format: float, description: "Záloha k odečtení (u faktury vystavované po proforme)" }
         amount_to_pay: { type: number, format: float, description: "total_with_vat + rounding − advance_paid_amount" }
+        paid_total: { type: number, format: float, description: "Suma evidovaných plateb (invoice_payments, #89); zbývá k úhradě = amount_to_pay − paid_total" }
         discount_percent: { type: number, format: float, description: "Procentuální sleva z celé faktury (0 = žádná). Materializuje se jako záporná položka „Sleva X %\" v `items`." }
         totals:
           type: object
@@ -4401,6 +5586,11 @@ components:
         position: { type: integer, minimum: 1, maximum: 3 }
         email: { type: string, format: email }
         label: { type: string, nullable: true, example: "účetní" }
+        usages:
+          type: array
+          nullable: true
+          description: "Typy zpráv, pro které se e-mail použije (#86). NULL / prázdné / všechny tři = všechny typy (default, zpětně kompatibilní)."
+          items: { type: string, enum: [documents, reminders, approvals] }
 
     ProjectBrief:
       type: object
@@ -4437,6 +5627,11 @@ components:
               type: array
               maxItems: 3
               items: { $ref: '#/components/schemas/ProjectBilingEmail' }
+            billing_emails_mode:
+              type: string
+              enum: [auto, append, replace]
+              default: auto
+              description: "Jak kombinovat e-maily zakázky s kontakty klienta (#86): auto = dosavadní per-typ chování (doklady/upomínky přidat, schvalování nahradit), append = vždy přidat, replace = vždy nahradit."
             created_at: { type: string, format: date-time }
             updated_at: { type: string, format: date-time }
 
@@ -4550,8 +5745,15 @@ components:
           maxItems: 3
           items: { $ref: '#/components/schemas/ProjectBilingEmail' }
           description: |
-            Až 3 fakturační emaily (slot 1/2/3). Když je seznam neprázdný,
-            ti dostávají faktury z této zakázky místo emailů na klientovi.
+            Až 3 fakturační emaily (slot 1/2/3). Kombinace s kontakty/hlavním
+            e-mailem klienta se řídí přes `billing_emails_mode` (default `auto`
+            = dosavadní chování: u dokladů a upomínek se přidávají, u schvalování
+            výkazů nahrazují).
+        billing_emails_mode:
+          type: string
+          enum: [auto, append, replace]
+          default: auto
+          description: "Jak kombinovat e-maily zakázky s příjemci dle kontaktů klienta (#86)."
 
     WorkReportItem:
       type: object
@@ -4754,6 +5956,22 @@ components:
         unpaid_upcoming:
           type: array
           items: { $ref: '#/components/schemas/Invoice' }
+        draft_invoices:
+          type: array
+          description: "Rozpracované (status=draft) vystavené faktury pro widget Výkazy práce na Přehledu — firma + zakázka + odkaz na editaci. Max 24, řazeno dle updated_at DESC."
+          items:
+            type: object
+            properties:
+              id: { type: integer }
+              varsymbol: { type: string, nullable: true }
+              invoice_type: { type: string }
+              client_id: { type: integer }
+              client_company_name: { type: string }
+              project_id: { type: integer, nullable: true }
+              project_name: { type: string, nullable: true, description: "Název zakázky (NULL = bez zakázky)." }
+              currency: { type: string }
+              issue_date: { type: string, format: date }
+              total_with_vat: { type: number }
         top_clients_ytd:
           type: array
           description: "Top 12 klientů YTD per měna."
@@ -5006,13 +6224,54 @@ components:
             revenue: { type: number }
             count: { type: integer }
 
+    PurchasePaymentQr:
+      type: object
+      description: "QR platba + bankovní účet přijaté faktury (GET/POST/PUT na /purchase-invoices/{id}/payment-qr resp. /payment-account)."
+      properties:
+        ok: { type: boolean }
+        qr_data_uri: { type: string, nullable: true, description: "QR jako data URI (PNG)." }
+        source: { type: string, nullable: true, enum: [manual, isdoc, ai_reextract, qr_image] }
+        amount: { type: number }
+        currency: { type: string }
+        account:
+          type: object
+          properties:
+            account_number: { type: string, nullable: true }
+            bank_code: { type: string, nullable: true }
+            iban: { type: string, nullable: true }
+            bic: { type: string, nullable: true }
+            variable_symbol: { type: string, nullable: true }
+        editable: { type: boolean }
+        needs_account: { type: boolean }
+        can_extract: { type: boolean, nullable: true }
+
+    WorkReportLinkStatus:
+      type: object
+      description: "Stav veřejného sledovacího odkazu na výkaz (klient/zakázka)."
+      properties:
+        exists: { type: boolean }
+        url: { type: string, nullable: true }
+        last_sent_at: { type: string, format: date-time, nullable: true }
+        last_viewed_at: { type: string, format: date-time, nullable: true }
+
+    WorkReportLinkRecipients:
+      type: object
+      description: "Navržení příjemci pro odeslání odkazu (předvyplnění modalu)."
+      properties:
+        to: { type: array, items: { type: string } }
+        cc: { type: array, items: { type: string } }
+        bcc: { type: array, items: { type: string } }
+        resolved: { type: object }
+
     BankStatement:
       type: object
       description: "Položka seznamu výpisů (GET /bank-statements). Bankovní spojení dodavatele je per-měna na /settings/currencies, ne tady."
       properties:
         id: { type: integer, format: int64 }
+        source: { type: string, enum: [gpc, email_notice], description: "Původ výpisu: gpc = oficiální GPC/ABO výpis z banky, email_notice = virtuální výpis složený z e-mailových bankovních avíz." }
         file_name: { type: string, example: "vypis_2026_05.gpc" }
         account_number: { type: string, example: "1234567890/0100" }
+        bank_code: { type: string, nullable: true, example: "0100", description: "Kód banky účtu — autoritativně z konfigurovaného účtu (currencies.bank_code), fallback z výpisu. GPC výpisy ho samy nenesou." }
         currency: { type: string, nullable: true, example: EUR, description: "ISO 4217. Odvozeno z transakcí výpisu nebo z currencies.account_number. NULL u výpisů importovaných před v4.1.0." }
         statement_date: { type: string, format: date }
         statement_number: { type: string, nullable: true }
@@ -5032,7 +6291,6 @@ components:
         - type: object
           properties:
             file_hash: { type: string, description: "SHA-256 originálního souboru" }
-            bank_code: { type: string, nullable: true }
             credit_total: { type: number, format: float, nullable: true }
             debit_total: { type: number, format: float, nullable: true }
             imported_by: { type: integer, nullable: true, description: "User ID importujícího" }
@@ -5047,6 +6305,7 @@ components:
         statement_id: { type: integer, format: int64 }
         posted_at: { type: string, format: date }
         amount: { type: number, format: float, example: 12500.00 }
+        balance: { type: number, format: float, nullable: true, description: "Disponibilní zůstatek účtu z e-mailového avíza (Creditas/Fio/RB); u transakcí z GPC výpisu null." }
         currency: { type: string, nullable: true, example: CZK }
         variable_symbol: { type: string, nullable: true }
         constant_symbol: { type: string, nullable: true }
@@ -5069,6 +6328,54 @@ components:
         matched_at: { type: string, format: date-time, nullable: true }
         matched_by: { type: integer, nullable: true, description: "User ID (u ručního párování)" }
 
+    SupplierUpdate:
+      type: object
+      description: |
+        Částečný update dodavatele — pošli jen pole ke změně. Zrcadlí
+        mass-assign whitelist `PUT /api/v1/settings/supplier`; níže veřejný
+        subset (fakturační údaje, defaulty, číslování, branding). `logo_path`
+        a `signature_path` přes tento endpoint změnit NELZE (bezpečnost).
+      properties:
+        company_name: { type: string }
+        display_name: { type: string, nullable: true, description: "Obchodní/značkové jméno v hlavičce PDF a e-mailů (fallback = company_name)" }
+        street: { type: string }
+        city: { type: string }
+        zip: { type: string }
+        country_id: { type: integer }
+        ic: { type: string, nullable: true }
+        dic: { type: string, nullable: true }
+        is_vat_payer: { type: boolean }
+        email: { type: string, format: email, nullable: true }
+        phone: { type: string, nullable: true }
+        web: { type: string, nullable: true }
+        tagline: { type: string, nullable: true, description: "Podtitulek v patičce PDF a e-mailů" }
+        default_currency_id: { type: integer }
+        default_payment_due_days: { type: integer }
+        default_payment_due_unit: { type: string, enum: [days, month] }
+        default_prices_include_vat: { type: boolean }
+        invoice_number_format:
+          type: string
+          nullable: true
+          maxLength: 60
+          example: "{YY}{MM}{CCC}"
+          description: |
+            Template čísla faktury: `{YYYY}`/`{YY}` rok, `{MM}` měsíc, `{C..C}`
+            counter s paddingem dle počtu C (např. `{CCC}` → 001). Musí
+            obsahovat counter placeholder. Prázdný string / null = fallback
+            na globální cfg.
+        proforma_number_format: { type: string, nullable: true, maxLength: 60, example: "9{YY}{MM}{CCC}" }
+        credit_note_number_format: { type: string, nullable: true, maxLength: 60, example: "7{YY}{MM}{CCC}" }
+        purchase_invoice_number_format: { type: string, nullable: true, maxLength: 60, description: "Interní číslování přijatých faktur" }
+        invoice_number_period:
+          type: string
+          enum: [year, month, none]
+          description: "Reset counteru: ročně / měsíčně / nikdy (jedna průběžná řada). Společné pro všechny typy dokladů."
+        email_branding_enabled: { type: boolean, description: "Zapne logo + akcentní barvu v e-mailech a PDF" }
+        email_accent_color: { type: string, example: "#3B2D83", description: "Hex #RRGGBB; akcentní barva e-mailů a PDF faktur" }
+        pdf_logo_show_name: { type: boolean, description: "Zobrazit vedle loga v PDF i název dodavatele" }
+        auto_send_reminders: { type: boolean }
+        reminder_days_after_due: { type: integer, minimum: 1, maximum: 365 }
+
     SupplierFull:
       type: object
       description: |
@@ -5088,6 +6395,7 @@ components:
         ic: { type: string, nullable: true }
         dic: { type: string, nullable: true }
         is_vat_payer: { type: boolean }
+        is_identified: { type: boolean, description: "Identifikovaná osoba (§ 6g–6l ZDPH, issue #94) — neplátce v tuzemsku s přeshraničními povinnostmi (RC faktury do EU, SHV, samovyměření bez odpočtu). Nelze kombinovat s is_vat_payer=true." }
         commercial_register: { type: string, nullable: true, description: "Spisová značka u rejstříkového soudu (doplňuje ARES enricher)" }
         email: { type: string, format: email, nullable: true }
         phone: { type: string, nullable: true }
@@ -5102,10 +6410,12 @@ components:
         invoice_number_format:
           type: string
           nullable: true
-          example: "F{YYYY}-{####}"
-          description: "{YYYY}, {MM}, {####} placeholders. Per-supplier."
+          example: "{YY}{MM}{CCC}"
+          description: "{YYYY}/{YY}, {MM}, {C..C} placeholders (viz SupplierUpdate). Per-supplier; null = globální cfg."
         proforma_number_format: { type: string, nullable: true }
         credit_note_number_format: { type: string, nullable: true }
+        purchase_invoice_number_format: { type: string, nullable: true }
+        invoice_number_period: { type: string, enum: [year, month, none], description: "Reset counteru číselných řad" }
         taxpayer_type: { type: string, enum: [fo, po], nullable: true, description: "Fyzická / právnická osoba (EPO výkazy)" }
         vat_period: { type: string, enum: [monthly, quarterly], nullable: true }
         financial_office_code: { type: string, nullable: true, description: "Kód FÚ pro EPO (= CRPDPH cisloFu)" }
@@ -5115,6 +6425,19 @@ components:
         has_email_logo: { type: boolean }
         auto_send_reminders: { type: boolean }
         reminder_days_after_due: { type: integer, minimum: 1, maximum: 365, default: 3, description: "Per-dodavatel práh: po kolika dnech po splatnosti poslat první automatickou upomínku (migrace 0089). CLI --days ho přebije." }
+        self_copy:
+          type: object
+          nullable: true
+          description: |
+            Kopie odchozích e-mailů na e-mail dodavatele (migrace 0102).
+            Klíče = typy zpráv, hodnoty off|cc|bcc. Chybějící klíč nebo null
+            = fallback na globální cfg flagy (cc_supplier_on_*). Klíč
+            `approvals` platí pro žádost o schválení i schvalovací upomínku.
+          properties:
+            documents: { type: string, enum: ["off", cc, bcc] }
+            reminders: { type: string, enum: ["off", cc, bcc] }
+            approvals: { type: string, enum: ["off", cc, bcc] }
+          example: { documents: cc, approvals: bcc }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
 
@@ -5125,6 +6448,30 @@ components:
         page:     { type: integer, example: 1 }
         per_page: { type: integer, example: 50 }
         pages:    { type: integer, example: 9 }
+
+    InvoicePayment:
+      type: object
+      description: "Evidovaná platba faktury / zálohové faktury (#89). N:1 — jedna faktura může mít víc plateb (splátky, více převodů, avíza)."
+      properties:
+        id: { type: integer, format: int64 }
+        invoice_id: { type: integer, format: int64 }
+        paid_on: { type: string, format: date }
+        amount: { type: number, format: float, description: "Částka v měně faktury (> 0)" }
+        currency: { type: string, example: CZK, description: "Denormalizovaný kód měny faktury v okamžiku platby" }
+        variable_symbol: { type: string, nullable: true }
+        bank_reference: { type: string, nullable: true }
+        note: { type: string, nullable: true }
+        source:
+          type: string
+          enum: [manual, mark_paid, bank, legacy]
+          description: "manual = ruční záznam, mark_paid = zkratka „označit zaplaceno“, bank = bankovní párování (GPC i e-mailové avízo), legacy = backfill z dob před evidencí plateb"
+        bank_transaction_id: { type: integer, format: int64, nullable: true, description: "Vazba na bankovní transakci (taková platba se maže přes unmatch ve výpisu)" }
+        bank_statement_id: { type: integer, format: int64, nullable: true }
+        tax_document_invoice_id: { type: integer, format: int64, nullable: true, description: "Daňový doklad k přijaté platbě vystavený k této platbě (jen u záloh)" }
+        tax_document_varsymbol: { type: string, nullable: true }
+        tax_document_status: { type: string, nullable: true, enum: [draft, issued, sent, reminded, paid, cancelled] }
+        created_by: { type: integer, nullable: true }
+        created_at: { type: string, format: date-time }
 
     InvoiceItem:
       type: object
@@ -5205,6 +6552,12 @@ components:
         reverse_charge: { type: boolean }
         payment_due_days: { type: integer }
         discount_percent: { type: number, format: float, description: "Procentuální sleva (0–100) zděděná na každou vygenerovanou fakturu." }
+        revenue_category_id:
+          type: integer
+          nullable: true
+          description: "Pevná kategorie tržby pro generované faktury (#119) — přebíjí fallback výchozí kategorie zakázky > zákazníka. NULL = fallback. Na fakturu se ukládá jako snapshot při generování."
+        revenue_category_label: { type: string, nullable: true, description: "Label kategorie (jen detail šablony)." }
+        revenue_category_code: { type: string, nullable: true, description: "Kód kategorie (jen detail šablony)." }
         draft_open_mode:
           type: string
           enum: [at_issue, period_start]
@@ -5280,6 +6633,10 @@ components:
           maximum: 100
           default: 0
           description: "Procentuální sleva z celé faktury (0–100); zdědí ji každá vygenerovaná faktura (materializuje se jako záporná položka „Sleva X %\")."
+        revenue_category_id:
+          type: integer
+          nullable: true
+          description: "Pevná kategorie tržby pro generované faktury (#119). Musí existovat a patřit dodavateli šablony. NULL/vynecháno = fallback výchozí kategorie zakázky > zákazníka při generování."
         draft_open_mode:
           type: string
           enum: [at_issue, period_start]
@@ -5485,6 +6842,12 @@ components:
         pdf_size_bytes: { type: integer, nullable: true }
         pdf_original_name: { type: string, nullable: true }
         pdf_uploaded_at: { type: string, format: date-time, nullable: true }
+        source_path: { type: string, nullable: true, description: "Relative path to machine-readable source artifact within archive_storage (sources/ subtree)" }
+        source_hash: { type: string, nullable: true, description: "SHA-256 hex of source artifact" }
+        source_size_bytes: { type: integer, nullable: true }
+        source_original_name: { type: string, nullable: true }
+        source_format: { type: string, nullable: true, enum: [isdoc, isdocx, pdf, pohoda_xml, idoklad_json, fakturoid_json], description: "Format of the archived authoritative source document" }
+        source_uploaded_at: { type: string, format: date-time, nullable: true }
         vat_classification_code: { type: string, nullable: true }
         vat_overrides:
           type: array
@@ -5608,3 +6971,201 @@ components:
               purchase_invoice_id: { type: integer, nullable: true }
               isdoc_invoice_count: { type: integer, nullable: true }
               supplier_ic: { type: string, nullable: true }
+
+    Car:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        registration: { type: string }
+        name: { type: string, nullable: true }
+        brand: { type: string, nullable: true }
+        model: { type: string, nullable: true }
+        vin: { type: string, nullable: true }
+        fuel_type: { type: string, nullable: true, enum: [diesel, petrol, lpg, cng, electric, hybrid, other] }
+        odometer_start: { type: integer, nullable: true }
+        odometer_start_date: { type: string, format: date, nullable: true }
+        is_default: { type: boolean }
+        is_archived: { type: boolean }
+        note: { type: string, nullable: true }
+        last_odometer: { type: integer, nullable: true, description: Poslední známý stav tachometru (z jízd) }
+        trips_count: { type: integer, nullable: true }
+        fuelings_count: { type: integer, nullable: true }
+        created_at: { type: string, format: date-time }
+    CarInput:
+      type: object
+      required: [registration]
+      properties:
+        registration: { type: string, maxLength: 20 }
+        name: { type: string, nullable: true }
+        brand: { type: string, nullable: true }
+        model: { type: string, nullable: true }
+        vin: { type: string, nullable: true }
+        fuel_type: { type: string, nullable: true, enum: [diesel, petrol, lpg, cng, electric, hybrid, other] }
+        odometer_start: { type: integer, nullable: true }
+        odometer_start_date: { type: string, format: date, nullable: true }
+        is_default: { type: boolean }
+        is_archived: { type: boolean }
+        note: { type: string, nullable: true }
+    Trip:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        car_id: { type: integer }
+        car_registration: { type: string, nullable: true }
+        trip_date: { type: string, format: date }
+        time_start: { type: string, nullable: true }
+        time_end: { type: string, nullable: true }
+        odometer_start: { type: integer, nullable: true }
+        odometer_end: { type: integer, nullable: true }
+        distance_km: { type: number }
+        category_id: { type: integer, nullable: true }
+        category_label: { type: string, nullable: true }
+        category_is_private: { type: boolean, nullable: true }
+        purpose: { type: string, nullable: true }
+        origin: { type: string, nullable: true }
+        destination: { type: string, nullable: true }
+        note: { type: string, nullable: true }
+        created_at: { type: string, format: date-time }
+    TripInput:
+      type: object
+      required: [car_id, trip_date]
+      properties:
+        car_id: { type: integer }
+        trip_date: { type: string, format: date }
+        time_start: { type: string, nullable: true }
+        time_end: { type: string, nullable: true }
+        odometer_start: { type: integer, nullable: true }
+        odometer_end: { type: integer, nullable: true }
+        distance_km: { type: number, nullable: true, description: "Prázdné = dopočítá se z tachometru (konec − začátek)" }
+        category_id: { type: integer, nullable: true }
+        purpose: { type: string, nullable: true }
+        origin: { type: string, nullable: true }
+        destination: { type: string, nullable: true }
+        note: { type: string, nullable: true }
+    Fueling:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        car_id: { type: integer, nullable: true }
+        car_registration: { type: string, nullable: true }
+        fueled_date: { type: string, format: date }
+        fueled_time: { type: string, nullable: true }
+        fuel_type: { type: string, nullable: true }
+        quantity: { type: number, nullable: true }
+        unit: { type: string }
+        unit_price: { type: number, nullable: true }
+        amount_without_vat: { type: number, nullable: true }
+        amount_vat: { type: number, nullable: true }
+        amount_with_vat: { type: number }
+        currency: { type: string }
+        odometer: { type: integer, nullable: true }
+        station: { type: string, nullable: true }
+        vendor_id: { type: integer, nullable: true }
+        vendor_name: { type: string, nullable: true }
+        source: { type: string, enum: [manual, invoice, axigon, axigon_ai, import] }
+        source_purchase_invoice_id: { type: integer, nullable: true }
+        source_invoice_number: { type: string, nullable: true }
+        receipt_number: { type: string, nullable: true }
+        note: { type: string, nullable: true }
+        created_at: { type: string, format: date-time }
+    FuelingInput:
+      type: object
+      required: [fueled_date, amount_with_vat]
+      properties:
+        car_id: { type: integer, nullable: true }
+        fueled_date: { type: string, format: date }
+        fueled_time: { type: string, nullable: true }
+        fuel_type: { type: string, nullable: true }
+        quantity: { type: number, nullable: true }
+        unit: { type: string }
+        unit_price: { type: number, nullable: true }
+        amount_with_vat: { type: number }
+        currency: { type: string }
+        odometer: { type: integer, nullable: true }
+        station: { type: string, nullable: true }
+        vendor_id: { type: integer, nullable: true }
+        note: { type: string, nullable: true }
+    TripCategory:
+      type: object
+      properties:
+        id: { type: integer }
+        code: { type: string }
+        label: { type: string }
+        is_private: { type: boolean }
+        display_order: { type: integer }
+        is_archived: { type: boolean }
+        trips_count: { type: integer, nullable: true }
+    LogbookSummary:
+      type: object
+      properties:
+        year: { type: integer }
+        available_years: { type: array, items: { type: integer } }
+        vehicles: { type: array, items: { $ref: '#/components/schemas/SummaryVehicle' } }
+        totals: { $ref: '#/components/schemas/SummaryTotals' }
+        monthly: { $ref: '#/components/schemas/MonthlyKm' }
+    MonthlyKm:
+      type: object
+      description: Najeté km po měsících (12 hodnot, leden..prosinec) — vybraný rok vs předchozí.
+      properties:
+        year: { type: integer }
+        prev_year: { type: integer }
+        current: { type: array, items: { type: number } }
+        previous: { type: array, items: { type: number } }
+    SummaryVehicle:
+      type: object
+      properties:
+        car_id: { type: integer }
+        registration: { type: string }
+        name: { type: string, nullable: true }
+        trips_count: { type: integer }
+        km: { type: number }
+        business_km: { type: number }
+        private_km: { type: number }
+        uncategorized_km: { type: number }
+        private_ratio: { type: number }
+        business_ratio: { type: number }
+        odometer_start: { type: integer, nullable: true }
+        odometer_end: { type: integer, nullable: true }
+        fuel_count: { type: integer }
+        liters: { type: number }
+        liters_count: { type: integer }
+        liters_incomplete: { type: boolean }
+        kwh: { type: number, description: Charged energy (kWh) for electric/PHEV vehicles. }
+        kwh_count: { type: integer }
+        kwh_incomplete: { type: boolean }
+        fuel_cost: { type: number }
+        avg_consumption: { type: number, nullable: true, description: Fuel consumption l/100 km. }
+        avg_consumption_kwh: { type: number, nullable: true, description: Electric consumption kWh/100 km. }
+        continuity_issues: { type: integer }
+        continuity_detail:
+          type: array
+          items:
+            type: object
+            properties:
+              prev_date: { type: string, format: date }
+              prev_end: { type: integer }
+              date: { type: string, format: date }
+              start: { type: integer }
+              gap: { type: integer }
+        pausal_months: { type: integer }
+        pausal_rate: { type: integer }
+        pausal_year: { type: integer }
+    SummaryTotals:
+      type: object
+      properties:
+        vehicles_count: { type: integer }
+        trips_count: { type: integer }
+        km: { type: number }
+        business_km: { type: number }
+        private_km: { type: number }
+        uncategorized_km: { type: number }
+        private_ratio: { type: number }
+        fuel_count: { type: integer }
+        liters: { type: number }
+        kwh: { type: number, description: Total charged energy (kWh). }
+        fuel_cost: { type: number }
+        avg_consumption: { type: number, nullable: true }
+        avg_consumption_kwh: { type: number, nullable: true }
+        liters_incomplete: { type: boolean }
+        kwh_incomplete: { type: boolean }
+        continuity_issues: { type: integer }

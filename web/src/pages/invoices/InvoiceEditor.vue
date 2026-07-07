@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, watch, nextTick } from 'vue'
 import { useRoute, useRouter, RouterLink } from 'vue-router'
-import { invoicesApi, type Invoice, type InvoicePayload, type InvoiceItem, type WorkReportItem, type InvoiceAttachment } from '@/api/invoices'
+import { invoicesApi, type Invoice, type InvoicePayload, type InvoiceItem, type WorkReportItem, type WorkReportMaterial, type InvoiceAttachment } from '@/api/invoices'
 import { useHotkey } from '@/composables/useHotkey'
 import { focusLastRow } from '@/composables/useRowFocus'
 import { useToast } from '@/composables/useToast'
@@ -46,6 +46,12 @@ const queryDocType = computed<'proforma' | 'credit_note' | null>(() => {
 })
 const editedStatus = ref<string>('draft')
 const editedVarsymbol = ref<string | null>(null)
+// Původní typ načtené faktury — pro detekci změny typu u vystavené (force-edit),
+// která backend přečísluje (uvolní staré číslo z řady, přidělí nové v řadě cílového typu).
+const editedType = ref<string>('invoice')
+// True, když u VYSTAVENÉ faktury (force-edit) uživatel přepnul typ → backend přečísluje.
+const typeWillRenumber = computed(() =>
+  isForce.value && editedStatus.value !== 'draft' && form.value.invoice_type !== editedType.value)
 // Náhled čísla, které dostane faktura při Vystavení (pokud user nezadá ruční override).
 // Naplní se z API na změnu invoice_type / issue_date — per-supplier per-period live preview.
 const varsymbolAutoPreview = ref<string>('')
@@ -114,6 +120,9 @@ function defaultItemUnit(): string {
 
 // Aktivní dodavatel — pokud není plátce DPH, fakturuje bez DPH (žádné DPH UI ani v PDF).
 const supplierIsVatPayer = computed(() => supplierStore.currentSupplier?.is_vat_payer ?? true)
+// Identifikovaná osoba (§ 6g–6l ZDPH, #94) — neplátce, který ale služby do EU
+// fakturuje s přenesenou daňovou povinností (čl. 196 směrnice) a podává SHV.
+const supplierIsIdentified = computed(() => supplierStore.currentSupplier?.is_identified ?? false)
 
 // „Osvobozeno od daně z příjmů" má smysl jen pro OSVČ (FO): osvobození dle § 4 ZDP
 // platí výhradně pro fyzické osoby, u s.r.o. (PO) žádný § 4 není a prodej majetku je
@@ -124,10 +133,17 @@ const showIncomeTaxExemptUI = computed(
 )
 
 // RC je volba na konkrétním plnění (přenesení daň. povinnosti), ne natvrdo vlastnost
-// odběratele → checkbox zobrazíme vždy, když je dodavatel plátce DPH (neplátce RC
-// vystavit nemůže). Příznak `reverse_charge` v profilu klienta slouží jen jako default
-// předvyplnění při výběru klienta (viz onClientChange), uživatel ho může přepnout.
-const showReverseChargeUI = computed(() => supplierIsVatPayer.value)
+// odběratele → checkbox zobrazíme vždy, když je dodavatel plátce DPH (čistý neplátce
+// RC vystavit nemůže) NEBO identifikovaná osoba (#94 — RC u služeb do EU je její
+// hlavní use-case). Příznak `reverse_charge` v profilu klienta slouží jen jako default
+// předvyplnění při výběru klienta (viz applyClientDefaults), uživatel ho může přepnout.
+const showReverseChargeUI = computed(() => supplierIsVatPayer.value || supplierIsIdentified.value)
+
+// Neplátce/IO s RC: částky na dokladu JSOU základ daně (ceny bez DPH) — DPH si
+// samovyměří odběratel sazbou své země, česká sazba se neuvádí. Sloupec proto
+// místo neutrálního „Celkem" pojmenujeme „Bez DPH", ať je to z dokladu zřejmé.
+const nonPayerTotalLabel = computed(() =>
+  form.value.reverse_charge ? t('invoice.totals.without_vat') : t('invoice.totals.total'))
 
 const form = ref<{
   invoice_type: 'invoice' | 'proforma' | 'credit_note'
@@ -377,6 +393,7 @@ onMounted(async () => {
     const inv = await invoicesApi.get(invoiceId.value)
     editedStatus.value = inv.status
     editedVarsymbol.value = inv.varsymbol
+    editedType.value = inv.invoice_type
     Object.assign(form.value, {
       invoice_type: (inv.invoice_type === 'proforma' || inv.invoice_type === 'credit_note')
         ? inv.invoice_type
@@ -503,9 +520,20 @@ async function applyClientDefaults(clientId: number) {
   form.value.currency_id = c.currency_default_id
   form.value.currency = c.currency_default
   form.value.language = c.language
-  // Neplátce DPH nikdy nevystavuje RC fakturu — ignorujeme klientský flag.
+  // Čistý neplátce DPH nikdy nevystavuje RC fakturu — ignorujeme klientský flag.
   // RC jen přepne hlavičkový příznak; sazby položek (nominální) se nemění.
-  form.value.reverse_charge = supplierIsVatPayer.value ? c.reverse_charge : false
+  // Identifikovaná osoba (#94): u EU klienta s DIČ je RC její hlavní use-case
+  // (služby § 9/1, čl. 196 směrnice) → zapnout automaticky a předvyplnit
+  // klasifikaci 22 (EU služby → souhrnné hlášení). Klient ze 3. země RC nemá —
+  // plnění je mimo předmět DPH, žádná klauzule ani SHV.
+  if (supplierIsVatPayer.value) {
+    form.value.reverse_charge = c.reverse_charge
+  } else if (supplierIsIdentified.value && c.country_is_eu && c.country_iso2 !== 'CZ' && (c.dic || '').trim() !== '') {
+    form.value.reverse_charge = true
+    if (!form.value.vat_classification_code) form.value.vat_classification_code = '22'
+  } else {
+    form.value.reverse_charge = false
+  }
   // Výchozí kategorie tržby klienta — předvyplň, jen pokud uživatel ještě nevybral
   // (project default má přednost a aplikuje se až v applyProjectDefaults).
   if (form.value.revenue_category_id == null && c.default_revenue_category_id != null) {
@@ -760,6 +788,18 @@ const unitPriceHeaderLabel = computed(() => form.value.prices_include_vat && sup
 const wrOpen = ref(false)
 const wrTitle = ref('')
 const wrItems = ref<WorkReportItem[]>([])
+const wrVatRateId = ref<number | null>(null)
+
+// ─── MATERIAL REPORT ────────────────────────────────────────────
+const matOpen = ref(false)
+const matTitle = ref('')
+const matItems = ref<WorkReportMaterial[]>([])
+const matVatRateId = ref<number | null>(null)
+
+function vatRateIdByPercent(p: number): number | null {
+  const r = vatRates.value.find(x => Math.round(Number(x.rate_percent)) === p && !x.is_reverse_charge)
+  return r ? r.id : null
+}
 
 async function loadWorkReport() {
   if (!invoiceId.value) return
@@ -767,7 +807,19 @@ async function loadWorkReport() {
   if (wr) {
     wrTitle.value = wr.title
     wrItems.value = wr.items.map(i => ({ ...i }))
-    wrOpen.value = true
+    // Neplátce DPH: vždy 0% „Osvobozeno" (defaultVatRateId()), ať se do položek faktury
+    // nepropíše DPH — sazba je pro něj skrytá. Plátce: uložená → 21 % → fallback.
+    wrVatRateId.value = supplierIsVatPayer.value
+      ? (wr.vat_rate_id ?? vatRateIdByPercent(21) ?? defaultVatRateId())
+      : defaultVatRateId()
+    if (wr.items.length > 0) wrOpen.value = true
+    // Materiál
+    if (wr.material_title) matTitle.value = wr.material_title
+    matItems.value = (wr.materials ?? []).map(m => ({ ...m }))
+    matVatRateId.value = supplierIsVatPayer.value
+      ? (wr.material_vat_rate_id ?? vatRateIdByPercent(12) ?? defaultVatRateId())
+      : defaultVatRateId()
+    if (matItems.value.length > 0) matOpen.value = true
   }
 }
 
@@ -801,6 +853,7 @@ function moveWrItem(idx: number, dir: -1 | 1) {
   wrItems.value.splice(newIdx, 0, item)
 }
 function openWorkReport() {
+  if (wrVatRateId.value == null) wrVatRateId.value = supplierIsVatPayer.value ? (vatRateIdByPercent(21) ?? defaultVatRateId()) : defaultVatRateId()
   if (wrItems.value.length === 0) {
     const date = (form.value.tax_date || form.value.issue_date || '').slice(0, 7) // YYYY-MM
     wrTitle.value = date ? t('invoice.wr_title_with_date', { date }) : t('invoice.work_report')
@@ -838,14 +891,15 @@ function pushWrToInvoiceItem() {
     target.quantity = 1
     target.unit = unit
     target.unit_price_without_vat = totalAmount
-    // vat_rate_id záměrně neměníme — uživatel ho mohl ručně změnit
+    // Sazba DPH práce dle volby výkazu (uživatel ji explicitně nastavuje selectorem).
+    if (wrVatRateId.value != null) target.vat_rate_id = wrVatRateId.value
   } else {
     form.value.items.push({
       description,
       quantity: 1,
       unit,
       unit_price_without_vat: totalAmount,
-      vat_rate_id: defaultVatId,
+      vat_rate_id: wrVatRateId.value ?? defaultVatId,
       order_index: form.value.items.length,
     })
   }
@@ -908,6 +962,117 @@ function checkWorkReportSync(): string | null {
     })
   }
   return null
+}
+
+// ── Materiál: řádky + přenos ───────────────────────────────────────────
+const matItemsValid = computed(() => matItems.value.filter(m => (m.description || '').trim() !== '' && (Number(m.quantity) || 0) > 0))
+const matTotal = computed(() => matItemsValid.value.reduce((s, m) => s + Math.round((Number(m.quantity) || 0) * (Number(m.unit_price) || 0) * 100) / 100, 0))
+
+/**
+ * Obdoba checkWorkReportSync pro materiál: pokud má uživatel otevřený výkaz materiálu
+ * s řádky, ověř že odpovídá položce faktury. Vrací null = OK, jinak warning pro confirm().
+ */
+function checkMaterialReportSync(): string | null {
+  if (!matOpen.value || matItemsValid.value.length === 0) return null
+  const total = Math.round(matTotal.value * 100) / 100
+  const description = (matTitle.value || t('invoice.wr_material_title')).trim()
+  if (description === '') return null
+
+  const ccy = currencies.value.find(c => c.id === form.value.currency_id)?.code || ''
+  const loc = locale.value === 'cs' ? 'cs' : 'en-US'
+  const item = form.value.items.find(it => (it.description || '').trim() === description)
+
+  if (!item) {
+    return t('invoice.wr_material_not_in_items_confirm', {
+      description,
+      amount: total.toLocaleString(loc),
+      ccy,
+    })
+  }
+
+  const itemAmount = Math.round((Number(item.quantity) || 0) * (Number(item.unit_price_without_vat) || 0) * 100) / 100
+  if (Math.abs(itemAmount - total) > 0.01) {
+    return t('invoice.wr_material_diff_confirm', {
+      amount: total.toLocaleString(loc),
+      itemAmount: itemAmount.toLocaleString(loc),
+      ccy,
+    })
+  }
+  return null
+}
+
+function addMatItem() {
+  matItems.value.push({
+    description: '',
+    quantity: 1,
+    unit: units.value.find(u => u.code === 'ks')?.code || 'ks',
+    unit_price: 0,
+    order_index: matItems.value.length,
+  })
+  focusLastRow('[data-row-input="inv-mat"]')
+}
+function removeMatItem(idx: number) { matItems.value.splice(idx, 1) }
+function moveMatItem(idx: number, dir: -1 | 1) {
+  const newIdx = idx + dir
+  if (newIdx < 0 || newIdx >= matItems.value.length) return
+  const [item] = matItems.value.splice(idx, 1)
+  matItems.value.splice(newIdx, 0, item)
+}
+function openMaterial() {
+  if (matVatRateId.value == null) matVatRateId.value = supplierIsVatPayer.value ? (vatRateIdByPercent(12) ?? defaultVatRateId()) : defaultVatRateId()
+  if (!matTitle.value) matTitle.value = t('invoice.wr_material_title')
+  if (matItems.value.length === 0) addMatItem()
+  matOpen.value = true
+}
+
+// Přenese sumu materiálu jako jednu položku faktury (popis = material_title, qty=1, cena = celkem).
+function pushMatToInvoiceItem() {
+  if (matItemsValid.value.length === 0) return
+  const total = matTotal.value
+  const description = (matTitle.value || t('invoice.wr_material_title')).trim()
+  const unit = units.value.find(u => u.code === 'ks')?.code || 'ks'
+  const existing = form.value.items.find(it => (it.description || '').trim() === description)
+  const empty = !existing ? form.value.items.find(it => (it.description || '').trim() === '') : undefined
+  const target = existing || empty
+  if (target) {
+    target.description = description
+    target.quantity = 1
+    target.unit = unit
+    target.unit_price_without_vat = total
+    if (matVatRateId.value != null) target.vat_rate_id = matVatRateId.value
+  } else {
+    form.value.items.push({
+      description,
+      quantity: 1,
+      unit,
+      unit_price_without_vat: total,
+      vat_rate_id: matVatRateId.value ?? defaultVatRateId(),
+      order_index: form.value.items.length,
+    })
+  }
+}
+
+async function deleteMaterial() {
+  if (!confirm(t('invoice.wr_delete_confirm'))) return
+  // Vyprázdnění materiálu se uloží přes saveWorkReportMaterials([]) při submitu;
+  // tady jen lokální clear (řádka work_reports zůstává kvůli práci).
+  if (invoiceId.value) {
+    try {
+      await invoicesApi.saveWorkReportMaterials(invoiceId.value, {
+        project_id: form.value.project_id,
+        material_title: matTitle.value || t('invoice.wr_material_title'),
+        material_vat_rate_id: matVatRateId.value,
+        materials: [],
+      }, isForce.value)
+    } catch (e: any) {
+      if (e?.response?.status !== 404) {
+        error.value = apiErrorMessage(e, t('invoice.wr_delete_failed'))
+        return
+      }
+    }
+  }
+  matItems.value = []
+  matOpen.value = false
 }
 
 // ── Přílohy faktury ────────────────────────────────────────────────────
@@ -995,6 +1160,8 @@ async function submit() {
   // Detekce nesouladu mezi výkazem a položkou faktury — uživatel má šanci se vrátit
   const wrWarning = checkWorkReportSync()
   if (wrWarning && !confirm(wrWarning)) return
+  const matWarning = checkMaterialReportSync()
+  if (matWarning && !confirm(matWarning)) return
 
   if (hasNonPositiveAmountToPay.value) {
     error.value = t('invoice.amount_positive_required')
@@ -1070,6 +1237,7 @@ async function submit() {
         await invoicesApi.saveWorkReport(saved.id, {
           project_id: saved.project_id,
           title: wrTitle.value,
+          vat_rate_id: wrVatRateId.value,
           items: wrItemsValid.value.map((it, i) => ({
             description: it.description,
             work_date: it.work_date || null,
@@ -1080,6 +1248,26 @@ async function submit() {
         }, isForce.value)
       } catch (e: any) {
         // Faktura je uložená, výkaz ne — nepokračuj v redirectu, ať uživatel nepřijde o data ve formuláři
+        error.value = apiErrorMessage(e, t('invoice.wr_save_failed'))
+        return
+      }
+    }
+    // Výkaz materiálu — uloží se nezávisle (vlastní endpoint, sdílí work_reports řádku).
+    if (matOpen.value && matItemsValid.value.length > 0) {
+      try {
+        await invoicesApi.saveWorkReportMaterials(saved.id, {
+          project_id: saved.project_id,
+          material_title: matTitle.value || t('invoice.wr_material_title'),
+          material_vat_rate_id: matVatRateId.value,
+          materials: matItemsValid.value.map((m, i) => ({
+            description: m.description,
+            quantity: Number(m.quantity) || 0,
+            unit: (m.unit || 'ks').trim(),
+            unit_price: Number(m.unit_price) || 0,
+            order_index: i,
+          })),
+        }, isForce.value)
+      } catch (e: any) {
         error.value = apiErrorMessage(e, t('invoice.wr_save_failed'))
         return
       }
@@ -1166,6 +1354,9 @@ async function deleteDraft() {
               </select>
               <p v-if="form.invoice_type === 'credit_note'" class="text-xs text-warning-600 mt-1">
                 {{ t('invoice.credit_note_warning') }}
+              </p>
+              <p v-if="typeWillRenumber" class="text-xs text-warning-600 mt-1">
+                {{ t('invoice.type_change_renumber', { varsymbol: editedVarsymbol ?? '' }) }}
               </p>
             </div>
             <div>
@@ -1264,10 +1455,17 @@ async function deleteDraft() {
                 {{ t('payment_method.hint') }}
               </p>
             </div>
-            <label v-if="showReverseChargeUI" class="flex items-center gap-2 text-sm text-neutral-700">
-              <input v-model="form.reverse_charge" type="checkbox" class="rounded border-neutral-300 text-primary-600" />
-              <span>{{ t('invoice.reverse_charge') }} ({{ t('invoice.totals.vat') }} 0 %)</span>
-            </label>
+            <div v-if="showReverseChargeUI">
+              <label class="flex items-center gap-2 text-sm text-neutral-700">
+                <input v-model="form.reverse_charge" type="checkbox" class="rounded border-neutral-300 text-primary-600" />
+                <span>{{ t('invoice.reverse_charge') }} ({{ t('invoice.totals.vat') }} 0 %)</span>
+              </label>
+              <!-- IO (#94): vysvětlení, proč na RC dokladu není sazba DPH — částky jsou
+                   základ daně, samovyměřuje odběratel sazbou své země. -->
+              <p v-if="!supplierIsVatPayer && form.reverse_charge" class="text-xs text-neutral-500 mt-1 ml-6">
+                {{ t('invoice.reverse_charge_io_hint') }}
+              </p>
+            </div>
             <div v-if="showPricesIncludeVatUI">
               <label class="flex items-center gap-2 text-sm text-neutral-700">
                 <input v-model="form.prices_include_vat" type="checkbox" class="rounded border-neutral-300 text-primary-600" />
@@ -1375,7 +1573,7 @@ async function deleteDraft() {
               <th class="px-3 py-2 text-left font-medium w-16">{{ t('invoice.items_table.unit') }}</th>
               <th class="px-3 py-2 text-right font-medium w-32">{{ unitPriceHeaderLabel }}</th>
               <th v-if="supplierIsVatPayer" class="px-3 py-2 text-center font-medium w-24">{{ t('invoice.totals.vat') }}</th>
-              <th class="px-3 py-2 text-right font-medium w-32">{{ supplierIsVatPayer ? t('invoice.items_table.total_incl_vat') : t('invoice.totals.total') }}</th>
+              <th class="px-3 py-2 text-right font-medium w-32">{{ supplierIsVatPayer ? t('invoice.items_table.total_incl_vat') : nonPayerTotalLabel }}</th>
               <th class="px-3 py-2 w-12"></th>
             </tr>
           </thead>
@@ -1473,7 +1671,7 @@ async function deleteDraft() {
               </div>
             </div>
             <div class="flex items-baseline justify-between pt-1 border-t border-neutral-200">
-              <span class="text-xs font-medium text-neutral-500 uppercase tracking-wide">{{ supplierIsVatPayer ? t('invoice.items_table.total_incl_vat') : t('invoice.totals.total') }}</span>
+              <span class="text-xs font-medium text-neutral-500 uppercase tracking-wide">{{ supplierIsVatPayer ? t('invoice.items_table.total_incl_vat') : nonPayerTotalLabel }}</span>
               <input :value="itemTotal(item)" @change="setItemGross(item, ($event.target as HTMLInputElement).value)"
                 type="text" inputmode="decimal" :title="t('invoice.items_table.gross_edit_hint')"
                 class="w-32 h-9 px-2 border border-neutral-300 rounded text-right font-mono text-sm font-semibold" />
@@ -1603,8 +1801,15 @@ async function deleteDraft() {
           </div>
         </header>
         <div v-if="wrOpen" class="p-5 space-y-3">
-          <input v-model="wrTitle" type="text" :placeholder="t('invoice.wr_title')"
-            class="w-full h-10 px-3 border border-neutral-300 rounded-md text-sm" />
+          <div class="flex flex-col sm:flex-row gap-2">
+            <input v-model="wrTitle" type="text" :placeholder="t('invoice.wr_title')"
+              class="flex-1 h-10 px-3 border border-neutral-300 rounded-md text-sm" />
+            <select v-if="supplierIsVatPayer" v-model.number="wrVatRateId"
+              :title="t('invoice.wr_vat_rate')"
+              class="h-10 px-3 border border-neutral-300 rounded-md text-sm bg-surface sm:w-48">
+              <option v-for="r in selectableVatRates" :key="r.id" :value="r.id">{{ vatRateLabel(r) }}</option>
+            </select>
+          </div>
           <!-- Desktop: tabulka -->
           <div class="hidden md:block overflow-x-auto">
           <table class="w-full text-sm table-sticky-first">
@@ -1654,7 +1859,7 @@ async function deleteDraft() {
               <tr>
                 <td colspan="3" class="p-2">
                   <button type="button" @click="addWrItem"
-                    class="cursor-pointer px-3 h-8 text-sm border border-primary-500/40 text-primary-700 hover:bg-primary-50 font-medium rounded-md inline-flex items-center gap-1">
+                    class="cursor-pointer px-3 h-8 text-sm bg-primary-600 hover:bg-primary-700 text-white font-medium rounded-md inline-flex items-center gap-1">
                     <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6m0 0v6m0-6h6m-6 0H6"/></svg>
                     {{ t('invoice.wr_add_row') }}
                   </button>
@@ -1721,7 +1926,7 @@ async function deleteDraft() {
               </div>
             </div>
             <button type="button" @click="addWrItem"
-              class="cursor-pointer w-full h-10 text-sm border border-primary-500/40 text-primary-700 hover:bg-primary-50 font-medium rounded-md inline-flex items-center justify-center gap-1.5">
+              class="cursor-pointer w-full h-10 text-sm bg-primary-600 hover:bg-primary-700 text-white font-medium rounded-md inline-flex items-center justify-center gap-1.5">
               <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6m0 0v6m0-6h6m-6 0H6"/></svg>
               {{ t('invoice.wr_add_row') }}
             </button>
@@ -1734,6 +1939,166 @@ async function deleteDraft() {
           <p class="text-xs text-neutral-500">
             {{ t('invoice.wr_hint', { title: wrTitle, hours: wrTotalHours.toFixed(2), rate: wrItems[0]?.rate || 0, currency: form.currency }) }}
           </p>
+        </div>
+      </div>
+
+      <!-- Výkaz materiálu -->
+      <div class="bg-surface border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
+        <header class="px-5 py-3 border-b border-neutral-200 flex items-center justify-between">
+          <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-500">{{ t('invoice.work_report_material') }}</h3>
+          <div class="flex items-center gap-2">
+            <button v-if="!matOpen" type="button" @click="openMaterial"
+              class="cursor-pointer px-4 h-9 text-sm border border-primary-500/40 text-primary-700 hover:bg-primary-50 font-medium rounded-md inline-flex items-center gap-1.5">
+              <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6m0 0v6m0-6h6m-6 0H6"/></svg>
+              {{ t('invoice.wr_material_add') }}
+            </button>
+            <button v-if="matOpen && matItems.length > 0" type="button" @click="pushMatToInvoiceItem"
+              class="cursor-pointer px-4 h-9 text-sm bg-success-600 hover:bg-success-600 text-white font-semibold rounded-md inline-flex items-center gap-1.5 shadow-sm">
+              <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M7 16V4m0 0L3 8m4-4l4 4m6 0v12m0 0l4-4m-4 4l-4-4"/></svg>
+              {{ t('invoice.wr_push_to_item') }}
+            </button>
+            <button v-if="matOpen && matItems.length > 0" type="button" @click="deleteMaterial"
+              class="cursor-pointer px-3 h-8 text-xs border border-danger-500/50 text-danger-500 hover:bg-danger-50 rounded-md">
+              {{ t('invoice.wr_delete') }}
+            </button>
+          </div>
+        </header>
+        <div v-if="matOpen" class="p-5 space-y-3">
+          <div class="flex flex-col sm:flex-row gap-2">
+            <input v-model="matTitle" type="text" :placeholder="t('invoice.wr_material_title')"
+              class="flex-1 h-10 px-3 border border-neutral-300 rounded-md text-sm" />
+            <select v-if="supplierIsVatPayer" v-model.number="matVatRateId"
+              :title="t('invoice.wr_vat_rate')"
+              class="h-10 px-3 border border-neutral-300 rounded-md text-sm bg-surface sm:w-48">
+              <option v-for="r in selectableVatRates" :key="r.id" :value="r.id">{{ vatRateLabel(r) }}</option>
+            </select>
+          </div>
+          <p class="text-xs text-neutral-500">
+            {{ (form.prices_include_vat && supplierIsVatPayer) ? t('invoice.wr_material_price_incl') : t('invoice.wr_material_price_excl') }}
+          </p>
+          <!-- Desktop: tabulka -->
+          <div class="hidden md:block overflow-x-auto">
+          <table class="w-full text-sm table-sticky-first">
+            <thead class="bg-neutral-50 text-xs text-neutral-500 uppercase tracking-wide">
+              <tr>
+                <th class="px-2 py-2 w-12"></th>
+                <th class="px-3 py-2 text-left font-medium">{{ t('invoice.wr_description') }}</th>
+                <th class="px-3 py-2 text-right font-medium w-24">{{ t('invoice.wr_material_qty') }}</th>
+                <th class="px-3 py-2 text-left font-medium w-24">{{ t('invoice.wr_material_unit') }}</th>
+                <th class="px-3 py-2 text-right font-medium w-32">{{ unitPriceHeaderLabel }}</th>
+                <th class="px-3 py-2 text-right font-medium w-32">{{ t('invoice.wr_total') }}</th>
+                <th class="px-2 py-2 w-10"></th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-neutral-200">
+              <tr v-for="(m, i) in matItems" :key="i">
+                <td class="px-2 py-2 text-center text-xs text-neutral-400">
+                  <button type="button" @click="moveMatItem(i, -1)" :disabled="i === 0"
+                          :title="t('invoice.wr_move_up')"
+                          class="block w-5 h-4 hover:text-neutral-700 disabled:opacity-30">▲</button>
+                  <button type="button" @click="moveMatItem(i, 1)" :disabled="i === matItems.length - 1"
+                          :title="t('invoice.wr_move_down')"
+                          class="block w-5 h-4 hover:text-neutral-700 disabled:opacity-30">▼</button>
+                </td>
+                <td class="px-2 py-1.5">
+                  <input v-model="m.description" type="text" data-row-input="inv-mat" class="w-full h-9 px-2 border border-neutral-300 rounded text-sm" />
+                </td>
+                <td class="px-2 py-1.5">
+                  <input v-model.number="m.quantity" type="number" step="0.001" min="0" class="w-full h-9 px-2 border border-neutral-300 rounded text-sm text-right font-mono" />
+                </td>
+                <td class="px-2 py-1.5">
+                  <select v-model="m.unit" class="w-full h-9 px-2 border border-neutral-300 rounded text-sm bg-surface">
+                    <option v-for="u in units" :key="u.id" :value="u.code">{{ u.code }}</option>
+                    <option v-if="m.unit && !units.some(u => u.code === m.unit)" :value="m.unit">{{ m.unit }}</option>
+                  </select>
+                </td>
+                <td class="px-2 py-1.5">
+                  <input v-model.number="m.unit_price" type="number" step="0.01" min="0" class="w-full h-9 px-2 border border-neutral-300 rounded text-sm text-right font-mono" />
+                </td>
+                <td class="px-3 py-1.5 text-right font-mono text-neutral-700">
+                  {{ formatMoney((Number(m.quantity) || 0) * (Number(m.unit_price) || 0), form.currency) }}
+                </td>
+                <td class="px-2 py-1.5 text-center">
+                  <button type="button" @click="removeMatItem(i)" :title="t('common.delete')"
+                          class="cursor-pointer text-danger-500 hover:text-danger-600 text-lg leading-none">×</button>
+                </td>
+              </tr>
+            </tbody>
+            <tfoot class="bg-neutral-50 font-semibold">
+              <tr>
+                <td colspan="4" class="p-2">
+                  <button type="button" @click="addMatItem"
+                    class="cursor-pointer px-3 h-8 text-sm bg-primary-600 hover:bg-primary-700 text-white font-medium rounded-md inline-flex items-center gap-1">
+                    <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6m0 0v6m0-6h6m-6 0H6"/></svg>
+                    {{ t('invoice.wr_material_add_item') }}
+                  </button>
+                </td>
+                <td v-if="matItems.length > 0" class="px-3 py-2 text-right font-mono whitespace-nowrap" colspan="2">
+                  {{ formatMoney(matTotal, form.currency) }}
+                </td>
+                <td v-else colspan="2"></td>
+              </tr>
+            </tfoot>
+          </table>
+          </div>
+
+          <!-- Mobile: stack karet -->
+          <div class="md:hidden space-y-2">
+            <div v-for="(m, i) in matItems" :key="`mm-${i}`"
+              class="border border-neutral-200 rounded-md p-3 space-y-2 bg-neutral-50/30">
+              <div class="flex items-center justify-between text-xs text-neutral-500">
+                <span class="font-mono">#{{ i + 1 }}</span>
+                <div class="flex items-center gap-1">
+                  <button type="button" @click="moveMatItem(i, -1)" :disabled="i === 0"
+                          class="cursor-pointer w-8 h-8 inline-flex items-center justify-center border border-neutral-300 text-neutral-600 hover:bg-neutral-50 rounded disabled:opacity-30 disabled:cursor-not-allowed">
+                    <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M5 15l7-7 7 7"/></svg>
+                  </button>
+                  <button type="button" @click="moveMatItem(i, 1)" :disabled="i === matItems.length - 1"
+                          class="cursor-pointer w-8 h-8 inline-flex items-center justify-center border border-neutral-300 text-neutral-600 hover:bg-neutral-50 rounded disabled:opacity-30 disabled:cursor-not-allowed">
+                    <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7"/></svg>
+                  </button>
+                  <button type="button" @click="removeMatItem(i)" class="cursor-pointer w-8 h-8 inline-flex items-center justify-center border border-danger-500/40 text-danger-500 hover:bg-danger-50 rounded text-lg leading-none">×</button>
+                </div>
+              </div>
+              <div>
+                <label class="block text-xs font-medium text-neutral-600 mb-1">{{ t('invoice.wr_description') }}</label>
+                <input v-model="m.description" type="text" data-row-input="inv-mat" class="w-full h-10 px-3 border border-neutral-300 rounded text-sm bg-surface" />
+              </div>
+              <div class="grid grid-cols-2 gap-2">
+                <div>
+                  <label class="block text-xs font-medium text-neutral-600 mb-1">{{ t('invoice.wr_material_qty') }}</label>
+                  <input v-model.number="m.quantity" type="number" inputmode="decimal" step="0.001" min="0" class="w-full h-10 px-3 border border-neutral-300 rounded text-right font-mono text-sm bg-surface" />
+                </div>
+                <div>
+                  <label class="block text-xs font-medium text-neutral-600 mb-1">{{ t('invoice.wr_material_unit') }}</label>
+                  <select v-model="m.unit" class="w-full h-10 px-3 border border-neutral-300 rounded text-sm bg-surface">
+                    <option v-for="u in units" :key="u.id" :value="u.code">{{ u.code }}</option>
+                    <option v-if="m.unit && !units.some(u => u.code === m.unit)" :value="m.unit">{{ m.unit }}</option>
+                  </select>
+                </div>
+              </div>
+              <div class="grid grid-cols-2 gap-2 items-end">
+                <div>
+                  <label class="block text-xs font-medium text-neutral-600 mb-1">{{ unitPriceHeaderLabel }}</label>
+                  <input v-model.number="m.unit_price" type="number" inputmode="decimal" step="0.01" min="0" class="w-full h-10 px-3 border border-neutral-300 rounded text-right font-mono text-sm bg-surface" />
+                </div>
+                <div class="text-right pb-2">
+                  <div class="text-xs font-medium text-neutral-500 uppercase tracking-wide">{{ t('invoice.wr_total') }}</div>
+                  <div class="font-mono text-sm font-semibold">
+                    {{ formatMoney((Number(m.quantity) || 0) * (Number(m.unit_price) || 0), form.currency) }}
+                  </div>
+                </div>
+              </div>
+            </div>
+            <button type="button" @click="addMatItem"
+              class="cursor-pointer w-full h-10 text-sm bg-primary-600 hover:bg-primary-700 text-white font-medium rounded-md inline-flex items-center justify-center gap-1.5">
+              <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6m0 0v6m0-6h6m-6 0H6"/></svg>
+              {{ t('invoice.wr_material_add_item') }}
+            </button>
+            <div v-if="matItems.length > 0" class="bg-neutral-50 rounded-md px-3 py-2 flex items-center justify-end font-semibold text-sm">
+              <span class="font-mono">{{ formatMoney(matTotal, form.currency) }}</span>
+            </div>
+          </div>
         </div>
       </div>
 

@@ -1,5 +1,10 @@
 import { api } from './client'
 
+/** Typy zpráv pro kopii dodavateli — zrcadlí RecipientResolver::TYPE_*. */
+export type SelfCopyType = 'documents' | 'reminders' | 'approvals'
+/** off = neposílat, cc/bcc = role kopie dodavatele. */
+export type SelfCopyMode = 'off' | 'cc' | 'bcc'
+
 export interface Supplier {
   id: number
   company_name: string
@@ -14,6 +19,9 @@ export interface Supplier {
   ic: string | null
   dic: string | null
   is_vat_payer: boolean
+  /** Identifikovaná osoba (§ 6g–6l ZDPH, issue #94) — neplátce v tuzemsku
+   *  s přeshraničními povinnostmi. Nelze kombinovat s is_vat_payer. */
+  is_identified: boolean
   email: string
   phone: string | null
   web: string | null
@@ -58,6 +66,12 @@ export interface Supplier {
   payment_thanks_auto_send: boolean
   payment_thanks_default_checked: boolean
   payment_thanks_attach_paid_pdf: boolean
+  // Kopie odchozích e-mailů dodavateli (migrace 0102). Klíč chybí / objekt null
+  // = typ jede dle cfg fallbacku (cfg_self_copy_fallback níže).
+  self_copy?: Partial<Record<SelfCopyType, SelfCopyMode>> | null
+  // Efektivní hodnoty z cfg (read-only) — UI je ukáže u volby „dle konfigurace".
+  // `approvals` má v cfg dva flagy: žádost (approvals) a upomínka (approval_reminders).
+  cfg_self_copy_fallback?: Record<SelfCopyType | 'approval_reminders', SelfCopyMode>
   // Tax settings pro EPO výkazy DPH/KH (migrace 0038, fáze 6)
   taxpayer_type?: 'fo' | 'po' | null
   vat_period?: 'monthly' | 'quarterly' | null
@@ -117,6 +131,8 @@ export interface BankEmailImapSettings {
   encryption: 'ssl' | 'tls' | 'none'
   validate_cert: boolean
   require_email_auth: boolean
+  allow_forwarded: boolean
+  forwarded_from: string | null
   email_auth_serv_id: string | null
   username: string
   folder: string
@@ -182,9 +198,16 @@ export interface BankEmailProcessedMessage {
   subject: string | null
   provider_code: string | null
   status: string
+  /** Stav odvozený ze živého párování transakce (řeší zastaralý snapshot `status`). */
+  effective_status?: string
+  /** true = transakce je aktuálně spárovaná (i když `status` říká match_failed). */
+  matched?: boolean
+  /** Živý match_status navázané bank_transaction (auto_exact/auto_partial/manual/unmatched). */
+  tx_match_status?: string | null
   parsed_payload: Record<string, any> | null
   bank_transaction_id: number | null
   matched_invoice_id: number | null
+  matched_purchase_invoice_id?: number | null
   matched_varsymbol?: string | null
   error_message: string | null
   processed_at: string
@@ -300,6 +323,12 @@ export interface SigningProfile {
   pdf_tsa_username: string | null
   has_pdf_tsa_password: boolean
   pdf_reason: string | null
+  has_certificate?: boolean
+  certificate_subject?: string | null
+  certificate_email?: string | null
+  certificate_valid_from?: string | null
+  certificate_valid_to?: string | null
+  certificate_is_active?: boolean
   is_active: boolean
   created_by: number | null
   created_at: string
@@ -319,6 +348,131 @@ export interface SigningProfilePayload {
   pdf_tsa_password?: string | null
   pdf_reason?: string | null
   is_active?: boolean
+}
+
+export interface EmailProfile {
+  id: number
+  supplier_id: number
+  name: string
+  code: string
+  from_email: string
+  from_name: string | null
+  reply_to_email: string | null
+  reply_to_name: string | null
+  reply_to_enabled: boolean
+  signing_profile_id: number | null
+  signing_profile_name: string | null
+  signing_profile_code: string | null
+  dkim_domain: string | null
+  dkim_selector: string | null
+  dkim_enabled: boolean
+  transport_type: 'global' | 'smtp' | 'sendmail'
+  smtp_host: string | null
+  smtp_port: number | null
+  smtp_encryption: 'none' | 'tls' | 'ssl'
+  smtp_auth_enabled: boolean
+  smtp_auth_type: 'LOGIN' | 'PLAIN' | 'CRAM-MD5' | 'XOAUTH2'
+  smtp_username: string | null
+  has_smtp_password: boolean
+  smtp_verify_peer: boolean
+  smtp_verify_peer_name: boolean
+  smtp_allow_self_signed: boolean
+  smtp_timeout: number | null
+  smtp_keepalive: boolean
+  sendmail_command: string | null
+  imap_sent_enabled: boolean
+  imap_host: string | null
+  imap_port: number | null
+  imap_encryption: 'none' | 'tls' | 'ssl'
+  imap_validate_cert: boolean
+  imap_username: string | null
+  has_imap_password: boolean
+  imap_folder: string | null
+  imap_create_folder: boolean
+  imap_mark_seen: boolean
+  imap_timeout: number
+  imap_on_failure: 'log_only' | 'fail_send'
+  is_default: boolean
+  is_active: boolean
+  created_by: number | null
+  created_at: string
+  updated_at: string
+  deleted_at: string | null
+}
+
+export interface EmailProfilePayload {
+  name: string
+  code: string
+  from_email: string
+  from_name?: string | null
+  reply_to_email?: string | null
+  reply_to_name?: string | null
+  reply_to_enabled?: boolean
+  signing_profile_id?: number | null
+  dkim_domain?: string | null
+  dkim_selector?: string | null
+  dkim_enabled?: boolean
+  transport_type?: 'global' | 'smtp' | 'sendmail'
+  smtp_host?: string | null
+  smtp_port?: number | null
+  smtp_encryption?: 'none' | 'tls' | 'ssl'
+  smtp_auth_enabled?: boolean
+  smtp_auth_type?: 'LOGIN' | 'PLAIN' | 'CRAM-MD5' | 'XOAUTH2'
+  smtp_username?: string | null
+  smtp_password?: string | null
+  smtp_verify_peer?: boolean
+  smtp_verify_peer_name?: boolean
+  smtp_allow_self_signed?: boolean
+  smtp_timeout?: number | null
+  smtp_keepalive?: boolean
+  sendmail_command?: string | null
+  imap_sent_enabled?: boolean
+  imap_host?: string | null
+  imap_port?: number | null
+  imap_encryption?: 'none' | 'tls' | 'ssl'
+  imap_validate_cert?: boolean
+  imap_username?: string | null
+  imap_password?: string | null
+  imap_folder?: string | null
+  imap_create_folder?: boolean
+  imap_mark_seen?: boolean
+  imap_timeout?: number | null
+  imap_on_failure?: 'log_only' | 'fail_send'
+  is_default?: boolean
+  is_active?: boolean
+}
+
+export interface EmailProfileImapAppendResult {
+  status: 'skipped' | 'saved' | 'failed'
+  folder: string | null
+  error: string | null
+}
+
+export interface EmailProfileImapFoldersResult {
+  ok: boolean
+  message: string
+  folders?: EmailProfileImapFolder[]
+}
+
+export interface EmailProfileImapFolder {
+  path: string
+  full_name: string
+  name: string
+  delimiter: string
+  writable: boolean
+  system: boolean
+  sent: boolean
+  no_select: boolean
+  has_children: boolean
+}
+
+export interface EmailProfileTestResult {
+  sent_to: string[]
+  sent_at: string
+  smtp_response: string
+  imap_append?: EmailProfileImapAppendResult
+  is_test: boolean
+  is_draft?: boolean
 }
 
 export type SigningCredentialPassphrasePolicy = 'encrypted_store' | 'passphrase_file' | 'prompt_on_use'
@@ -480,6 +634,29 @@ export const settingsApi = {
   deleteUnit: (id: number) => api.delete(`/settings/units/${id}`).then(r => r.data),
 
   // Email branding (M16)
+  listEmailProfiles: () =>
+    api.get<EmailProfile[]>('/settings/email-profiles').then(r => r.data),
+  createEmailProfile: (payload: EmailProfilePayload) =>
+    api.post<EmailProfile>('/settings/email-profiles', payload).then(r => r.data),
+  updateEmailProfile: (id: number, payload: Partial<EmailProfilePayload>) =>
+    api.put<EmailProfile>(`/settings/email-profiles/${id}`, payload).then(r => r.data),
+  testEmailProfile: (id: number) =>
+    api.post<EmailProfileTestResult>(`/settings/email-profiles/${id}/test`, {}).then(r => r.data),
+  testEmailProfileDraft: (payload: EmailProfilePayload, id?: number | null) =>
+    api.post<EmailProfileTestResult>('/settings/email-profiles/test', id ? { ...payload, id } : payload).then(r => r.data),
+  testEmailProfileImapSettings: (payload: Partial<EmailProfilePayload>, id?: number | null) =>
+    api.post<EmailProfileImapFoldersResult>(
+      id ? `/settings/email-profiles/${id}/imap-test` : '/settings/email-profiles/imap-test',
+      payload,
+    ).then(r => r.data),
+  browseEmailProfileImapFolders: (payload: Partial<EmailProfilePayload>, id?: number | null) =>
+    api.post<EmailProfileImapFoldersResult>(
+      id ? `/settings/email-profiles/${id}/folders` : '/settings/email-profiles/folders',
+      payload,
+    ).then(r => r.data),
+  deleteEmailProfile: (id: number) =>
+    api.delete<{ deleted: boolean }>(`/settings/email-profiles/${id}`).then(r => r.data),
+
   uploadEmailLogo: (file: File) => {
     const fd = new FormData()
     fd.append('file', file)

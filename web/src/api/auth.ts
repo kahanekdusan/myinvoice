@@ -15,6 +15,9 @@ export interface SupplierBrief {
   company_name: string
   ic: string | null
   is_vat_payer: boolean
+  /** Identifikovaná osoba (§ 6g–6l ZDPH, issue #94) — neplátce v tuzemsku
+   *  s přeshraničními povinnostmi (RC faktury do EU, SHV, samovyměření). */
+  is_identified: boolean
   /** 'fo' = OSVČ (fyzická osoba), 'po' = s.r.o. (právnická osoba), null = nenastaveno. */
   taxpayer_type: 'fo' | 'po' | null
   default_payment_due_days: number
@@ -111,7 +114,10 @@ export const authApi = {
 
   /** Sample data generator po setup wizardu (jen pokud DB nemá data). */
   setupSample: () =>
-    api.post<{ clients: number; projects: number; invoices: number; credit_notes: number }>(
+    api.post<{
+      clients: number; projects: number; invoices: number; credit_notes: number
+      cars: number; trips: number; fuelings: number
+    }>(
       '/auth/setup-sample',
     ).then((r) => r.data),
 

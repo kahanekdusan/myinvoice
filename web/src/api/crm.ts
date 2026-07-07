@@ -24,7 +24,30 @@ export interface CrmOverview {
   current_month: CrmKpi[]
   last_month: CrmKpi[]
   ytd: CrmKpi[]
+  /** Klouzavých 12 měsíců (vč. aktuálního) per měna. */
+  last_12m: CrmKpi[]
+  /** Předchozích 12 měsíců (pro trailing YoY). */
+  prev_12m: CrmKpi[]
+  /** Celý předchozí kalendářní rok. */
+  prev_year_full: CrmKpi[]
+  /** Loni do stejného měsíce (fair YTD YoY). */
+  prev_year_ytd: CrmKpi[]
+  /** Dopředné tržby aktuálního měsíce (koncepty + nespárované proformy), per měna. */
+  current_month_pipeline: CrmPipelineRow[]
   currencies: string[]
+}
+
+/** Očekávané (zatím nevystavené) tržby aktuálního měsíce — koncepty + nespárované proformy. */
+export interface CrmPipelineRow {
+  currency: string
+  /** Koncepty (vydané faktury draft) — net pro plátce, gross pro neplátce. */
+  draft_revenue: number
+  draft_revenue_czk: number
+  draft_count: number
+  /** Nespárované proformy — net pro plátce, gross pro neplátce. */
+  proforma_revenue: number
+  proforma_revenue_czk: number
+  proforma_count: number
 }
 
 export interface CrmMonthlyRow extends CrmKpi {

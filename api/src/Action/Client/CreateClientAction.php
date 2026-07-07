@@ -8,6 +8,7 @@ use MyInvoice\Http\Json;
 use MyInvoice\Infrastructure\Database\Connection;
 use MyInvoice\Middleware\AuthMiddleware;
 use MyInvoice\Middleware\SupplierScopeMiddleware;
+use MyInvoice\Repository\ClientEmailContactRepository;
 use MyInvoice\Repository\ClientRepository;
 use MyInvoice\Service\ActivityLogger;
 use MyInvoice\Service\IpMatcher;
@@ -22,10 +23,24 @@ final class CreateClientAction
         private readonly ClientRepository $repo,
         private readonly ActivityLogger $logger,
         private readonly IpMatcher $ipMatcher,
+        private readonly ClientEmailContactRepository $emailContacts,
     ) {}
 
     public function __invoke(Request $request, Response $response): Response
     {
+        // Nejdřív supplier kontext: bez dodavatele jsou currencies prázdné a klientský
+        // formulář by spadl na matoucí „Validace selhala" (currency_default_id=0). Vrať
+        // jasnou, akční hlášku místo toho (#151). FE onboarding gate sem uživatele nepustí.
+        $supplierId = (int) $request->getAttribute(SupplierScopeMiddleware::ATTR_CURRENT_ID, 0);
+        if ($supplierId === 0) {
+            return Json::error(
+                $response,
+                'no_supplier',
+                'Nelze vytvořit klienta — nejdříve vytvořte dodavatele (Nastavení → Číselníky → Dodavatelé).',
+                400,
+            );
+        }
+
         $body = (array) ($request->getParsedBody() ?? []);
         $errors = Validation::client($body);
         if (!empty($errors)) {
@@ -35,22 +50,22 @@ final class CreateClientAction
                 : 'Validace selhala';
             return Json::error($response, 'validation_failed', 'Validace selhala: ' . $firstMsg, 400, ['fields' => $errors]);
         }
-
-        $user = (array) $request->getAttribute(AuthMiddleware::ATTR_USER, []);
-
-        $supplierId = (int) $request->getAttribute(SupplierScopeMiddleware::ATTR_CURRENT_ID, 0);
-        if ($supplierId === 0) {
-            $supplierId = $this->resolveSupplierId($user);
-        }
-        if ($supplierId === 0) {
-            return Json::error($response, 'no_supplier', 'Nelze vytvořit klienta — chybí supplier kontext.', 400);
-        }
         try {
             $id = $this->repo->create($body, $supplierId);
         } catch (\InvalidArgumentException $e) {
             return Json::error($response, 'integrity_violation', $e->getMessage(), 400);
         }
+
+        // E-mailové kontakty dle účelu (#86) — replace-all, validuje repo.
+        if (isset($body['email_contacts']) && is_array($body['email_contacts'])) {
+            try {
+                $this->emailContacts->replaceForClient($id, $supplierId, $body['email_contacts']);
+            } catch (\DomainException $e) {
+                return Json::error($response, 'invalid_email_contacts', $e->getMessage(), 422);
+            }
+        }
         $client = $this->repo->find($id);
+        $client['email_contacts'] = $this->emailContacts->listForClient($id, $supplierId);
 
         $ip = $this->ipMatcher->clientIpFromRequest($request->getServerParams());
         $this->logger->log('client.created', $user['id'] ?? null, 'client', $id, [

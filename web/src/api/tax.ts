@@ -34,12 +34,18 @@ export interface TaxConstantsData {
   health_assessment_pct: number
   social_min_base_main: number
   social_min_base_secondary: number
+  /** Rozhodná částka (zisk) pro povinnou účast na důch. pojištění u vedlejší SVČ */
+  social_secondary_participation_threshold: number
   health_min_base: number
   expense_caps: Record<string, number>
   mortgage_cap: number
   pension_cap: number
   vat_limit_low: number
   vat_limit_high: number
+  /** DPH — platí pro všechny plátce (nejen OSVČ) */
+  vat_rate_standard: number
+  vat_rate_reduced: number
+  kh_item_threshold: number
 }
 
 export interface TaxAnalysis {

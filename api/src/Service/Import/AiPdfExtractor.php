@@ -44,6 +44,8 @@ final class AiPdfExtractor
         private readonly Config $config,
         private readonly \MyInvoice\Service\Currency\CnbExchangeRateClient $cnb,
         private readonly ImageToPdfConverter $imageToPdf,
+        private readonly \MyInvoice\Repository\TaxConstantsRepository $taxConstants,
+        private readonly PurchaseInvoicePdfArchiver $pdfArchiver,
         ?LoggerInterface $logger = null,
     ) {
         $this->logger = $logger ?? new NullLogger();
@@ -58,6 +60,17 @@ final class AiPdfExtractor
      */
     public function extractAndCreate(int $supplierId, int $userId, string $pdfBytes, ?string $modelOverride = null, ?string $originalFilename = null): array
     {
+        // ISDOCX balíček (ZIP s vnitřním .isdoc + čitelným PDF) nahraný napřímo →
+        // deterministický import přes ISDOC parser (0 AI cost), PDF z balíčku archivujeme.
+        // Magic check je levný; unwrap zapíše temp jen pro skutečný ZIP.
+        if (IsdocxExtractor::isZip($pdfBytes)) {
+            $pkg = (new IsdocxExtractor())->unwrap($pdfBytes);
+            if ($pkg !== null) {
+                // $pdfBytes = ORIGINÁLNÍ .isdocx (předáme dál k archivaci as-is).
+                return $this->createFromIsdocx($pkg, $supplierId, $userId, $originalFilename, $pdfBytes);
+            }
+        }
+
         // Obrázek (fotka z telefonu, issue #75) → normalizuj na PDF; downstream
         // (ISDOC, AI, archivace, preview) pak pracuje výhradně s PDF.
         if (!str_starts_with($pdfBytes, '%PDF')) {
@@ -98,6 +111,13 @@ final class AiPdfExtractor
                     $r = $this->isdocMapper->map($parsed['invoices'][0], $supplierId, $userId);
                     // Attach PDF k vytvořené přijaté faktuře
                     $this->attachPdf((int) $r['purchase_invoice_id'], $supplierId, $pdfBytes, $originalFilename);
+                    // Zdrojový artefakt = vytažený ISDOC XML (embedded v PDF/A-3) — issue #175.
+                    $srcName = ($originalFilename !== null && $originalFilename !== '')
+                        ? preg_replace('/\.[^.\\/]+$/', '.isdoc', $originalFilename)
+                        : 'source.isdoc';
+                    $this->pdfArchiver->archiveSourceBytes(
+                        (int) $r['purchase_invoice_id'], $supplierId, $isdocXml, $srcName, 'isdoc',
+                    );
                     return [
                         'ok'                  => true,
                         'purchase_invoice_id' => $r['purchase_invoice_id'],
@@ -247,6 +267,75 @@ final class AiPdfExtractor
     }
 
     /**
+     * Vytvoří draft přijaté faktury z rozbaleného ISDOCX balíčku. Vnitřní ISDOC
+     * parsujeme stejně jako embedded ISDOC (deterministicky, bez AI), čitelné PDF
+     * z balíčku archivujeme pro náhled. Dedup běží na vnitřním PDF (totožné jako
+     * kdyby přišel samotný .pdf / ISDOC.PDF); balíček bez PDF se nededupuje hashem.
+     *
+     * @param array{isdoc:string, isdoc_name:string, pdf:?string, pdf_name:?string} $pkg
+     * @return array{ok:bool, purchase_invoice_id?:int, vendor_id?:int, source:string, error?:string, duplicate?:bool, message?:string}
+     */
+    private function createFromIsdocx(array $pkg, int $supplierId, int $userId, ?string $originalFilename, ?string $isdocxBytes = null): array
+    {
+        $innerPdf = $pkg['pdf'];
+
+        // Dedup na vnitřním PDF (stejný klíč jako u běžného PDF importu).
+        if ($innerPdf !== null) {
+            $existingId = $this->repo->findIdByPdfHash($supplierId, hash('sha256', $innerPdf));
+            if ($existingId !== null) {
+                return [
+                    'ok'                  => true,
+                    'purchase_invoice_id' => $existingId,
+                    'source'              => 'duplicate',
+                    'duplicate'           => true,
+                    'message'             => 'ISDOCX je již importován jako faktura #' . $existingId,
+                ];
+            }
+        }
+
+        try {
+            $parsed = $this->isdoc->parse($pkg['isdoc']);
+        } catch (\Throwable $e) {
+            return ['ok' => false, 'error' => 'ISDOCX: vnitřní ISDOC se nepodařilo načíst: ' . $e->getMessage(), 'source' => 'isdocx_invalid'];
+        }
+        if (empty($parsed['invoices']) || isset($parsed['invoices'][0]['__error'])) {
+            $err = $parsed['invoices'][0]['__error'] ?? 'ISDOCX neobsahuje fakturu';
+            return ['ok' => false, 'error' => (string) $err, 'source' => 'isdocx_invalid'];
+        }
+
+        try {
+            $r = $this->isdocMapper->map($parsed['invoices'][0], $supplierId, $userId);
+        } catch (\Throwable $e) {
+            return ['ok' => false, 'error' => 'ISDOCX → faktura selhala: ' . $e->getMessage(), 'source' => 'isdocx_map_failed'];
+        }
+
+        if ($innerPdf !== null) {
+            $pdfName = $pkg['pdf_name']
+                ?? ($originalFilename !== null && $originalFilename !== ''
+                    ? preg_replace('/\.isdocx?$/i', '.pdf', $originalFilename)
+                    : null)
+                ?: 'isdocx-imported.pdf';
+            $this->attachPdf((int) $r['purchase_invoice_id'], $supplierId, $innerPdf, $pdfName);
+        }
+
+        // Zdrojový artefakt = ORIGINÁLNÍ .isdocx as-is (NEROZBALENÉ — zachová podpis ZIP
+        // obálky). Write-once přes source_* (issue #175).
+        if ($isdocxBytes !== null && $isdocxBytes !== '') {
+            $this->pdfArchiver->archiveSourceBytes(
+                (int) $r['purchase_invoice_id'], $supplierId, $isdocxBytes,
+                $originalFilename ?: 'source.isdocx', 'isdocx',
+            );
+        }
+
+        return [
+            'ok'                  => true,
+            'purchase_invoice_id' => (int) $r['purchase_invoice_id'],
+            'vendor_id'           => $r['vendor_id'] ?? null,
+            'source'              => 'isdocx',
+        ];
+    }
+
+    /**
      * Validation — anti-hallucination check.
      */
     private function validateAiData(array $data): ?string
@@ -281,6 +370,22 @@ final class AiPdfExtractor
     {
         $vatRates = $this->loadVatRateMap();
         $defaultVatRateId = $this->matchVatRateId($vatRates, 0.0);
+
+        // Sanity guard na prohozené datumy z AI extrakce (issue ↔ due). AI občas
+        // zamění „Datum vystavení" a „Datum splatnosti"; na běžné faktuře ale splatnost
+        // NIKDY nepředchází vystavení (platební lhůta = vystavení + N dní) → prohodit zpět.
+        $dateSwap = self::fixSwappedIssueDueDates($data);
+        if ($dateSwap !== null) {
+            $this->logger->info('AI extractor: detekováno prohození datumů vystavení↔splatnost, opraveno', [
+                'vendor_invoice_number' => $data['vendor_invoice_number'] ?? null,
+                'issue_before'          => $data['issue_date'] ?? null,
+                'due_before'            => $data['due_date'] ?? null,
+                'issue_after'           => $dateSwap['issue_date'],
+                'due_after'             => $dateSwap['due_date'],
+            ]);
+            $data['issue_date'] = $dateSwap['issue_date'];
+            $data['due_date']   = $dateSwap['due_date'];
+        }
 
         $documentKind = $this->normalizeDocumentKind((string) ($data['document_kind'] ?? 'invoice'));
 
@@ -356,8 +461,9 @@ final class AiPdfExtractor
                 'unit_price_without_vat' => $price,
                 'vat_rate_id'            => $this->matchVatRateId($vatRates, $rate) ?? $defaultVatRateId,
                 'order_index'            => $idx,
-                // vat_classification_code nesetujeme — PurchaseInvoiceRepository::replaceItems()
-                // auto-derive based on rate + RC + vendor country (lookup z DB).
+                // vat_classification_code tady nesetujeme — PurchaseInvoiceRepository::replaceItems()
+                // auto-derive based on rate + RC + vendor country (lookup z DB). Výjimka:
+                // reverse charge doklady dostanou explicitní kód níže (issue #116).
             ];
         }
 
@@ -441,9 +547,96 @@ final class AiPdfExtractor
             ]);
         }
 
+        // Issue #116 — RC doklad přebíral 0% sazbu z cizího dokladu a auto-klasifikace
+        // dala '24' (služba): VatLedgerService pak samovyměřil 0 a pořízení zboží minulo
+        // ř. 3/43 i KH A.2. Nastavíme tuzemskou sazbu 21 % + explicitní klasifikaci dle
+        // povahy plnění (AI pole supply_nature): zboží z EU → '23', služba → '24',
+        // zboží ze 3. země → '25'. Totály dokladu zůstávají netto (InvoiceMath u RC daň
+        // na řádcích nuluje), samovyměření dopočítá až VatLedgerService z rate snapshotu.
+        // U pořízení zboží z JČS navíc dopočítáme zákonné DUZP dle § 25 — zahraniční
+        // doklad nese jen datum dodání, ale povinnost přiznat daň vzniká k 15. dni
+        // následujícího měsíce (nebo dřívějšímu vystavení); na DUZP visí zařazení do
+        // období (issue #117) i ČNB kurz (mutace $data['tax_date'] PŘED $payload
+        // a applyCnbRate je záměrná).
+        $rcClassification = null;
+        $rcWarning = null;
+        // Reverse charge má PŘEDNOST před „neplátce" gate (issue: zahraniční SaaS jako
+        // bez nároku na odpočet): u osoby neusazené v tuzemsku přizná daň příjemce
+        // samovyměřením a SOUČASNĚ má nárok na odpočet (ř.43) — to, že dodavatel není
+        // český plátce, je DŮVOD reverse charge, ne důvod k vyřazení z DPH. (Tuzemský
+        // neplátce sem nespadá: inferReverseCharge je u CZ dodavatele false.)
+        if ($reverseCharge) {
+            $country = $this->vendorCountryInfo($vendorId);
+            $nature = strtolower(trim((string) ($data['supply_nature'] ?? '')));
+            $isGoods = $nature === 'goods';
+            // Služba: EU → 24e (ř.5), 3. země → 24 (ř.12). Zboží: EU → 23 (ř.3), 3. země → 25 (ř.7).
+            $rcClassification = $country['is_eu']
+                ? ($isGoods ? '23' : '24e')
+                : ($isGoods ? '25' : '24');
+            // Základní sazba pro rok dokladu z číselníku daňových konstant (ne natvrdo 21).
+            $rcDate = (string) ($data['tax_date'] ?? $data['issue_date'] ?? '');
+            $rcYear = $rcDate !== '' ? (int) substr($rcDate, 0, 4) : (int) date('Y');
+            $rcRate = $this->taxConstants->vatRateStandard($rcYear);
+            $rcRateId = $this->matchVatRateId($vatRates, $rcRate);
+            foreach ($items as &$it) {
+                if ($rcRateId !== null) {
+                    $it['vat_rate_id'] = $rcRateId;
+                }
+                $it['vat_classification_code'] = $rcClassification;
+            }
+            unset($it);
+
+            $duzpNote = '';
+            if ($rcClassification === '23') {
+                $delivery = isset($data['tax_date']) && $data['tax_date'] ? (string) $data['tax_date'] : null;
+                $duzp = self::euAcquisitionTaxDate($delivery, (string) $data['issue_date']);
+                if ($duzp !== null && $duzp !== $delivery) {
+                    $data['tax_date'] = $duzp;
+                    $duzpNote = ' DUZP stanoveno dle § 25 ZDPH na ' . $duzp
+                        . ' (15. den měsíce následujícího po dodání, příp. dřívější datum'
+                        . ' vystavení dokladu); ČNB kurz se váže k tomuto datu.';
+                }
+            }
+
+            $rcLabels = [
+                '23'  => 'pořízení zboží z EU — ř. 3 + ř. 43, KH A.2',
+                '24'  => 'přijetí služby ze 3. země — ř. 12 + ř. 43',
+                '24e' => 'přijetí služby z EU — ř. 5 + ř. 43',
+                '25'  => 'dovoz zboží ze 3. země — ř. 7 + ř. 43',
+            ];
+            $rcWarning = 'Reverse charge (' . $rcLabels[$rcClassification] . '): položkám byla'
+                . sprintf(' nastavena tuzemská sazba DPH %g %% a klasifikace ', $rcRate) . $rcClassification
+                . ' — daň se samovyměří až v DPH výkazech, částka k úhradě zůstává bez DPH.'
+                . $duzpNote
+                . ' Zkontrolujte povahu plnění (zboží = kód 23/25, služba = kód 24/24e).';
+            $this->logger->info('AI extractor: reverse charge defaults applied', [
+                'vendor_id' => $vendorId,
+                'classification' => $rcClassification,
+                'supply_nature' => $nature !== '' ? $nature : null,
+                'tax_date' => $data['tax_date'] ?? null,
+            ]);
+        }
+
+        // Platební účet dodavatele pro „Zaplatit pomocí QR" — z AI pole `payment`.
+        // Volný řetězec (účet i IBAN) rozparsujeme na strukturu. Repository nastaví
+        // source/checked_at jen pokud je účet skutečně použitelný.
+        $aiPayment = is_array($data['payment'] ?? null) ? $data['payment'] : [];
+        $bankParser = new \MyInvoice\Service\Payment\BankAccountParser();
+        $fromAccount = $bankParser->parse((string) ($aiPayment['bank_account'] ?? ''));
+        $fromIban = $bankParser->parse((string) ($aiPayment['iban'] ?? ''));
+        $aiVs = $aiPayment['variable_symbol'] ?? ($data['varsymbol'] ?? null);
+
         $payload = [
             'vendor_id'             => $vendorId,
             'vendor_invoice_number' => $this->sanitizeVendorNumber((string) $data['vendor_invoice_number']),
+            'payment'               => [
+                'account_number'  => $fromAccount['account_number'] ?? null,
+                'bank_code'       => $fromAccount['bank_code'] ?? null,
+                'iban'            => $fromAccount['iban'] ?? ($fromIban['iban'] ?? null),
+                'bic'             => null,
+                'variable_symbol' => ($aiVs !== null && $aiVs !== '') ? (string) $aiVs : null,
+                'source'          => 'ai',
+            ],
             'document_kind'         => $documentKind,
             'issue_date'            => (string) $data['issue_date'],
             'tax_date'              => isset($data['tax_date']) && $data['tax_date'] ? (string) $data['tax_date'] : null,
@@ -453,10 +646,16 @@ final class AiPdfExtractor
             'exchange_rate'         => null,
             'exchange_rate_source'  => 'manual',
             'reverse_charge'        => $reverseCharge,
+            // Explicitní klasifikace RC dokladu (issue #116) — hlavička jako default,
+            // řádky mají tentýž kód nastavený výše.
+            'vat_classification_code' => $rcClassification,
             'prices_include_vat'    => $pricesIncludeVat,
-            // Neplátce → bez nároku na odpočet (VatLedgerService řádky s 'none' vyloučí
-            // z DPH přiznání ř.40 i z KH sekce B). Uživatel může v editoru vědomě přepsat.
-            'vat_deduction'         => $vendorNonPayer ? 'none' : 'full',
+            // Reverse charge → nárok na odpočet náleží příjemci ('full'); samovyměřená
+            // daň (ř.3–13) a zrcadlový odpočet (ř.43) se vyruší. Tuzemský neplátce →
+            // bez nároku ('none', VatLedgerService řádky s 'none' vyloučí z přiznání
+            // i KH). U RC tedy 'none' nikdy — to byl důvod, proč zahraniční SaaS
+            // padaly z přiznání úplně. Uživatel může v editoru vědomě přepsat.
+            'vat_deduction'         => $reverseCharge ? 'full' : ($vendorNonPayer ? 'none' : 'full'),
             // Rounding nastavíme až PO recompute z items, ne z AI hodnoty
             // (AI dělá DPH math sama a občas se splete o ±1 haléř — viz user report
             // Vodafone faktury 1025255728, kde AI vrátila total_with_vat=1502,03
@@ -536,6 +735,15 @@ final class AiPdfExtractor
                 // Varování je „nice to have" — faktura už je vytvořená správně.
             }
         }
+        // Info o automatice u reverse charge (sazba 21 %, klasifikace, DUZP § 25) —
+        // append až po setExtractionWarning() zápisech, aby ho nepřepsaly (issue #116).
+        if ($rcWarning !== null) {
+            try {
+                $this->repo->appendExtractionWarning($id, $supplierId, $rcWarning);
+            } catch (\Throwable) {
+                // Varování je „nice to have" — faktura už je vytvořená správně.
+            }
+        }
         return $id;
     }
 
@@ -574,6 +782,33 @@ final class AiPdfExtractor
             return !empty($data['unit_prices_include_vat']);
         }
         return $documentKind === 'receipt';
+    }
+
+    /**
+     * Detekuje a opraví prohozená data vystavení↔splatnost z AI extrakce. AI občas
+     * zamění popisky „Datum vystavení" (issue_date) a „Datum splatnosti" (due_date).
+     * Na běžné faktuře je ale splatnost platební lhůtou = vystavení + N dní, takže
+     * `due_date` nikdy nepředchází `issue_date`. Pokud tedy due_date < issue_date,
+     * jde téměř jistě o záměnu → vrátíme prohozenou dvojici. DUZP (tax_date) se NETÝKÁ.
+     *
+     * Vrací `['issue_date' => …, 'due_date' => …]` s prohozenými hodnotami, nebo null
+     * když není co opravovat (chybí jedno z dat, nejsou validní ISO, nebo už sedí pořadí).
+     *
+     * @param array<string,mixed> $data
+     * @return array{issue_date:string, due_date:string}|null
+     */
+    public static function fixSwappedIssueDueDates(array $data): ?array
+    {
+        $issue = (string) ($data['issue_date'] ?? '');
+        $due   = (string) ($data['due_date'] ?? '');
+        $iso = static fn (string $d): bool => (bool) preg_match('/^\d{4}-\d{2}-\d{2}$/', $d);
+        if (!$iso($issue) || !$iso($due)) {
+            return null; // bez dvou validních dat není co bezpečně prohazovat
+        }
+        if ($due >= $issue) {
+            return null; // pořadí sedí (ISO datum lze porovnat lexikograficky)
+        }
+        return ['issue_date' => $due, 'due_date' => $issue];
     }
 
     /**
@@ -1208,17 +1443,69 @@ final class AiPdfExtractor
             $ratePercent = $vatRates[$rateId] ?? null;
             if ($ratePercent !== null && (float) $ratePercent > 0.0) return false;
         }
-        // Vendor country lookup
+        $country = $this->vendorCountryInfo($vendorId);
+        return $country['iso2'] !== '' && $country['iso2'] !== 'CZ';
+    }
+
+    /**
+     * Země dodavatele (iso2 + EU členství) — rozhoduje klasifikaci RC dokladu
+     * (pořízení z JČS vs. dovoz ze 3. země). Při selhání lookupu bezpečný default
+     * (prázdné iso2 → chová se jako CZ, žádná RC automatika).
+     *
+     * @return array{iso2:string, is_eu:bool}
+     */
+    private function vendorCountryInfo(int $vendorId): array
+    {
         try {
             $stmt = $this->db->pdo()->prepare(
-                'SELECT co.iso2 FROM clients c JOIN countries co ON co.id = c.country_id WHERE c.id = ?'
+                'SELECT co.iso2, COALESCE(co.is_eu, 0) AS is_eu
+                   FROM clients c JOIN countries co ON co.id = c.country_id
+                  WHERE c.id = ?'
             );
             $stmt->execute([$vendorId]);
-            $iso2 = (string) $stmt->fetchColumn();
-            return $iso2 !== '' && $iso2 !== 'CZ';
+            $row = $stmt->fetch(\PDO::FETCH_ASSOC);
+            if ($row !== false && $row !== null) {
+                return [
+                    'iso2'  => strtoupper((string) $row['iso2']),
+                    'is_eu' => (bool) $row['is_eu'],
+                ];
+            }
         } catch (\Throwable) {
-            return false;
+            // fall through na bezpečný default
         }
+        return ['iso2' => '', 'is_eu' => false];
+    }
+
+    /**
+     * Zákonné DUZP pořízení zboží z JČS dle § 25 odst. 1 ZDPH: povinnost přiznat daň
+     * vzniká k 15. dni měsíce následujícího po měsíci pořízení; byl-li daňový doklad
+     * vystaven před tímto dnem, ke dni vystavení. Zahraniční doklad typicky nese jen
+     * datum dodání (Leistungsdatum / date of supply) — to NENÍ zákonné DUZP. Na
+     * korektním tax_date stojí zařazení do období ve VatLedgerService (issue #117)
+     * i ČNB kurz (§ 4 odst. 8 — kurz ke dni vzniku povinnosti přiznat daň).
+     *
+     * @param ?string $deliveryDate datum dodání/převzetí (z dokladu), YYYY-MM-DD
+     * @param string  $issueDate    datum vystavení dokladu, YYYY-MM-DD
+     * @return ?string DUZP (YYYY-MM-DD), nebo null když datum dodání chybí/nelze parsovat
+     */
+    public static function euAcquisitionTaxDate(?string $deliveryDate, string $issueDate): ?string
+    {
+        if ($deliveryDate === null || !preg_match('/^\d{4}-\d{2}-\d{2}$/', $deliveryDate)) {
+            return null;
+        }
+        try {
+            $fifteenth = (new \DateTimeImmutable($deliveryDate))
+                ->modify('first day of next month')
+                ->format('Y-m') . '-15';
+        } catch (\Throwable) {
+            return null;
+        }
+        // Doklad vystavený před 15. dnem následujícího měsíce → DUZP = den vystavení.
+        // Lexikografické porovnání YYYY-MM-DD je korektní porovnání dat.
+        if (preg_match('/^\d{4}-\d{2}-\d{2}$/', $issueDate) && $issueDate < $fifteenth) {
+            return $issueDate;
+        }
+        return $fifteenth;
     }
 
     /**
@@ -1244,31 +1531,12 @@ final class AiPdfExtractor
     /**
      * Attach originální PDF bytes k vytvořené přijaté faktuře (uloží do archive,
      * setne pdf_path/hash/size na faktuře). Silent fail — pokud archive není
-     * dostupný, faktura zůstane bez PDF (lze nahrát ručně později).
+     * dostupný, faktura zůstane bez PDF (lze nahrát ručně později). Sdílená
+     * archivace přes {@see PurchaseInvoicePdfArchiver} (stejně jako dávkový import
+     * a inbox scan).
      */
     private function attachPdf(int $invoiceId, int $supplierId, string $pdfBytes, ?string $originalFilename): void
     {
-        try {
-            $archiveRoot = (string) $this->config->get('purchase_invoice.archive_storage', '');
-            if ($archiveRoot === '') {
-                $archiveRoot = \MyInvoice\Infrastructure\Config\RuntimePaths::storage('purchase-invoices');
-            }
-            $tenantDir = $archiveRoot . '/supplier-' . $supplierId;
-            if (!is_dir($tenantDir)) {
-                @mkdir($tenantDir, 0755, true);
-            }
-            $sha256 = hash('sha256', $pdfBytes);
-            $diskName = substr($sha256, 0, 16) . '.pdf';
-            $finalPath = $tenantDir . '/' . $diskName;
-            if (!is_file($finalPath)) {
-                @file_put_contents($finalPath, $pdfBytes);
-            }
-            $relativePath = 'supplier-' . $supplierId . '/' . $diskName;
-            $size = (int) @filesize($finalPath);
-            $name = $originalFilename ?: 'ai-imported.pdf';
-            $this->repo->setPdfMetadata($invoiceId, $supplierId, $relativePath, $sha256, $size, $name);
-        } catch (\Throwable) {
-            // Silent — extract success je důležitější než PDF attach.
-        }
+        $this->pdfArchiver->archiveBytes($invoiceId, $supplierId, $pdfBytes, $originalFilename ?: 'ai-imported.pdf');
     }
 }

@@ -9,7 +9,7 @@ use MyInvoice\Repository\InvoiceRepository;
 use MyInvoice\Service\ActivityLogger;
 use MyInvoice\Service\Mail\InvoiceEmailVarsBuilder;
 use MyInvoice\Service\Mail\Mailer;
-use MyInvoice\Infrastructure\Config\Config;
+use MyInvoice\Service\Mail\RecipientResolver;
 use MyInvoice\Service\Pdf\InvoicePdfRenderer;
 use MyInvoice\Service\Validation\InvoiceAmountPolicy;
 
@@ -32,7 +32,7 @@ final class ReminderService
         private readonly Mailer $mailer,
         private readonly InvoiceEmailVarsBuilder $varsBuilder,
         private readonly ActivityLogger $logger,
-        private readonly Config $config,
+        private readonly RecipientResolver $recipients,
     ) {}
 
     /**
@@ -71,23 +71,17 @@ final class ReminderService
         }
         $daysOverdue = (int) $today->diff($due)->days;
 
-        $to = $this->resolveRecipients($invoice);
+        // Jednotný resolver (#86): účel `reminders`, fallback na `documents`,
+        // bez kontaktů legacy chování (main_email + e-maily zakázky), včetně
+        // kopie dodavateli (supplier.self_copy / cfg smtp.cc_supplier_on_reminder).
+        $r = $this->recipients->resolve(RecipientResolver::TYPE_REMINDERS, $invoice);
+        $to = $r['to'];
+        $bcc = $r['bcc'];
         if (empty($to)) {
             throw new \DomainException('Klient nemá vyplněný email.');
         }
 
-        $cc = [];
-        if ((bool) $this->config->get('smtp.cc_supplier_on_reminder', false)) {
-            $stmt = $this->db->pdo()->prepare('SELECT email FROM supplier WHERE id = ?');
-            $stmt->execute([(int) $invoice['supplier_id']]);
-            $supplierEmail = trim((string) $stmt->fetchColumn());
-            if ($supplierEmail !== ''
-                && filter_var($supplierEmail, FILTER_VALIDATE_EMAIL)
-                && !in_array($supplierEmail, $to, true)
-            ) {
-                $cc[] = $supplierEmail;
-            }
-        }
+        $cc = $r['cc'];
 
         $publicToken = $this->repo->rotatePublicViewToken($invoiceId);
         $invoiceViewUrl = $this->linkFactory->build($publicToken);
@@ -110,7 +104,7 @@ final class ReminderService
                 $vars,
                 null,
                 $cc,
-                [],
+                $bcc,
                 [['path' => $pdfPath, 'name' => basename($pdfPath), 'contentType' => 'application/pdf']],
                 $userId,
             );
@@ -137,6 +131,8 @@ final class ReminderService
         $this->logger->log('invoice.reminder_sent', $userId, 'invoice', $invoiceId, [
             'to'           => $to,
             'cc'           => $cc,
+            'bcc'          => $bcc,
+            'resolved_recipients' => $r['resolved'],
             'days_overdue' => $daysOverdue,
             'reminder_no'  => (int) $invoice['reminder_count'] + 1,
             'delivery_mode' => 'public_link',
@@ -144,27 +140,5 @@ final class ReminderService
         ], $ip, $userAgent);
 
         return ['sent_to' => $to, 'days_overdue' => $daysOverdue];
-    }
-
-    /** Stejná logika jako v SendEmailAction::resolveRecipients. */
-    private function resolveRecipients(array $invoice): array
-    {
-        $emails = [];
-        if (!empty($invoice['client_main_email'])) {
-            $emails[] = $invoice['client_main_email'];
-        }
-        if (!empty($invoice['project_id'])) {
-            $stmt = $this->db->pdo()->prepare(
-                'SELECT email FROM project_billing_emails WHERE project_id = ? ORDER BY position'
-            );
-            $stmt->execute([$invoice['project_id']]);
-            foreach ($stmt->fetchAll(\PDO::FETCH_COLUMN) as $em) {
-                $em = trim((string) $em);
-                if ($em !== '' && !in_array($em, $emails, true)) {
-                    $emails[] = $em;
-                }
-            }
-        }
-        return array_values(array_filter($emails, fn ($e) => filter_var($e, FILTER_VALIDATE_EMAIL)));
     }
 }

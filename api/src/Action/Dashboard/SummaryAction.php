@@ -50,12 +50,13 @@ final class SummaryAction
             'kpi'                    => $this->kpi($pdo, $year, $prevYear, $sid, $isVatPayer),
             'overdue'                => $this->overdue($pdo, $sid),
             'unpaid_upcoming'        => $this->unpaidUpcoming($pdo, $sid),
+            'draft_invoices'         => $this->draftInvoices($pdo, $sid),
             'top_clients_ytd'        => $this->topClients($pdo, $year, $sid, $isVatPayer),
             'top_clients_prev_year'  => $this->topClients($pdo, $prevYear, $sid, $isVatPayer),
             'top_clients_12m'        => $this->topClientsRolling12m($pdo, $sid, $isVatPayer),
             'revenue_by_month'       => $this->revenueByMonth($pdo, $sid, $isVatPayer),
             'revenue_breakdown_12m'  => $this->revenueBreakdown12m($pdo, $sid, $isVatPayer),
-            'purchase_costs_by_month'=> $this->purchaseCostsByMonth($pdo, $sid),
+            'purchase_costs_by_month'=> $this->purchaseCostsByMonth($pdo, $sid, $isVatPayer),
             'revenue_by_year'        => $revenueByYear,
             'rolling_12m'            => $this->rolling12mRevenue($pdo, $sid, $isVatPayer),
             'cashflow_ytd'           => $this->cashflowYtd($pdo, $year, $prevYear, $sid),
@@ -78,10 +79,12 @@ final class SummaryAction
         ]);
     }
 
-    /** Počet aktivních (neaarchivovaných) klientů v rámci aktuálního dodavatele. */
+    /** Počet aktivních (neaarchivovaných) zákazníků v rámci aktuálního dodavatele (bez čistých dodavatelů). */
     private function activeClientsCount(\PDO $pdo, int $sid): int
     {
-        $stmt = $pdo->prepare('SELECT COUNT(*) FROM clients WHERE supplier_id = ? AND archived_at IS NULL');
+        // is_customer <> 0 pokrývá i historická data (default 1 od migrace 0026a);
+        // čisté dodavatele (is_vendor=1, is_customer=0) se do počtu zákazníků nepočítají.
+        $stmt = $pdo->prepare('SELECT COUNT(*) FROM clients WHERE supplier_id = ? AND archived_at IS NULL AND is_customer <> 0');
         $stmt->execute([$sid]);
         return (int) $stmt->fetchColumn();
     }
@@ -107,7 +110,7 @@ final class SummaryAction
                  WHERE i.supplier_id = ?
                    AND COALESCE(i.tax_date, i.issue_date) >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)
                    AND i.status IN ('issued', 'sent', 'reminded', 'paid')
-                   AND i.invoice_type IN ('invoice', 'credit_note')
+                   AND i.invoice_type IN ('invoice', 'credit_note', 'tax_document')
                  GROUP BY cur.code";
         $stmt = $pdo->prepare($sql);
         $stmt->execute([$sid]);
@@ -137,7 +140,7 @@ final class SummaryAction
                  WHERE i.supplier_id = ?
                    AND COALESCE(i.tax_date, i.issue_date) >= DATE_SUB(CURDATE(), INTERVAL 12 MONTH)
                    AND i.status IN ('issued', 'sent', 'reminded', 'paid')
-                   AND i.invoice_type IN ('invoice', 'credit_note')
+                   AND i.invoice_type IN ('invoice', 'credit_note', 'tax_document')
               GROUP BY i.revenue_category_id, rc.code, rc.label
               ORDER BY total DESC";
         $stmt = $pdo->prepare($sql);
@@ -171,7 +174,7 @@ final class SummaryAction
                   JOIN currencies cur ON cur.id = i.currency_id
                  WHERE i.supplier_id = ?
                    AND i.status IN ('issued', 'sent', 'reminded', 'paid')
-                   AND i.invoice_type IN ('invoice', 'credit_note')
+                   AND i.invoice_type IN ('invoice', 'credit_note', 'tax_document')
                  GROUP BY year, cur.code
                  ORDER BY year DESC, total DESC";
         $stmt = $pdo->prepare($sql);
@@ -228,7 +231,7 @@ final class SummaryAction
               WHERE i.supplier_id = ?
                 AND i.status = 'paid'
                 AND i.paid_at IS NOT NULL
-                AND i.invoice_type IN ('invoice', 'credit_note')
+                AND i.invoice_type IN ('invoice', 'credit_note', 'tax_document')
                 AND YEAR(i.paid_at) = ?"
         );
         $stmt->execute([$sid, $year]);
@@ -257,6 +260,17 @@ final class SummaryAction
     private function revenueCol(bool $isVatPayer): string
     {
         return $isVatPayer ? 'i.total_without_vat' : 'i.total_with_vat';
+    }
+
+    /**
+     * Sloupec NÁKLADU dle plátcovství DPH: plátce má vstupní DPH odpočitatelnou →
+     * náklad je bez DPH; neplátce ji odečíst nemůže → náklad je s DPH.
+     * Náklady/trend jsou „cost" metrika (ne cash), proto net pro plátce — shodně
+     * s PurchaseSummaryAction::costCol. (Závazky/cashflow dál používají gross.)
+     */
+    private function costCol(bool $isVatPayer): string
+    {
+        return $isVatPayer ? 'pi.total_without_vat' : 'pi.total_with_vat';
     }
 
     /**
@@ -319,7 +333,7 @@ final class SummaryAction
                  WHERE i.supplier_id = ?
                    AND YEAR(COALESCE(i.tax_date, i.issue_date)) IN (?, ?)
                    AND i.status IN ('issued', 'sent', 'reminded', 'paid')
-                   AND i.invoice_type IN ('invoice', 'credit_note')
+                   AND i.invoice_type IN ('invoice', 'credit_note', 'tax_document')
                    AND cur.is_active = 1
                  GROUP BY cur.code";
         $stmt = $pdo->prepare($sql);
@@ -362,14 +376,14 @@ final class SummaryAction
               WHERE supplier_id = ?
                 AND YEAR(COALESCE(tax_date, issue_date)) = ?
                 AND status NOT IN ('draft', 'cancelled')
-                AND invoice_type IN ('invoice', 'credit_note')"
+                AND invoice_type IN ('invoice', 'credit_note', 'tax_document')"
         );
         $stmt->execute([$sid, $year]);
         $issuedCount = (int) $stmt->fetchColumn();
 
         // Po splatnosti — počet a celkem k úhradě
         $stmt = $pdo->prepare(
-            "SELECT cur.code AS currency, COUNT(*) AS cnt, SUM(i.amount_to_pay) AS total
+            "SELECT cur.code AS currency, COUNT(*) AS cnt, SUM(i.amount_to_pay - i.paid_total) AS total
                FROM invoices i
                JOIN currencies cur ON cur.id = i.currency_id
               WHERE i.supplier_id = ?
@@ -414,10 +428,11 @@ final class SummaryAction
             $statusCounts[$r['status']] = (int) $r['cnt'];
         }
 
-        // Přijaté faktury YTD — náklady, počet, nezaplacené, po splatnosti
+        // Přijaté faktury YTD — náklady (net pro plátce), počet, nezaplacené, po splatnosti
+        $costCol = $this->costCol($isVatPayer);
         $stmt = $pdo->prepare(
             "SELECT COUNT(*) AS cnt,
-                    COALESCE(SUM(pi.total_with_vat * IF(cur.code = 'CZK' OR pi.exchange_rate IS NULL, 1, pi.exchange_rate)), 0) AS costs_czk
+                    COALESCE(SUM({$costCol} * IF(cur.code = 'CZK' OR pi.exchange_rate IS NULL, 1, pi.exchange_rate)), 0) AS costs_czk
                FROM purchase_invoices pi
           LEFT JOIN currencies cur ON cur.id = pi.currency_id
               WHERE pi.supplier_id = ?
@@ -495,7 +510,7 @@ final class SummaryAction
      */
     private function receivableDocTypeSql(): string
     {
-        return "(i.invoice_type IN ('invoice','credit_note')"
+        return "(i.invoice_type IN ('invoice','credit_note','tax_document')"
              . " OR (i.invoice_type = 'proforma'"
              . " AND NOT EXISTS (SELECT 1 FROM invoices ch"
              . " WHERE ch.parent_invoice_id = i.id AND ch.invoice_type = 'invoice')))";
@@ -507,16 +522,19 @@ final class SummaryAction
      * pohledávka a nepatří do „po splatnosti"/aging/cashflow ani do unpaid seznamu,
      * i když status zůstává `issued`. Dobropisy (záporný total) ponecháváme beze
      * změny. Zrcadlí InvoiceAmountPolicy::hasPositiveAmountToPay().
+     * Částečné úhrady (#89): dlužná částka = amount_to_pay - paid_total, takže
+     * částečně uhrazený doklad zůstává pohledávkou jen se sníženým zůstatkem.
      */
     private function outstandingReceivableSql(): string
     {
-        return "(i.invoice_type NOT IN ('invoice','proforma') OR i.amount_to_pay > 0)";
+        return "(i.invoice_type NOT IN ('invoice','proforma','tax_document') OR i.amount_to_pay - i.paid_total > 0)";
     }
 
-    private function purchaseCostsByMonth(\PDO $pdo, int $sid): array
+    private function purchaseCostsByMonth(\PDO $pdo, int $sid, bool $isVatPayer): array
     {
+        $costCol = $this->costCol($isVatPayer);
         $sql = "SELECT DATE_FORMAT(pi.issue_date, '%Y-%m') AS ym,
-                       SUM(pi.total_with_vat * IF(cur.code = 'CZK' OR pi.exchange_rate IS NULL, 1, pi.exchange_rate)) AS total
+                       SUM({$costCol} * IF(cur.code = 'CZK' OR pi.exchange_rate IS NULL, 1, pi.exchange_rate)) AS total
                   FROM purchase_invoices pi
              LEFT JOIN currencies cur ON cur.id = pi.currency_id
                  WHERE pi.supplier_id = ?
@@ -543,7 +561,7 @@ final class SummaryAction
     private function overdue(\PDO $pdo, int $sid): array
     {
         $sql = "SELECT i.id, i.varsymbol, i.invoice_type, i.client_id, cur.code AS currency,
-                       i.issue_date, i.due_date, i.amount_to_pay, i.status,
+                       i.issue_date, i.due_date, (i.amount_to_pay - i.paid_total) AS amount_to_pay, i.status,
                        c.company_name AS client_company_name,
                        DATEDIFF(CURDATE(), i.due_date) AS days_overdue
                   FROM invoices i
@@ -565,7 +583,7 @@ final class SummaryAction
     private function unpaidUpcoming(\PDO $pdo, int $sid): array
     {
         $sql = "SELECT i.id, i.varsymbol, i.invoice_type, i.client_id, cur.code AS currency,
-                       i.issue_date, i.due_date, i.amount_to_pay, i.status,
+                       i.issue_date, i.due_date, (i.amount_to_pay - i.paid_total) AS amount_to_pay, i.status,
                        c.company_name AS client_company_name
                   FROM invoices i
                   JOIN clients c ON c.id = i.client_id
@@ -573,7 +591,7 @@ final class SummaryAction
                  WHERE i.supplier_id = ?
                    AND i.status IN ('issued','sent','reminded')
                    AND i.due_date >= CURDATE()
-                   AND i.invoice_type IN ('invoice','credit_note')
+                   AND i.invoice_type IN ('invoice','credit_note','tax_document')
                    AND " . $this->outstandingReceivableSql() . "
                  ORDER BY i.due_date ASC
                  LIMIT 20";
@@ -581,6 +599,44 @@ final class SummaryAction
         $stmt->execute([$sid]);
         $rows = $stmt->fetchAll(\PDO::FETCH_ASSOC);
         return array_map(fn (array $r) => $this->castListItem($r), $rows);
+    }
+
+    /**
+     * Rozpracované (draft) vystavené faktury — pro widget „Výkazy práce" na Přehledu.
+     * Vrací firmu + zakázku (projekt) + tlačítko Výkaz vede na editaci dokladu.
+     * @return list<array<string,mixed>>
+     */
+    private function draftInvoices(\PDO $pdo, int $sid): array
+    {
+        $sql = "SELECT i.id, i.varsymbol, i.invoice_type, i.client_id, cur.code AS currency,
+                       i.issue_date, i.total_with_vat, i.project_id,
+                       c.company_name AS client_company_name,
+                       p.name AS project_name
+                  FROM invoices i
+                  JOIN clients c ON c.id = i.client_id
+                  JOIN currencies cur ON cur.id = i.currency_id
+             LEFT JOIN projects p ON p.id = i.project_id
+                 WHERE i.supplier_id = ?
+                   AND i.status = 'draft'
+                   -- Koncept daňového dokladu k přijaté platbě (#89) sem nepatří —
+                   -- nemá výkaz práce, vystavuje se z detailu zálohy/platby.
+                   AND i.invoice_type != 'tax_document'
+                 ORDER BY i.updated_at DESC, i.id DESC
+                 LIMIT 24";
+        $stmt = $pdo->prepare($sql);
+        $stmt->execute([$sid]);
+        return array_map(static fn (array $r) => [
+            'id'                  => (int) $r['id'],
+            'varsymbol'           => $r['varsymbol'],
+            'invoice_type'        => $r['invoice_type'],
+            'client_id'           => (int) $r['client_id'],
+            'client_company_name' => $r['client_company_name'],
+            'project_id'          => $r['project_id'] !== null ? (int) $r['project_id'] : null,
+            'project_name'        => $r['project_name'],
+            'currency'            => $r['currency'],
+            'issue_date'          => $r['issue_date'],
+            'total_with_vat'      => (float) $r['total_with_vat'],
+        ], $stmt->fetchAll(\PDO::FETCH_ASSOC) ?: []);
     }
 
     private function topClients(\PDO $pdo, int $year, int $sid, bool $isVatPayer): array
@@ -600,7 +656,7 @@ final class SummaryAction
                  WHERE i.supplier_id = ?
                    AND YEAR(COALESCE(i.tax_date, i.issue_date)) = ?
                    AND i.status IN ('issued', 'sent', 'reminded', 'paid')
-                   AND i.invoice_type IN ('invoice', 'credit_note')
+                   AND i.invoice_type IN ('invoice', 'credit_note', 'tax_document')
                  GROUP BY c.id, c.company_name
                  ORDER BY total_czk DESC
                  LIMIT 12";
@@ -640,7 +696,7 @@ final class SummaryAction
                  WHERE i.supplier_id = ?
                    AND COALESCE(i.tax_date, i.issue_date) >= DATE_FORMAT(DATE_SUB(CURDATE(), INTERVAL 23 MONTH), '%Y-%m-01')
                    AND i.status IN ('issued', 'sent', 'reminded', 'paid')
-                   AND i.invoice_type IN ('invoice', 'credit_note')
+                   AND i.invoice_type IN ('invoice', 'credit_note', 'tax_document')
                    AND cur.is_active = 1
                  GROUP BY cur.code, ym";
         $stmt = $pdo->prepare($sql);
@@ -713,7 +769,7 @@ final class SummaryAction
                  WHERE i.supplier_id = ?
                    AND COALESCE(i.tax_date, i.issue_date) >= DATE_SUB(CURDATE(), INTERVAL 12 MONTH)
                    AND i.status IN ('issued', 'sent', 'reminded', 'paid')
-                   AND i.invoice_type IN ('invoice', 'credit_note')
+                   AND i.invoice_type IN ('invoice', 'credit_note', 'tax_document')
                  GROUP BY c.id, c.company_name
                  ORDER BY total_czk DESC
                  LIMIT 12";
@@ -748,7 +804,7 @@ final class SummaryAction
                  WHERE i.supplier_id = ?
                    AND COALESCE(i.tax_date, i.issue_date) >= DATE_SUB(CURDATE(), INTERVAL 24 MONTH)
                    AND i.status IN ('issued', 'sent', 'reminded', 'paid')
-                   AND i.invoice_type IN ('invoice', 'credit_note')
+                   AND i.invoice_type IN ('invoice', 'credit_note', 'tax_document')
                  GROUP BY cur.code";
         $stmt = $pdo->prepare($sql);
         $stmt->execute([$sid]);
@@ -778,7 +834,7 @@ final class SummaryAction
                    AND i.status = 'paid'
                    AND i.paid_at IS NOT NULL
                    AND YEAR(i.paid_at) IN (?, ?)
-                   AND i.invoice_type IN ('invoice', 'credit_note')
+                   AND i.invoice_type IN ('invoice', 'credit_note', 'tax_document')
                  GROUP BY cur.code, ym";
         $stmt = $pdo->prepare($sql);
         $stmt->execute([$sid, $year, $prevYear]);
@@ -837,7 +893,7 @@ final class SummaryAction
                    AND status = 'paid'
                    AND paid_at IS NOT NULL
                    AND paid_at >= DATE_SUB(CURDATE(), INTERVAL 12 MONTH)
-                   AND invoice_type IN ('invoice', 'credit_note')";
+                   AND invoice_type IN ('invoice', 'credit_note', 'tax_document')";
         $stmt = $pdo->prepare($sql);
         $stmt->execute([$sid]);
         $days = $stmt->fetchAll(\PDO::FETCH_COLUMN);
@@ -886,7 +942,7 @@ final class SummaryAction
                   JOIN currencies cur ON cur.id = i.currency_id
                  WHERE i.supplier_id = ?
                    AND i.status IN ('issued', 'sent', 'reminded', 'paid')
-                   AND i.invoice_type IN ('invoice', 'credit_note')
+                   AND i.invoice_type IN ('invoice', 'credit_note', 'tax_document')
                    AND COALESCE(i.tax_date, i.issue_date) >= DATE_SUB(CURDATE(), INTERVAL 12 MONTH)
                  GROUP BY cur.code, rate_label
                  ORDER BY cur.code, base DESC";
@@ -913,9 +969,9 @@ final class SummaryAction
     private function cashflowForecast(\PDO $pdo, int $sid): array
     {
         $sql = "SELECT cur.code AS currency,
-                       SUM(CASE WHEN i.due_date BETWEEN CURDATE() AND DATE_ADD(CURDATE(), INTERVAL 30 DAY) THEN i.amount_to_pay ELSE 0 END) AS in_30,
-                       SUM(CASE WHEN i.due_date BETWEEN CURDATE() AND DATE_ADD(CURDATE(), INTERVAL 60 DAY) THEN i.amount_to_pay ELSE 0 END) AS in_60,
-                       SUM(CASE WHEN i.due_date BETWEEN CURDATE() AND DATE_ADD(CURDATE(), INTERVAL 90 DAY) THEN i.amount_to_pay ELSE 0 END) AS in_90,
+                       SUM(CASE WHEN i.due_date BETWEEN CURDATE() AND DATE_ADD(CURDATE(), INTERVAL 30 DAY) THEN i.amount_to_pay - i.paid_total ELSE 0 END) AS in_30,
+                       SUM(CASE WHEN i.due_date BETWEEN CURDATE() AND DATE_ADD(CURDATE(), INTERVAL 60 DAY) THEN i.amount_to_pay - i.paid_total ELSE 0 END) AS in_60,
+                       SUM(CASE WHEN i.due_date BETWEEN CURDATE() AND DATE_ADD(CURDATE(), INTERVAL 90 DAY) THEN i.amount_to_pay - i.paid_total ELSE 0 END) AS in_90,
                        SUM(CASE WHEN i.due_date BETWEEN CURDATE() AND DATE_ADD(CURDATE(), INTERVAL 30 DAY) THEN 1 ELSE 0 END) AS count_30,
                        SUM(CASE WHEN i.due_date BETWEEN CURDATE() AND DATE_ADD(CURDATE(), INTERVAL 60 DAY) THEN 1 ELSE 0 END) AS count_60,
                        SUM(CASE WHEN i.due_date BETWEEN CURDATE() AND DATE_ADD(CURDATE(), INTERVAL 90 DAY) THEN 1 ELSE 0 END) AS count_90
@@ -923,7 +979,7 @@ final class SummaryAction
                   JOIN currencies cur ON cur.id = i.currency_id
                  WHERE i.supplier_id = ?
                    AND i.status IN ('issued','sent','reminded')
-                   AND i.invoice_type IN ('invoice','credit_note')
+                   AND i.invoice_type IN ('invoice','credit_note','tax_document')
                    AND i.due_date >= CURDATE()
                    AND " . $this->outstandingReceivableSql() . "
                  GROUP BY cur.code";
@@ -952,16 +1008,16 @@ final class SummaryAction
     {
         $sql = "SELECT cur.code AS currency,
                        SUM(CASE WHEN i.due_date = CURDATE() THEN 1 ELSE 0 END) AS today_count,
-                       SUM(CASE WHEN i.due_date = CURDATE() THEN i.amount_to_pay ELSE 0 END) AS today_total,
+                       SUM(CASE WHEN i.due_date = CURDATE() THEN i.amount_to_pay - i.paid_total ELSE 0 END) AS today_total,
                        SUM(CASE WHEN i.due_date BETWEEN CURDATE() AND DATE_ADD(CURDATE(), INTERVAL (6 - WEEKDAY(CURDATE())) DAY) THEN 1 ELSE 0 END) AS week_count,
-                       SUM(CASE WHEN i.due_date BETWEEN CURDATE() AND DATE_ADD(CURDATE(), INTERVAL (6 - WEEKDAY(CURDATE())) DAY) THEN i.amount_to_pay ELSE 0 END) AS week_total,
+                       SUM(CASE WHEN i.due_date BETWEEN CURDATE() AND DATE_ADD(CURDATE(), INTERVAL (6 - WEEKDAY(CURDATE())) DAY) THEN i.amount_to_pay - i.paid_total ELSE 0 END) AS week_total,
                        SUM(CASE WHEN i.due_date BETWEEN CURDATE() AND LAST_DAY(CURDATE()) THEN 1 ELSE 0 END) AS month_count,
-                       SUM(CASE WHEN i.due_date BETWEEN CURDATE() AND LAST_DAY(CURDATE()) THEN i.amount_to_pay ELSE 0 END) AS month_total
+                       SUM(CASE WHEN i.due_date BETWEEN CURDATE() AND LAST_DAY(CURDATE()) THEN i.amount_to_pay - i.paid_total ELSE 0 END) AS month_total
                   FROM invoices i
                   JOIN currencies cur ON cur.id = i.currency_id
                  WHERE i.supplier_id = ?
                    AND i.status IN ('issued','sent','reminded')
-                   AND i.invoice_type IN ('invoice','credit_note')
+                   AND i.invoice_type IN ('invoice','credit_note','tax_document')
                    AND i.due_date >= CURDATE()
                    AND " . $this->outstandingReceivableSql() . "
                  GROUP BY cur.code";
@@ -987,11 +1043,11 @@ final class SummaryAction
     private function agingReport(\PDO $pdo, int $sid): array
     {
         $sql = "SELECT cur.code AS currency,
-                       SUM(CASE WHEN i.due_date >= CURDATE() THEN i.amount_to_pay ELSE 0 END) AS current_amt,
-                       SUM(CASE WHEN i.due_date < CURDATE() AND DATEDIFF(CURDATE(), i.due_date) BETWEEN 1 AND 30 THEN i.amount_to_pay ELSE 0 END) AS b1_30,
-                       SUM(CASE WHEN i.due_date < CURDATE() AND DATEDIFF(CURDATE(), i.due_date) BETWEEN 31 AND 60 THEN i.amount_to_pay ELSE 0 END) AS b31_60,
-                       SUM(CASE WHEN i.due_date < CURDATE() AND DATEDIFF(CURDATE(), i.due_date) BETWEEN 61 AND 90 THEN i.amount_to_pay ELSE 0 END) AS b61_90,
-                       SUM(CASE WHEN i.due_date < CURDATE() AND DATEDIFF(CURDATE(), i.due_date) > 90 THEN i.amount_to_pay ELSE 0 END) AS b90_plus,
+                       SUM(CASE WHEN i.due_date >= CURDATE() THEN i.amount_to_pay - i.paid_total ELSE 0 END) AS current_amt,
+                       SUM(CASE WHEN i.due_date < CURDATE() AND DATEDIFF(CURDATE(), i.due_date) BETWEEN 1 AND 30 THEN i.amount_to_pay - i.paid_total ELSE 0 END) AS b1_30,
+                       SUM(CASE WHEN i.due_date < CURDATE() AND DATEDIFF(CURDATE(), i.due_date) BETWEEN 31 AND 60 THEN i.amount_to_pay - i.paid_total ELSE 0 END) AS b31_60,
+                       SUM(CASE WHEN i.due_date < CURDATE() AND DATEDIFF(CURDATE(), i.due_date) BETWEEN 61 AND 90 THEN i.amount_to_pay - i.paid_total ELSE 0 END) AS b61_90,
+                       SUM(CASE WHEN i.due_date < CURDATE() AND DATEDIFF(CURDATE(), i.due_date) > 90 THEN i.amount_to_pay - i.paid_total ELSE 0 END) AS b90_plus,
                        SUM(CASE WHEN i.due_date >= CURDATE() THEN 1 ELSE 0 END) AS current_n,
                        SUM(CASE WHEN i.due_date < CURDATE() AND DATEDIFF(CURDATE(), i.due_date) BETWEEN 1 AND 30 THEN 1 ELSE 0 END) AS b1_30_n,
                        SUM(CASE WHEN i.due_date < CURDATE() AND DATEDIFF(CURDATE(), i.due_date) BETWEEN 31 AND 60 THEN 1 ELSE 0 END) AS b31_60_n,
@@ -1064,7 +1120,7 @@ final class SummaryAction
                  WHERE i.supplier_id = ?
                    AND YEAR(COALESCE(i.tax_date, i.issue_date)) IN (?, ?, ?)
                    AND i.status IN ('issued', 'sent', 'reminded', 'paid')
-                   AND i.invoice_type IN ('invoice', 'credit_note')
+                   AND i.invoice_type IN ('invoice', 'credit_note', 'tax_document')
                  GROUP BY cur.code";
         $stmt = $pdo->prepare($sql);
         $stmt->execute([$year, $prevYear, $prevYear, $sid, $year, $prevYear, $prevPrevYear]);
@@ -1172,7 +1228,7 @@ final class SummaryAction
                   FROM invoices
                  WHERE supplier_id = ?
                    AND status IN ('issued', 'sent', 'reminded', 'paid')
-                   AND invoice_type IN ('invoice', 'credit_note')
+                   AND invoice_type IN ('invoice', 'credit_note', 'tax_document')
                    AND COALESCE(tax_date, issue_date) >= DATE_SUB(CURDATE(), INTERVAL 12 MONTH)";
         $stmt = $pdo->prepare($sql);
         $stmt->execute([$sid]);
