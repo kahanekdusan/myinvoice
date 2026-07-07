@@ -5,6 +5,751 @@ All notable changes to MyInvoice.cz are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [4.44.2] — 2026-07-06
+
+### Fixed
+
+Sada oprav z adversariálního auditu DPH/KH/Souhrnného hlášení (2026-07) — bez dopadu na UI, jen daňová korektnost přiznání a hlášení.
+
+- **KH VetaB1 (tuzemský reverse charge, odběratel) — správný XSD atribut `duzp` + samovyměřená daň.** Sekce B.1 zapisovala datum do atributu `dppd`, který XSD (`dphkh1.xsd`) u VetaB1 vůbec nezná — každé KH s řádkem B.1 tak neprošlo XSD validací. Navíc B.1 nikdy nevykazoval samovyměřenou daň (`dan1`/`dan2`), jen základ. Opraveno na `duzp` a doplněny per-sazbové agregáty daně.
+- **KH/SH — konec kvartálního období počítaný z konce kvartálu, ne z předaného měsíce.** `build($s, $rok, 4, 'quarterly')` (duben, Q2) dával konec období 30.4. místo 30.6. a výkaz tiše vynechal květen a červen. Konec kvartálu se nově odvozuje z `quarter*3` nezávisle na měsíci (stejně jako už dělá Kniha DPH).
+- **DPHDP3 ř.50 (tuzemská osvobozená plnění §51) se vůbec nepromítal do přiznání.** Kód `3` měl `dphdp3_line=NULL` — Veta5 se nikdy negenerovala (migrace 0126).
+- **Kurz vystavené faktury se zjišťoval k datu vystavení, ne k DUZP.** Podle § 4 odst. 5 / § 8 ZDPH se kurz váže k datu vzniku daňové povinnosti (DUZP), které se od vystavení může lišit až o 15 dní (§ 28 odst. 8). Kurz se nově zjišťuje z `COALESCE(tax_date, issue_date)`.
+- **EU reverse-charge prodej bez signálu zboží defaultoval na kód '20' (dodání zboží), ne '22' (služba).** U typického uživatele (OSVČ/malá firma) jsou služby častější — sjednoceno na '22' jako výchozí, dodání zboží si uživatel zvolí ručně.
+- **KH `kod_pred_pl` byl natvrdo `'5'` (odpad/šrot §92c) pro všechna tuzemská RC plnění**, i pro nejčastější reálný případ — stavební/montážní práce §92e (kód `'4'`). Nově se čte z klasifikace (migrace 0127).
+- **SH (souhrnné hlášení) — Řecko vykazovalo ISO kód `GR` místo DPH/VIES kódu `EL`.** VIES kontrola u řeckých DIČ s prefixem `GR` neprošla; sjednoceno na `khCountryCode` (Řecko je jediná výjimka ISO ≠ VIES kód).
+- **Práh 10 000 Kč pro A.4/B.2 vs. A.5/B.3 byl `>=`, má být striktně `>`** (§ 101e „nad 10 000 Kč"). Doklad přesně na 10 000 Kč nyní správně patří do sumace A.5/B.3.
+- **SH nově varuje na povinnost měsíčního podání, když je v kvartálu zboží (§ 102 odst. 6).** Kvartální souhrnné hlášení smí obsahovat jen služby — builder dosud kvartál se zbožím vygeneroval tiše bez upozornění.
+- **RC prodej do EU — klasifikace zboží/služba podle reálného signálu** (měrná jednotka položky, CZ-NACE dodavatele, statistický default), místo slepé konstanty, která jen prohodila, který případ je špatně.
+
+## [4.44.1] — 2026-07-04
+
+### Added
+
+- **Nastavení counteru číselné řady dokladů přes veřejné API.** Nový endpoint `PUT /api/v1/settings/supplier/invoice-counter` nastaví counter supplier-wide řady tak, aby příští vystavený doklad dostal zadané číslo — typicky při migraci z jiného fakturačního software (převzetí existující řady). Kolize s existujícími čísly řeší stávající self-heal, duplicitní číslo nikdy nevznikne.
+- **Upload loga dodavatele přes veřejné API.** Veřejné aliasy `POST`/`DELETE /api/v1/settings/supplier/logo` na existující branding pipeline — externí systém (SaaS integrace, provisioning) může nastavit branding faktur kompletně přes API: logo tímto endpointem, barvu/toggle/display_name/tagline přes `PUT /settings/supplier`. Žádná nová upload logika, stejný sanitizovaný pipeline (magic bytes, pixel-bomb guard, SVG sanitizace + rasterizace).
+
+### Fixed
+
+- **iDoklad import — přílohy přijatých účtenek se nikdy nestáhly (a fotky se zahazovaly).** Stahování příloh se dotazovalo jen scope `documentType=ReceivedInvoice`, ale přílohy účtenek žijí v odděleném scope `ReceivedReceipt` (SDK enum 11) — dotaz se špatným scope vrací 404, takže účtenky zůstaly bez zdrojového dokladu (`imported_pdf_path = NULL`) i s `download_attachments=true`, tiše. Navíc se archivovaly jen přílohy `%PDF` — fotka paragonu z telefonu (JPG, u účtenek nejběžnější případ) se zahodila i u přijatých faktur. Nově: přílohy účtenek se stahují přes správný scope a fotky se konvertují na PDF stejnou cestou jako ruční upload (`ImageToPdfConverter`, EXIF rotace, přejmenování `.jpg → .pdf`), takže výsledek je od ručně nahraného dokladu k nerozeznání. Výběr přílohy (preferuj PDF, jinak první obrázek) je vytažený do čisté testované funkce.
+- **Počet jednotek na PDF faktury měl zbytečné koncové nuly.** Množství se na PDF formátovalo buď jako celé číslo, nebo natvrdo na 3 desetinná místa — takže `15,25` se zobrazilo jako `15,250` a `16,2` jako `16,200`. Nově se počet desetin řídí skutečnou hodnotou (0–3 místa) a nevýznamné nuly se neuvádějí. (#187)
+
+## [4.44.0] — 2026-07-02
+
+### Added
+
+- **Zůstatek účtu z e-mailových bankovních avíz.** Avíza Banky CREDITAS („Disponibilní zůstatek"), Fio banky („Aktuální zůstatek") a Raiffeisenbank („Disponibilní zůstatek po pohybu") nesou kromě platby i aktuální zůstatek účtu — nově se při skenu vytěží a uloží k transakci (`bank_transactions.balance`, migrace 0125). Detail měsíčního avízo-výpisu, který dosud žádné souhrny neukazoval, dostal boxy: **disponibilní zůstatek** z nejnovějšího avíza, **k datu**, a součty **příjmů/výdajů** měsíce. Zůstatky z avíz se promítají i do přehledu **Stavy na účtech** — v každém měsíci i pro aktuální stav vyhrává novější údaj (avízo typicky předběhne pravidelný výpis; při shodě dne zůstává autoritativní GPC) a u data je pak štítek „z avíza". U vlastních regex parserů lze zůstatek vytěžovat novým volitelným polem `balance`. Zůstatek se ukládá od této verze — u dříve naskenovaných avíz zpětně doplnit nejde (surové tělo e-mailu se neuchovává).
+- **Odesílací e-mailové profily s vlastním SMTP transportem (#87).** Dodavatel může mít víc odesílacích identit (adres) s vlastním SMTP serverem, podpisem a volitelnou **S/MIME identitou** — profil se vybírá při odesílání dokladů. Odeslané zprávy se navíc umí **archivovat do IMAP složky** („Odeslané") daného profilu; selhání archivace neshodí samotné doručení. Kontroluje se soulad adresy From s S/MIME certifikátem (u nových i stávajících profilů default jen varování). Bez nastavených profilů se chování nemění — použije se globální SMTP. (migrace 0124)
+- **Stavy na účtech.** Nový přehled zůstatků na bankovních účtech: aktuální stav každého účtu, měsíční vývoj (graf na účet, poslední 3 roky) a celkový součet přepočtený na CZK kurzem ČNB ke konci měsíce. Zdrojem jsou konečné zůstatky z GPC výpisů (a nově i avíza, viz výše).
+- **iDoklad import — přijaté účtenky/paragony (`ReceivedReceipts`).** Import z iDokladu dosud stahoval jen `ReceivedInvoices` (přijaté faktury) a koncový bod `ReceivedReceipts` přeskakoval — přijaté účtenky/paragony se tak vůbec nepřenesly. Nově se importují do `purchase_invoices` s `document_kind='receipt'` (řídí se přes nový parametr `include_receipts`, default zapnuto). Mapování zohledňuje odlišnosti účtenky od faktury: účtenka nemá splatnost (`DateOfMaturity`) ani DUZP (`DateOfTaxing`) → `issue_date`/`tax_date`/`due_date` se odvodí z `DateOfIssue`, a číslo dokladu dodavatele je `ExternalDocumentNumber` (fallback `DocumentNumber`). Hotovostní účtenka bez kontaktu (`Partner` = null) se **naváže na sběrného systémového dodavatele „Hotovostní nákup (účtenka)"** (aby se náklad neztratil) a importuje se **bez nároku na odpočet DPH** (`vat_deduction='none'`) s upozorněním k doplnění dodavatele — u plátce tak nevzniká chybný odpočet, u neplátce je to bez dopadu. Dedup přes `idoklad_id` i `(vendor, číslo, datum)` zůstává — opakovaný import nepřidává duplicity. Položkové ceny i rekapitulace DPH se skládají z autoritativních per-řádkových `Prices` stejně jako u přijatých faktur (řeší i ceny s DPH na účtenkách). Účtenka je hrazená na místě, takže se importuje rovnou jako **zaplacená** (`paid_at` = datum vystavení), pokud iDoklad nevrátí konkrétnější stav úhrady.
+
+### Changed
+
+- **Bankovní stránky sjednocené pod Finance → „Bankovní účty".** Bývalá stránka *Systém → Bankovní účty* (Měny a účty / Stavy na účtech / Bankovní avíza z e-mailu) se přesunula jako záložky na stránku s bankovními výpisy — vše bankovní je teď na jednom místě se **4 záložkami**: *Bankovní výpisy* | *Měny a účty* | *Stavy na účtech* | *Bankovní avíza z e-mailu*. Záložky kromě výpisů vidí jen administrátor (stejná oprávnění jako dřív); položka v menu Systém zmizela. Staré odkazy a záložky prohlížeče (`/admin/bank-accounts`, i s `?tab=`) se automaticky přesměrují.
+
+### Fixed
+
+- **Zpracovaná avíza — stav se odvozuje z živého párování transakce.** Přehled „Zpracované e-maily" ukazoval stav zamrzlý z okamžiku skenu: avízo dodatečně spárované ručně zůstávalo jako *match_failed*, a naopak později rozpárovaná transakce dál vypadala jako úspěch. Stav se nově dopočítává z aktuálního stavu párování navázané bankovní transakce.
+- **Výkaz práce pro neplátce DPH — bez sazby DPH (#181).** Výkaz práce dodavatele-neplátce nabízel volbu sazby DPH a zapékal ji do fakturovaných položek. Nově se u neplátce sazba v UI výkazu nenabízí a položky vzniklé z výkazu se fakturují bez DPH.
+
+## [4.43.4] — 2026-07-01
+
+### Fixed
+
+- **Párování bankovního výpisu (GPC) — zaplacené faktury se nepřeskočí.** Vystavená faktura, která už byla označená jako zaplacená (`paid`, `paid_total` = plná částka), se při importu i automatickém přepárování porovnávala proti zbývajícímu dluhu (= 0), takže plná platba nikdy nesedla a faktura zůstala ve výpisu jako *Nespárováno*. Nově se u již zaplacené faktury porovnává proti celkové částce dokladu a transakce se na ni jen naváže (stav ani datum úhrady se nemění, nevzniká duplicitní platba). Projevovalo se zejména při re-importu téže platby nebo když byla úhrada zaznamenaná dřív (jiná transakce / ruční záznam).
+- **Párování — uhrazené zálohové faktury (proforma) se nyní spárují.** Uhrazená záloha s vystaveným (a taky vyrovnaným) finálním dokladem se nepárovala: matcher platbu vždy přesměroval na finál, který ovšem u uhrazené zálohy nese `k úhradě` = 0 (pohledávku i platbu drží proforma), takže se porovnávala proti nule. Přesměrování na finál teď proběhne jen když je co doplácet (finál nese otevřenou pohledávku nebo proforma ještě není uhrazená); u plně vyrovnané zálohy se potvrzující platba naváže přímo na proformu.
+- **Párování odchozích plateb — karetní/bez VS platby se párují jako v ruční nabídce.** Automatické párování odchozích (záporných) plateb na přijaté faktury dosud u plateb bez variabilního symbolu (typicky karetní — GitHub, Anthropic, Alza…) vyžadovalo shodu názvu protistrany a vynechávalo už zaplacené faktury, takže se nespárovaly, přestože je ruční nabídka kandidátů podle částky a data našla. Přibyla poslední záchrana: shoda podle **částky (±1 Kč / 4 % u cizí měny) a data (±14 dní)** včetně zaplacených faktur — spáruje se ale jen při **právě jednom** jednoznačném kandidátovi (jinak zůstane nespárováno k ruční kontrole; už spárované doklady se vylučují).
+
+## [4.43.3] — 2026-06-30
+
+### Added
+
+- **Uchování strojového zdroje přijaté faktury (ISDOC/ISDOCX) — důkazní stopa.** Při importu přijaté faktury ze strukturovaného zdroje (`.isdoc`, `.isdocx`, nebo ISDOC vložený v PDF/A-3) se nově **trvale archivuje originální strojově čitelný doklad** vedle vizuálního PDF. Originál (často digitálně podepsaný) má pro audit a kontrolu z FÚ při 10leté archivační lhůtě vyšší hodnotu než PDF render a umožňuje zpětnou rekonstrukci dat. V detailu přijaté faktury přibyla akce **„Zdrojový doklad (ISDOC)"** ke stažení (jen je-li zdroj uložený). Bajty se ukládají as-is — `.isdocx` se NErozbaluje (zachová podpis ZIP obálky), embedded ISDOC v PDF se uloží jako vytažené XML. Zápis je write-once (originál se nikdy nepřepíše). Pokrývá dávkový import i nahrání přes dropzone/AI. Formát-agnostické (`source_format`), takže příští zdroje (Pohoda XML / iDoklad / Fakturoid) půjdou doplnit bez další migrace. (migrace 0123)
+
+### Fixed
+
+- **Vygenerované PDF přijaté faktury („Náš PDF") nově zobrazuje zaokrouhlení.** Rekonstrukční PDF dokladu u faktur se zaokrouhlením ukazovalo v souhrnu jen „Celkem k úhradě" = základ + DPH, takže chybělo haléřové zaokrouhlení a částka k úhradě byla o haléře vedle skutečnosti. Nově se u dokladů se zaokrouhlením vypíše samostatný řádek **Zaokrouhlení** a „Celkem k úhradě" = celkem s DPH + zaokrouhlení (u dokladů bez zaokrouhlení beze změny).
+- **Import ISDOC u dokladů se zaokrouhlením — „k úhradě" nově sedí na doklad.** Přijatá faktura z ISDOC se zaokrouhlením „k úhradě" (typicky e-faktury z e-shopů) se dosud naimportovala s částkou k úhradě = přesný součet položek, takže `K úhradě` bylo o haléře vedle skutečné částky na dokladu (a nepárovalo se přesně s platbou v bance). Import nově čte z ISDOC `<LegalMonetaryTotal>/<PayableAmount>` a haléřový rozdíl uloží jako zaokrouhlení — stejně jako už dělá rozpoznávání z PDF přes AI. Příklad: doklad se základem+DPH 999,99 a zaokrouhlením +0,01 se nově naimportuje tak, že `K úhradě` = 1 000,00. Základ a DPH zůstávají nezměněné (správně pro přiznání DPH a kontrolní hlášení). Sémantika `amount_to_pay` se nemění — zaokrouhlení se i nadále vede mimo něj (pole *Zaokrouhlení*) a do „k úhradě" se promítá stejnou cestou jako u AI importu (QR, platební příkaz, PDF, UI).
+
+## [4.43.2] — 2026-06-29
+
+### Fixed
+
+- **OpenAPI — opravené cesty pravidelných fakturací (`/api/v1/recurring`).** Endpointy pravidelných fakturací byly v `openapi.yaml` zdokumentované dvakrát: jednou správně pod veřejnou cestou `/api/v1/recurring*` a jednou jako starší zbytek pod `/api/recurring*` (bez `/v1/` prefixu). Druhá varianta byla pro konzumenty veřejného API nepoužitelná (token na cestu bez `/v1/` odmítne ApiScopeMiddleware) a zároveň rozbíjela strojové parsování specifikace (`duplicated mapping key`). Stará kopie byla odstraněna, zůstává jediná korektní definice pod `/api/v1/`. Bez dopadu na běh aplikace (jen dokumentace API).
+
+### Changed
+
+- **Manuál — instalace nativní: stažení hotového balíčku místo buildu + sekce Aktualizace.** Kapitola *Instalace — Nativní* nově upozorňuje, že místo buildu ze zdrojáků (Composer + Node/pnpm) stačí stáhnout hotový **production bundle** z GitHub Releases (obsahuje `api/vendor/`, `web/dist/` i vyrenderovaný manuál) — přibyla sekce *4.6 Alternativa: hotový balíček (bez buildu)*. Doplněna i sekce *4.7 Aktualizace* (build ze zdrojáků vs. bundle) s odkazy na kapitolu Aktualizace.
+
+## [4.43.1] — 2026-06-28
+
+### Changed
+
+- **Pravidelné fakturace — nový koncept dalšího období se otevře hned po uzávěrce předchozího.** Navazuje na 4.43.0: u režimu *Na začátku období* cron po uzavření a vystavení předchozího období (den po jeho konci, se zpětným datem k poslednímu dni) **rovnou otevře koncept dalšího období**, pokud už začalo. V praxi tak 1. den měsíce proběhne v jednom běhu „uzavři minulé období (k poslednímu dni) → otevři nové" a uživatel má koncept k zápisu víceprací k dispozici **hned od 1. dne období** (dřív až následující den). Idempotentní, jen pro *Na začátku období*, bez DB migrace.
+
+## [4.43.0] — 2026-06-28
+
+### Added
+
+- **Pravidelné fakturace — měnový účet u GPC importu se sdíleným číslem účtu (#167).** Když máš jeden bankovní účet vedený ve více měnách (stejné číslo účtu pro CZK/EUR/USD), GPC/ABO výpis sám o sobě měnu nenese. Při importu proto nově zvolíš měnu účtu (a konkrétní účet), takže se výpis spáruje se správným měnovým účtem; při nejednoznačnosti import vrátí výzvu k upřesnění místo tichého zařazení.
+
+### Changed
+
+- **Pravidelné fakturace — režim „Na začátku období" uzavírá koncept až den po konci období.** U šablon s otevřeným konceptem (*Na začátku období*) cron dosud uzavíral a vystavoval koncept přímo v den `next_run_date` (typicky poslední den měsíce). Pokud běžel ráno, nestihla se do faktury započítat práce zapsaná do výkazu **týž poslední den**. Nově se uzávěrka posune o **1 den** za konec období (koncept zůstává otevřený celý poslední den a vystaví se až následující den) — **datum vystavení i DUZP přitom zůstávají na konci období** (`next_run_date`), faktura tedy nese stejné datum jako dřív, jen fyzicky vznikne o den později. Týká se jen režimu *Na začátku období*; standardní *Až při vystavení* se nemění. Bez DB migrace.
+
+### Added
+
+- **Kniha jízd — výchozí kategorie jízd.** U kategorií cest (Kniha jízd → Kategorie) lze nově jednu označit jako **výchozí** — ta se pak automaticky předvyplní při zakládání nové jízdy. Per dodavatele smí být výchozí vždy jen jedna (jako u aut). V přehledu kategorií ji označuje štítek „výchozí". **Vyžaduje migraci 0121.**
+- **Banka — filtr podle roku, měsíce a účtu.** Přehled bankovních výpisů má nově filtr na **rok** a **měsíc** a na **konkrétní účet**, ve stejném designu jako přehledy faktur (sbalitelná lišta filtrů, synchronizace do URL, reset při kliknutí na položku menu). Výchozí je aktuální rok; volby účtů jsou seřazené stejně jako v *Nastavení → bankovní účty*.
+- **Banka — přehlednější číslo účtu.** Číslo účtu se zobrazuje bez zbytečných vodicích nul a s kódem banky (např. `123456789 / 0300`) — v přehledu výpisů, ve filtru i v detailu výpisu, kde je navíc zvýrazněné. U účtů vedených jako IBAN se nic neořezává ani nedoplňuje.
+
+### Fixed
+
+- **Banka — úhrada přijaté faktury z e-mailového avíza se správně označí jako spárovaná.** Odchozí platba na přijatou fakturu dorazivší e-mailovým avízem se ve zpracovaných e-mailech chybně hlásila jako **„nespárováno" (match_failed)**, přestože transakce spárovaná byla a faktura zaplacená — kontrola brala jen vydané faktury. Nově se za úspěch považuje i spárování na přijatou fakturu (a e-mail se neoznačí jako selhání). Navíc se **auto-spárování platby zapíše do aktivity dokladu** (vystavené i přijaté faktury), takže je přímo v těle faktury vidět, čím a kdy byla zaplacená.
+- **Banka — kód banky se normalizuje napříč zdroji.** GPC/ABO import dříve kód banky neukládal (na rozdíl od e-mailových avíz, která si ho načtou z textu), takže se ve filtru zobrazoval jen u některých účtů a tentýž účet se mohl v nabídce objevit dvakrát. Nově se kód banky bere autoritativně z konfigurovaného účtu, GPC import ho rovnou ukládá a migrace dorovná i starší výpisy. **Vyžaduje migraci 0122.**
+- **Platební příkazy — QR tlačítko čitelné v tmavém režimu.** Aktivní (rozkliknuté) tlačítko *QR kód* u přijatých faktur mělo v tmavém režimu bílý text na světlém podkladu a text zanikal.
+
+## [4.41.1] — 2026-06-25
+
+### Fixed
+
+- **Kontrolní hlášení: přijatá zahraniční služba v reverse charge patří do oddílu A.2, ne B.1 (#164).** Přijatá služba z EU nebo ze 3. země v režimu přenesení daňové povinnosti (např. Google Cloud, Microsoft Ireland, Anthropic, GitHub) se v kontrolním hlášení (DPHKH1) chybně exportovala do oddílu **B.1**, který je určen jen pro tuzemský režim přenesení (§ 92a) a kde portál *Moje daně* vyžaduje **české číselné DIČ** — portál proto hlášení odmítl (chybný formát DIČ dodavatele, chybějící datum a daň). Nově míří správně do oddílu **A.2** (přeshraniční samovyměřená plnění podle § 24 a § 25), kde se uvádí kód státu a VAT ID dodavatele. Přiznání k DPH (řádky 5/12 + zrcadlový odpočet 43) bylo přitom správně už dříve — chyba byla jen v exportu kontrolního hlášení. **Vyžaduje migraci 0120** (oprava zařazení kódů `24`/`24e` do oddílu A.2); promítne se automaticky i do již zaúčtovaných dokladů, bez nutnosti cokoli překlasifikovat.
+- **Kontrolní hlášení: VAT ID dodavatele z EU si zachová písmena.** Identifikace dodavatele v oddílu A.2 (`vatid_dod`) se dříve ořezávala jen na číslice, takže irské VAT ID `IE3668997OH` skončilo jako `3668997`. Nově se zachová alfanumerická kmenová část bez kódu země (`3668997OH`), jak portál u řady států vyžaduje (Irsko, Rakousko, Nizozemsko aj.). Kód státu u Řecka se navíc správně uvádí jako `EL` (ne ISO `GR`).
+- **Kontrolní hlášení: dovoz zboží ze 3. země se do hlášení neuvádí.** Dovoz zboží ze 3. země (kód `25`) se dříve také chybně dostal do oddílu B.1; nově se z kontrolního hlášení správně vynechává (vykazuje se jen v přiznání k DPH na řádcích 7/8 + odpočet 43/44).
+
+## [4.41.0] — 2026-06-25
+
+### Added
+
+- **Bankovní výpis (GPC) přebírá párování z e-mailových avíz.** Když máš zapnutá e-mailová bankovní avíza a později naimportuješ oficiální GPC/ABO výpis se stejnou platbou, MyInvoice nově rozpozná, že jde o **tutéž platbu**, a místo dvojího párování **převezme párování z avíza na oficiální výpis** (GPC je zdroj pravdy). Zachová přitom i **ruční párování** a **sloučenou úhradu na více faktur** — jen se přepne na transakci z výpisu, faktury zůstanou zaplacené a nic se nezapočítá dvakrát (dřív mohla částečná úhrada skončit jako falešný přeplatek). Avízová transakce se rozpáruje. Shoda se hledá podle účtu, částky, variabilního symbolu a data (okno ±5 dní) a jen v rámci jednoho dodavatele; při nejednoznačnosti (víc možných shod) se raději nic neprovede a párování zůstane na tobě. Bez DB migrace.
+- **Smazání avízo-výpisu z jeho detailu.** Výpis vzniklý z e-mailových avíz lze nově smazat přímo v jeho detailu — tlačítko se nabídne adminovi, jakmile na výpisu nezbývá žádná spárovaná položka (typicky poté, co párování převzal oficiální GPC výpis). U avízo-výpisu se zároveň skrývá nahrávání PDF (virtuální výpis žádné originální PDF nemá).
+
+## [4.40.1] — 2026-06-24
+
+### Added
+
+- **Sloučená úhrada — jedna platba na více faktur.** Když klient zaplatí víc vystavených faktur **jedním převodem** (součet sedí, ale variabilní symbol odpovídá jen jedné faktuře nebo žádné), nabídne modal ručního párování v **Bance** novou sekci **Sloučená úhrada**: MyInvoice sám hledá **kombinace faktur téhož klienta**, jejichž součet odpovídá částce platby (výchozí okno ±7 dní kolem data platby, rozšiřitelné; klient s názvem podobným protistraně se nabízí první). Po potvrzení se každá faktura uhradí svým plným zbytkem a označí jako zaplacená; zálohové faktury dostanou koncept finálního dokladu jako u běžné úhrady. Volitelně lze vybrat jednu fakturu a nechat dohledat zbytek. Kombinace jdou jen v rámci jednoho klienta a součet musí odpovídat částce platby (uhrazení vybraných faktur celých, ne rozpouštění platby na částečné úhrady). Zrušení spárování smaže všechny platby dané transakce a vrátí faktury zpět mezi pohledávky. **Vyžaduje migraci 0119** (uvolnění unikátního klíče na evidenci plateb — jedna bankovní transakce smí nově založit platbu na každou fakturu zvlášť).
+
+### Fixed
+
+- **Bankovní párování: cizoměnová faktura bez kurzu se nepřevádí kurzem 1:1.** Při párování cizoměnové faktury bez vyplněného směnného kurzu na platbu v CZK se dříve mohla použít chybná hodnota 1 : 1; nově se taková faktura k párování nenabídne a sloučenou úhradu odmítne s jasnou hláškou (chybí kurz).
+
+## [4.40.0] — 2026-06-23
+
+### Added
+
+- **Odebrání ukázkových (sample) dat (#162).** Ukázková data, která si necháš vygenerovat při instalaci, šlo dosud odstranit jen úplným resetem celé databáze. Nově v **Systém → Nastavení** přibyla sekce **Ukázková data** s tlačítkem *Odebrat ukázková data* — smaže přesně vygenerovanou sadu (klienti, dodavatelé, zakázky, vydané i přijaté faktury, dobropisy, pravidelné fakturace, kniha jízd) a tvoje vlastní záznamy nechá být. Sekce se zobrazí jen tehdy, když nějaká ukázková data v systému jsou. Funguje díky tomu, že generátor si nově každou vytvořenou položku eviduje (migrace 0118), takže ji lze později odebrat na milimetr přesně. Endpoint je admin-only.
+- **`reset.php --keep-users-supplier`.** Nový přepínač CLI resetu smaže jen byznys data (klienti, doklady, banka, dokumenty, kniha jízd, pravidelné fakturace, importy, daňová podání), ale **ponechá uživatele, dodavatele a jeho konfiguraci** (měny, číslování dokladů, podepisování PDF, e-mail/banka nastavení, číselníky). Hodí se pro „start načisto" bez nutnosti znovu procházet setup, i pro úklid starších ukázkových dat, která vznikla ještě bez evidence.
+
+### Fixed
+
+- **`bin/sample.php` už nejde spustit nad databází s daty.** Generátor ukázkových dat (CLI) dosud neměl ochranu, kterou má průvodce instalací — druhé spuštění proto naduplikovalo klienty a doklady a skončilo chybou na duplicitní SPZ vozidla, přičemž v databázi zůstala polovičatě vložená data. Nově generátor odmítne běh, pokud pro dodavatele už nějací klienti nebo doklady existují, a celé generování běží v jedné transakci — při jakékoli chybě se tedy nezapíše vůbec nic. Bez DB migrace pro samotnou opravu (evidence sample dat přidává migrace 0118).
+
+## [4.39.0] — 2026-06-23
+
+### Added
+
+- **Sekce Dokumenty přijímá i další typy souborů (např. bankovní výpisy `.gpc`/`.abo`).** Úložiště dokumentů dosud povolovalo jen pevný seznam přípon (PDF, ISDOC, obrázky…) a cokoli mimo něj **tiše zahodilo** — při přetažení ZIPu nebo celé složky s `.gpc` výpisy se sice založily podsložky, ale samotné soubory se nikam neuložily a uživatel nedostal žádné upozornění. Nově je logika obrácená: přijme se **vše kromě spustitelných a skriptových souborů** (`.exe`, `.msi`, `.bat`, `.ps1`, `.sh`, `.php`, `.js`, `.jar`…) a nebezpečných MIME typů. Bezpečnost zůstává zachována — dokumenty se vždy servírují jako příloha s `nosniff` a striktním CSP, takže se v prohlížeči nikdy nevykreslí. Bez DB migrace.
+- **Dokumenty: upozornění na nenahrané soubory.** Pokud se při nahrávání (přímém, ze ZIPu i z přetažené složky) nějaký soubor nepřijme, zobrazí se nově **varování se seznamem souborů a důvodem** (nepodporovaný/spustitelný soubor, příliš velký, …) místo dosavadního tichého „Nahráno". U úloh na pozadí (velký ZIP/složka) přibyl v dokončovací hlášce souhrn „nahráno X, nenahráno Y".
+- **„Skenovat adresář" v Bance se zobrazí jen když je nastavené.** Tlačítko pro dávkový sken adresáře s bankovními výpisy se ukáže jen tehdy, když je v `cfg.php` nastavený existující `bank_import.scan_root`; jinak vedlo jen k chybové hlášce. Bez DB migrace.
+
+### Changed
+
+- **Plánované úlohy (Systém → Plánované úlohy) skryjí nenakonfigurované scany.** Úlohy `cron-bank-scan` a `cron-scan-purchase-inbox` se v přehledu zobrazí, jen když je nastavený jejich zdrojový adresář (`bank_import.scan_root`, resp. `purchase_invoice.inbox_dir`). Bez něj scan jen tiše skipuje, takže nemělo smysl hlásit je jako „nikdy neběžela". Bez DB migrace.
+- **PDF úložiště se dělí do podadresářů (interní).** Archiv PDF přijatých faktur (i import z iDokladu/Fakturoidu) i archivní kopie vydaných faktur dosud ukládaly všechny soubory do jednoho adresáře na dodavatele — při delším provozu by tam narostly tisíce souborů. Nově se přijaté faktury ukládají do **hash-shard** podadresářů (`supplier-{id}/{2 znaky}/…`, zachovává deduplikaci obsahu) a archiv vydaných faktur **po měsících** (`_archive/{RRRR-MM}/`). Existující soubory zůstávají na místě a fungují dál (cesta se čte z databáze), nové jdou do podadresářů — bez migrace a beze změny záloh (zálohují se rekurzivně). Bez DB migrace.
+
+## [4.38.0] — 2026-06-23
+
+### Added
+
+- **Bankovní e-mailová avíza: podpora přeposlaných (FW) zpráv (#161).** Avíza se dají do sběrné schránky **přeposílat** (typicky z firemní pošty), aniž by je systém odmítl hláškou „Pro e-mail nebyl nalezen žádný aktivní parser provider". U přímého avíza poznává banku podle odesílatele, jenže přeposláním se odesílatelem stáváš ty — proto u IMAP účtu přibyla volba **Přijímat přeposlaná (FW) avíza** (ve výchozím stavu vypnutá), která banku rozpozná i z těla e-mailu. Volitelné pole **E-mail přeposílatele** omezí, od koho smí přeposlaná avíza chodit (adresa nebo doména). Funguje pro všechny vestavěné banky (Raiffeisenbank, UniCredit, ČSOB, Fio, Banka CREDITAS) i pro Českou spořitelnu a vlastní regex providery. Migrace 0116 a 0117.
+  - Bezpečnostní poznámka: přeposláním zaniká původní podpis banky (DKIM), takže případné ověření autenticity se vztahuje na přeposílatele, ne na banku; ochranu drží i nadále struktura avíza a povinné mapování cílového účtu na bankovní účet dodavatele.
+
+### Fixed
+
+- **Bankovní avíza: opakované zpracování téhož avíza už nezaloží duplicitní transakci.** Pokud byl u avíza smazán záznam zpracované zprávy a schránka se znovu naskenovala, vznikla pro tutéž platbu další bankovní transakce. Nově se transakce z avíza zakládá idempotentně (podle identifikátoru zdrojové zprávy), takže opakovaný sken už jen znovu vyhodnotí spárování. Bez DB migrace.
+
+### Changed
+
+- **E-mailová avíza jsou v přehledu výpisů odlišena.** Měsíční souhrn avíz nese v seznamu i v detailu nenápadný štítek **„Avíza"** a místo konkrétního data (avíza se sbírají za celý měsíc) zobrazuje **název měsíce**. V detailu se u avíz navíc skryjí boxy se zůstatky a celkovými obraty — měsíční souhrn avíz na rozdíl od nahraného výpisu průběžný zůstatek účtu nenese. Bez DB migrace.
+
+## [4.37.7] — 2026-06-23
+
+### Fixed
+
+- **Bankovní avíza na cizoměnových účtech: měna se nově bere z účtu, ne natvrdo CZK (#160).** Avíza Fio banky „Příjem/Výdaj na kontě" ve svém těle měnu vůbec neuvádějí, takže se u plateb na **cizoměnový účet** (např. EUR) ukládala s měnou **CZK** místo skutečné měny účtu. Důsledkem byly špatně evidované částky a hlavně **neúspěšné párování** — příchozí cizoměnová platba se porovnávala, jako by byla v korunách, takže se nikdy nespustila kurzová (FX) větev a legitimní shody s fakturou se míjely. Měna účtu je přitom v okamžiku importu už známá (účet je vyřešený na záznam v číselníku měn), nově se proto použije jako autoritativní a parserem doplněná CZK zůstává jen krajní záloha. Bez DB migrace.
+  - Pro nápravu už dříve naimportovaných dat slouží jednorázový skript `api/bin/fix-email-notice-foreign-currency.php` (dorovná měnu na výpisech i transakcích a přepočítá klíč měsíčního výpisu). Spouštět nejdřív bez parametru (náhled), pro zápis s `--apply`.
+
+## [4.37.6] — 2026-06-22
+
+### Changed
+
+- **Kniha jízd → „Načíst z faktur": přehlednější seznam.** Modal s fakturami od čerpacích/nabíjecích stanic nově zobrazuje **všechny dosud nespárované faktury, ale u spárovaných jen posledních 10** (dříve se vypisovaly úplně všechny, což u delší historie tankování dělalo zbytečně dlouhý a nepřehledný seznam). Modal má navíc **zavírací křížek vpravo nahoře** a nadbytečné tlačítko „Zavřít" v patičce bylo odebráno. Bez DB migrace.
+- **Odstraněn strop 255 dodavatelů — `supplier.id` rozšířen z `TINYINT` na `INT UNSIGNED` (migrace 0115).** Identifikátor dodavatele (`supplier.id`) a všech 35 navázaných sloupců `supplier_id` byly typu `TINYINT UNSIGNED` s tvrdým stropem 255 záznamů; hostovaná multi-tenant verze by na 256. dodavateli narazila na limit a založení dalšího by selhalo. Migrace rozšiřuje klíč na `INT UNSIGNED` (~4,3 mld) a sjednocuje jeho šířku s ostatními entitními klíči v databázi. Součástí je bezpečné přepojení 36 cizích klíčů (drop → změna typu → obnova), celé idempotentně. Samostatných (self-hosted) instalací s jedním dodavatelem se limit nikdy netýkal, přesto je vhodné na nový formát přejít.
+  - ⚠️ **Doporučujeme aktualizovat mimo pracovní dobu / v servisním okně.** Změna typu sloupce probíhá v MariaDB kopií tabulky (`ALGORITHM=COPY`) a obnova cizích klíčů revaliduje data — u větších tabulek (vystavené i přijaté faktury, klienti, tankování) proto může migrace na okamžik zamknout zápis. Na malých databázích proběhne během několika sekund.
+
+## [4.37.5] — 2026-06-22
+
+### Fixed
+
+- **Bankovní avíza ČS „Odešla platba": e-mail se znovu rozpozná (#158).** Některá avíza České spořitelny přestala procházet hláškou „Pro e-mail nebyl nalezen žádný aktivní parser provider", přestože stejný text vložený ručně do Testu parseru prošel. Příčinou nebyla diakritika v přenosu, ale **dvojí dekódování quoted-printable**: tělo e-mailu už dorazí dekódované (platné UTF-8), ale v marketingové patičce avíza je sledovací odkaz s neúmyslnými sekvencemi „=XX" (`…&id=0729…&source-id=aauesx…`), které opětovné dekódování rozbilo — tím se znevalidnil celý text, ten se pak chybně překlopil jako windows-1250 a diakritika se zdvojila na „zmršené" znaky (`Směr` → `SmÄ›r`), takže detekční vzor nesedl. V Testu parseru uživatel vkládal jen blok transakce bez patičky, proto tam k chybě nedošlo. Nově se opětovné dekódování provede jen tam, kde nerozbije už platné UTF-8 tělo. Bez DB migrace.
+
+## [4.37.4] — 2026-06-22
+
+### Fixed
+
+- **Bankovní avíza: detekce e-mailu odolná vůči diakritice.** Přeposlaná avíza (forward přes jiný server) chodí občas v jiném kódování nebo s rozbitou/chybějící diakritikou. Parser ale poznával e-mail podle vzorů s diakritikou (`Směr platby`, `Variabilní symbol`…), takže stačilo, aby se cestou rozbilo jediné „ě"/„č", a zpracování spadlo s hláškou „Pro e-mail nebyl nalezen žádný aktivní parser provider" — přitom stejný text vložený ručně do Testu parseru prošel. Nově se detekce i vytěžení polí vyhodnotí **tolerantně k diakritice**: vzor se zkusí nejdřív přesně (u čistého avíza se diakritika v datech zachová) a při neshodě znovu nad textem i vzorem sklopeným na ASCII, takže `Směr platby` i `Smer platby` se vyhodnotí stejně. Bez DB migrace.
+- **Matoucí typ parseru „Regex" u vestavěných providerů.** Fio banka se v tabulce parser providerů zobrazovala jako typ „Regex" stejně jako editovatelný regex provider České spořitelny, ačkoli je to vestavěný kódový parser, který se needituje. Nově se Fio zobrazí jako „Fio banka" a jakýkoli další vestavěný parser jako „Vestavěný parser" — typ „Regex" tak mají už jen skutečné uživatelské (editovatelné a duplikovatelné) providery. Bez DB migrace.
+
+### Added
+
+- **Duplikace parser provideru bankovních avíz.** Systémový provider (např. Česká spořitelna) nejde přímo editovat, protože je společný pro všechny. U každého regex provideru je nově tlačítko **Duplikovat**, které vytvoří plně editovatelnou kopii dodavatele — v ní lze doladit vzory (smazat vzor předmětu/těla, zvolnit diakritiku), otestovat přes Test parseru a v mapování účtu na ni přepnout. Bez DB migrace.
+
+## [4.37.3] — 2026-06-21
+
+### Added
+
+- **Import vydaných faktur z uživatelského exportu Pohody (`responsePack`).** Import dokladů (`Nastavení → Import`) uměl dosud jen Pohoda XML v podobě importního balíku (`dataPack`). Nově přijme i **XML vyexportované přímo z Pohody** — uživatelský export vydaných faktur (kořen `responsePack` se seznamem `listInvoice`, faktury v `lst:invoice`), typicky soubor `VydFaktury.xml`. Rozpoznání formátu i kódování Windows-1250 proběhne automaticky; faktury se založí jako vydané (dohledání odběratele podle IČO/ARES, kontrola duplicit podle variabilního symbolu, rekapitulace DPH ze souhrnu dokladu). Bez DB migrace.
+
+## [4.37.2] — 2026-06-20
+
+### Changed
+
+- **Sjednocené akční lišty detailů (vydaná i přijatá faktura, klient, pravidelná fakturace, zakázka).** Přeplácané toolbary (detail vydané faktury jich měl až 12 v jedné řadě) nahradila jedna sdílená **lišta akcí** se třemi úrovněmi: hlavní akce podle stavu dokladu jako plné tlačítko (vystavit → uhradit → upomínka …), podpůrné akce vedle a zbytek v rozbalovacím menu **„Další akce"**. Méně časté, administrátorské a nevratné akce (test odeslání, úprava vystaveného dokladu, storno/dobropis, archivace …) jsou v menu navíc schované pod sbalitelným oddílem **„Pokročilé"**. Dosavadní samostatné **spodní panely akcí byly zrušeny** a jejich tlačítka přesunuta do tohoto menu — žádná akce nezmizela. Na **mobilu** zůstávají inline jen první dvě akce, zbytek je v menu; na desktopu se lišta nezalamuje. Tlačítko menu má vlastní vzhled pro světlý (decentní) i tmavý (výrazný) režim. Bez DB migrace.
+
+## [4.37.1] — 2026-06-20
+
+### Changed
+
+- **Sjednocený vzhled platební oblasti PDF faktury.** QR kód a blok „Bankovní spojení" jsou nově v **jednom podbarveném platebním panelu** (bez samostatného rámečku QR), barevně napojeném na branding dodavatele. Do bankovního spojení přibyl **variabilní symbol** a **název banky** (pokud je znám). U **zaplacené faktury** dostane panel jemný **zelený nádech** a jeho výška se srovná s blokem „Celkem" vpravo. Bloky **Dodavatel/Odběratel** jsou bez rámečků, jen s decentním podbarvením (Odběratel zvýrazněn akcentem palety). Popisek „QR Pay" odstraněn. Bez DB migrace.
+- **Výkaz materiálu u plátce DPH ukazuje souhrn „Celkem bez DPH" i „Celkem s DPH".** V PDF dokladu se u výkazu materiálu plátci nově tisknou obě sumy včetně sazby DPH výkazu; neplátce vidí jako dosud jediné „Celkem". Bez DB migrace.
+
+### Fixed
+
+- **Název banky v PDF se u některých vystavených faktur nezobrazoval.** Faktury vystavené dřív, než se název banky doplnil do číselníku měn, měly v bankovním snapshotu prázdný název a ten přebíjel živá data. Nově se prázdný název (a BIC) doplní z aktuálních dat, pokud jde o **stejný účet** (shodný kód banky / IBAN); historické číslo účtu zůstává ze snapshotu. Bez DB migrace.
+- **Patička PDF: „Krajského soudu v Plzni" se tisklo jako „v P zni".** Při velikosti písma 7,5 pt přebíjel kerning fontu Montserrat pár „Pl" tak, že písmeno „l" vizuálně zmizelo. Opraveno drobným prostrkáním textu spisové značky. Bez DB migrace.
+
+## [4.37.0] — 2026-06-19
+
+### Added
+
+- **Platební příkazy pro přijaté faktury (ABO/KPC, CSV, PDF)** (#150). Z nezaplacených přijatých faktur lze nově hromadně vygenerovat **příkaz k úhradě**. Pro koruny vzniká **ABO (KPC)** soubor pro import do internetbankingu, ostatní měny dostanou **CSV** (s BOM a ochranou proti CSV injection) nebo **PDF na šířku**. Účet plátce se volí podle měny a kandidáti se zobrazují ve dvou opticky odlišených tabulkách (CZK přes ABO vs. ostatní měny přes CSV/PDF). Účet příjemce lze **ověřit proti registru plátců DPH (CRPDPH)** — zveřejněné účty a nespolehlivost plátce, na vyžádání i automaticky — případně ručně doplnit či upravit, zobrazit QR k platbě nebo inline náhled dokladu. Stav „**Předáno k úhradě**" je odvozený příznak (`payment_ordered_at`), ne stav dokladu: má vlastní filtr i badge v seznamu přijatých faktur a při generování příkazu lze zvolit „jen označit" nebo „rovnou označit jako zaplacené" (jinak úhradu potvrdí až párování bankovního výpisu). Historie příkazů se ukládá se snapshotem a jde je znovu stáhnout (CSV/PDF/ABO). Nová kapitola manuálu **§ 20 „Platební příkazy"**. **Vyžaduje DB migraci** (0113: `payment_orders`, `payment_order_items`, `purchase_invoices.payment_ordered_at` + `payment_constant_symbol`, `supplier.abo_client_number`).
+- **Výkaz materiálu vedle Výkazu práce → 2 souhrnné položky na faktuře.** K výkazu faktury lze nově přidat druhý oddíl — **výkaz materiálu** (množství + MJ + cena za MJ místo hodin), který se na fakturu přenese jako druhá souhrnná položka „Materiál" vedle „Práce". Každý výkaz nese **vlastní sazbu DPH** (práce default 21 %, materiál default 12 %) a cena materiálu se zadává v cenové konvenci dokladu (s/bez DPH podle `prices_include_vat`). Materiál se promítá do PDF faktury i do dokladu ke schválení, do schvalovacích e-mailů a do veřejného sledovacího odkazu; „K vyúčtování" = práce + materiál. Editace probíhá v jednom modálním okně se dvěma sbalitelnými sekcemi. Manuál **§ 10.11**. **Vyžaduje DB migraci** (0114: `work_reports` + sazby DPH a souhrn materiálu, nová tabulka `work_report_materials`).
+
+### Fixed
+
+- **Daňové termíny na dashboardu respektují periodicitu DPH** (#156). Sekce „Akce pro tebe" generovala výzvu „DPH + KH za uplynulý měsíc" natvrdo k 25. dni aktuálního měsíce bez ohledu na zdaňovací období dodavatele — čtvrtletní plátci tak uprostřed kvartálu dostávali zavádějící měsíční daňovou akci. Nově se periodicita řeší správně: měsíční plátci beze změny, **čtvrtletní FO** dostanou sloučenou výzvu „DPH + KH za X. čtvrtletí" až po skončení kvartálu, **čtvrtletní PO** mají Kontrolní hlášení měsíčně (§ 101e) odděleně od čtvrtletního přiznání k DPH. Bez DB migrace.
+
+## [4.36.0] — 2026-06-19
+
+### Added
+
+- **Kvartální Kontrolní hlášení pro OSVČ** (#154). Fyzické osoby (OSVČ), které jsou kvartálními plátci DPH, mohou nově podávat **Kontrolní hlášení kvartálně** (§ 101e odst. 2 zákona 235/2004 Sb.) — stejně jako přiznání k DPH. Přepínač Měsíčně / Kvartálně se zobrazí v `Daně → Kontrolní hlášení` tehdy, když daňové nastavení identifikuje typ poplatníka jako FO; právnické osoby musí podávat stále měsíčně (§ 101e odst. 1) a přepínač se jim nezobrazí. Vygenerované XML používá atribut `ctvrt` místo `mesic` ve VetaD. Bez DB migrace.
+- **Kvartální Souhrnné hlášení pro poskytovatele služeb** (#154). Plátci, kteří do EU dodávají výhradně **služby** (kód 22, § 9/1), mohou nově podávat Souhrnné hlášení **kvartálně** (§ 102 odst. 3–4 ZDPH). Přepínač je vždy dostupný; aplikace na kvartální podání upozorní, že kód 20 (dodání zboží) vyžaduje měsíční periodicitu bez ohledu na typ plátce. Vygenerované XML používá atribut `ctvrt` ve VetaD. Bez DB migrace.
+- **Volba data úhrady přijaté faktury** (#155). Tlačítko „Označit jako uhrazené" v detailu přijaté faktury nyní otevírá modální okno s výběrem **data úhrady** (předvyplněno dneškem). Chování odpovídá vystaveným fakturám — datum se zapíše do `paid_at`. Bez DB migrace.
+
+## [4.35.1] — 2026-06-18
+
+### Fixed
+
+- **Aktualizace z UI nefungovala na Windows s PowerShell 7 / jiným adresářem** (#153). Host watcher, který aplikuje upgrade spuštěný z UI (Systém → Aktualizace), spouštěl vlastní update natvrdo příkazem `powershell` (Windows PowerShell 5.1). Na strojích, kde je jen **PowerShell 7 (`pwsh`)**, tak update „neprošel" a musel se spouštět ručně. Watcher nově spustí update **tímtéž PowerShell hostem**, pod kterým sám běží (`pwsh` i `powershell`), zjištěným za běhu. Cesty řeší z umístění skriptu, takže funguje i z jiného adresáře než `C:\inetpub\myinvoice`. Aktualizován i manuál (Scheduled Task i test režim používají `pwsh` a vlastní instalační cestu). Bez DB migrace.
+
+## [4.35.0] — 2026-06-18
+
+### Added
+
+- **Instalace přes Portainer / Dockge (GUI, bez příkazové řádky).** Protože je image veřejný na GHCR, jde MyInvoice nasadit i čistě z webového správce kontejnerů — bez klonování repa, bez SSH, bez `cfg.docker.php`. Nový **`docker-compose.portainer.yml`** je plně 12-factor (vše přes proměnné prostředí), **`portainer-template.json`** přidává do Portaineru one-click App Template a manuál má novou sekci **§ 3.11** (Portainer App Template + ruční Stack, Dockge, HTTPS, GUI aktualizace). Bez DB migrace.
+
+### Fixed
+
+- **Full-ENV deploy přes plain HTTP: přihlašovací cookie se neuložila.** Session cookie se defaultně jmenuje `__Host-myinvoice_session`, což prohlížeč přijme jen přes HTTPS. Při nasazení čistě přes proměnné prostředí (Portainer/Dockge/PaaS) a přístupu přes `http://host:port` se tak nešlo přihlásit a název cookie se přitom nedal přebít přes ENV (šlo jen `cookie_secure`/`samesite`). Doplněn override **`MYINVOICE_SESSION_COOKIE_NAME`**, takže HTTP deploy může použít ne-`__Host-` jméno. Bez DB migrace.
+
+## [4.34.3] — 2026-06-18
+
+### Fixed
+
+- **Průhledné PNG logo mělo v PDF černé pozadí.** Logo nahrané jako PNG s průhledným pozadím se v PDF dokladech (faktura i výkaz víceprací) vykreslovalo s **černým** pozadím, přestože v náhledu administrace i v e-mailech bylo v pořádku. Příčina je v knihovně mPDF (8.3.1 na PHP 8.5), která u truecolor PNG s alfa kanálem neaplikuje masku průhlednosti a místo ní vykreslí barvu „pod" průhlednými pixely — a editory tam typicky ukládají černou. Nově se logo pro PDF splácne na **bílé pozadí** (doklady mají bílý podklad, takže výsledek je vizuálně shodný s průhledným logem); e-maily dál používají průhledné PNG. Self-healing i pro již nahraná loga, bez DB migrace. **Tip: nahrávejte logo raději ve formátu SVG** — to se v PDF vykresluje vektorově (ostře v libovolné velikosti) a tímto problémem netrpí. (#152)
+
+## [4.34.2] — 2026-06-17
+
+### Fixed
+
+- **Špatný variabilní symbol při importu výpisu GPC/ABO (Fio i ostatní banky).** U plateb, jejichž **variabilní symbol končí nulou**, se při importu bankovního výpisu ve formátu GPC poslední nula (nebo více nul) ztrácela — např. VS `260100010` se uložil jako `26010001`. Příčina: pole VS je v GPC zleva doplněné nulami a parser je ořezával z **obou** stran, takže spolu s vedoucími (výplňovými) nulami zmizely i **významné koncové** nuly. Nově se strhávají pouze vedoucí nuly. Stejná oprava se týká i **konstantního** a **specifického** symbolu. Bez DB migrace. (#150)
+
+## [4.34.1] — 2026-06-17
+
+### Changed
+
+- **Odkazy „Podpořte autora" a „Chcete jinou funkci?" v patičce jsou nově v brand barvě.** Dřív splývaly šedou s ostatním textem patičky — teď jsou v primární barvě a tučnější, takže jsou výraznější a lépe viditelné. Čistě vizuální úprava.
+
+### Fixed
+
+- **Po přeskočení dodavatele v úvodním nastavení nešlo založit klienta.** Když uživatel v onboardingu zaškrtl „Vyplnit dodavatele později" a pak šel ručně založit klienta, formulář i přes vyplnění všech povinných polí skončil na nicneříkající hlášce **„Validace selhala"**. Příčina: bez dodavatele neexistují žádné měny (číselník měn se zakládá per-dodavatel), takže se k formuláři nedostala výchozí měna a celá aplikace je beztak vázaná na existenci dodavatele. Nově aplikace tento stav rozpozná a místo padajícího formuláře **nasměruje na vytvoření prvního dodavatele** — na přehledu se zobrazí výzva s tlačítkem a zakládací formuláře se do té doby zpřístupní až po jeho vytvoření. Backend navíc u API vrací jasnou hlášku „nejdříve vytvořte dodavatele" místo obecné chyby validace. Bez DB migrace. (#151)
+- **Párování plateb z e-mailových avíz České spořitelny — šablona „Odešla platba".** Novější avíza ČS uvádějí v bloku transakce řádky **„Z účtu:"** (odesílatel) a **„Na účet:"** (příjemce) místo dřívějších „Číslo účtu:" / „Číslo účtu protistrany:" — kvůli tomu se nenačítal **účet protistrany**. Parser teď tyto řádky rozpozná a podle **směru platby** (odchozí/příchozí) správně přiřadí, která strana je vlastní účet a která protistrana. Testovací nástroj parserů (*Nastavení → Bankovní účty → Parser provideři → test*) navíc u bank, které datum platby v těle neuvádějí (ČS, Fio), simuluje doručený e-mail aktuálním datem — dřív hlásil chybějící povinné pole `posted_at`, i když by avízo v ostrém provozu prošlo. Bez DB migrace. (#147)
+
+## [4.34.0] — 2026-06-17
+
+### Added
+
+- **Automatické doplnění názvu banky podle kódu (číselník ČNB).** Při zadávání bankovního účtu (v počátečním nastavení i ve správě účtů) se po vyplnění **kódu banky** sám doplní její **název** podle oficiálního číselníku platebního styku ČNB (např. `0800` → *Česká spořitelna*). Ručně přepsaný název zůstává — automatika ho přepíše jen když je pole prázdné nebo název sám pochází z číselníku. Bez DB migrace.
+- **Tlačítko „Detail klienta" v detailu zakázky.** Z detailu zakázky vede přímý odkaz na kartu klienta; dostupné i v režimu jen pro čtení.
+
+### Fixed
+
+- **Dávkový import přijatých faktur ve formátu `.isdocx` nově ukládá i originální PDF.** Při importu přes *Import → Přijaté faktury* se z balíčku `.isdocx` (ZIP s `.isdoc` + PDF + `manifest.xml`) dosud načetla jen strukturovaná data, ale **přiložené PDF se zahazovalo** — faktura tak zůstala bez náhledového dokladu. Nově se čitelné PDF archivuje k faktuře stejně jako u nahrání přes dropzone/AI a u skenu inboxu (sjednoceno do jednoho sdíleného úložiště). Týká se i přímo nahraného PDF/A-3 s vloženým ISDOC. Bez DB migrace. (#149)
+
+## [4.33.0] — 2026-06-16
+
+### Added
+
+- **Daňový optimalizátor: hlídání limitu sociálního pojištění u vedlejší činnosti.** Při zaškrtnuté **vedlejší činnosti** přibude v teploměru běžícího roku řádek, který hlídá blízkost k **rozhodné částce pro povinnou účast na důchodovém (sociálním) pojištění** (2025 = 111 736 Kč, 2026 = 117 521 Kč dle ČSSZ). Pod ní se z vedlejší SVČ sociální pojištění neplatí. Na rozdíl od ostatních limitů se měří proti **projektovanému zisku** (příjmy − výdaje dle paušálu / skutečných výdajů), ne proti příjmu — ukáže, zda zisk zůstane pod limitem, nebo limit překročíš a v kterém měsíci. Částku lze pro daný rok upravit v *Číselníky → Daňové konstanty*. Bez nové DB migrace. (#134)
+
+### Fixed
+
+- **Kontrolní hlášení a přiznání DPH u pořízení z EU / reverse charge — správné zaokrouhlení a řádky.** U dokladů v cizí měně se samovyměřená daň (pořízení zboží z JČS, přijetí služby, dovoz) nově počítá **ze základu přepočteného na Kč × sazba** (§ 37/1) místo z cizoměnové daně přenásobené kurzem. Dvojí zaokrouhlení dřív rozcházelo daň v **oddílu A.2 kontrolního hlášení** oproti přiznání o haléře (např. základ 100,05 € × kurz 25,00 = 2 501,25 Kč → daň 525,26 Kč, ne 525,25 Kč jako zaokrouhlení v eurech). V **přiznání (DPHDP3)** se navíc opravil řádek **43** (nárok na odpočet ze samovyměřených plnění) — plnil se do atributů řádku 45 (korekce odpočtu dle §75/§77/§79), takže portál EPO mohl hlásit chybu — a doplnil se chybějící součtový řádek **46** (odpočet daně celkem). Ověřeno proti referenčnímu schématu i výstupu EPO MF ČR.
+
+## [4.32.0] — 2026-06-16
+
+### Changed
+
+- **Docker image je nově alpine/nginx — ~3× menší (~92 MB místo ~293 MB) a výrazně úspornější na RAM.** Běží na `php:8.5-fpm-alpine` + nginx + php-fpm místo Debian/Apache. Funkčně je identický (stejné API i chování); `/data` a databázové volume jsou plně kompatibilní, takže **existující instalace se zmigruje sama při příštím `cmd/docker-update`** (pull `:latest`) bez ztráty dat. Idle spotřeba RAM aplikace klesla na ~26 MB. Debian/Apache varianta zůstává v repu jako fallback (`Dockerfile`); pro rollback na GHCR pinni starší tag (`≤ v4.31.0`).
+- **MariaDB a PHP-FPM doladěné pro hosting s málo RAM/diskem.** `performance_schema=OFF` ušetří ~100–200 MB RAM, InnoDB redo log zmenšen z 96 na 48 MB (~50 MB méně na disku), php-fpm jede v režimu `ondemand`. Vše laditelné přes `.env`: `DB_INNODB_BUFFER_POOL`, `DB_INNODB_LOG_SIZE`, `PHP_FPM_MAX_CHILDREN`, `OPCACHE_MEMORY`.
+- **Všechny PDF výstupy (faktury, přijaté faktury, Kniha DPH, kniha jízd i uživatelský manuál) sjednoceny na fonty Montserrat + JetBrains Mono.** Manuál dříve používal DejaVu — nově je vše brandově konzistentní. DejaVu Sans zůstává jen jako fallback pro symboly (✓ ✗ ⚠). Velikost přibalených mPDF fontů v image klesla z 93 MB na 9 MB.
+- **Spolehlivější `cmd/docker-update`, `docker-install`, `docker-ghcr`.** Režim (stažení z GHCR vs lokální build) se nově detekuje z image běžícího kontejneru, ne z přítomných compose souborů — odstraňuje případy, kdy update u GHCR nasazení omylem stavěl image lokálně. `docker-install` preferuje stažení hotového image z GHCR. Přebití přes `MYINVOICE_UPDATE_MODE` / `MYINVOICE_INSTALL_MODE`.
+
+### Added
+
+- **`cmd/docker-prune-images.{sh,ps1}`** — detekce a úklid zastaralých Docker image MyInvoice (chrání běžící i v compose referencované). `docker-update` po sobě navíc uklidí osiřelé (dangling) vrstvy.
+- **Kniha jízd: rychlé akce** — přidání jízdy/tankování přímo z topbaru a z položky „+" v hlavním menu.
+
+### Fixed
+
+- **Náhled na výkaz práce** — logo dodavatele v hlavičce náhledu a vynucený světlý režim pro čitelnost; doplněna kapitola manuálu (§14.7) a robustnější tlačítko v e-mailu se schvalováním výkazu.
+
+## [4.31.0] — 2026-06-15
+
+### Added
+
+- **Náhled na výkaz práce — sdílení rozpracovaných výkazů přes odkaz.** V detailu klienta i zakázky je nové tlačítko **„Poslat odkaz na sledování výkazu práce"**. Klient dostane trvalý odkaz, na kterém vidí vždy **aktuálně otevřené (nevyfakturované) výkazy práce** — počet hodin i průběžnou částku k vyúčtování — ještě než z nich vznikne faktura. U odkazu na klienta se zobrazí všechny jeho otevřené výkazy, u odkazu na zakázku jen výkazy té zakázky. Náhled se aktualizuje sám. Při prvním otevření se návštěvník ověří **jednorázovým kódem z e-mailu** (povolené jsou e-maily klienta, u zakázky i fakturační e-maily zakázky); po ověření si ho prohlížeč zapamatuje (180 dní) a kód už nevyžaduje. **Přihlášený uživatel (admin/účetní) vidí náhled rovnou** bez kódu. Odkaz lze kdykoli zneplatnit. Přibyly dvě e-mailové šablony (odkaz + ověřovací kód), editovatelné v *Nastavení → E-maily*. (migrace 0112)
+
+### Changed
+
+- **Všechna generovaná PDF jsou nově ve formátu PDF/A-3b (archivní standard).** Faktury, přijaté faktury, výkazy práce, Kniha DPH i kniha jízd se generují jako konformní **PDF/A-3b** (ISO 19005-3) pro dlouhodobou archivaci — vložené fonty, barevný profil **sRGB** (CMYK obrázky se převedou automaticky), strukturovaná ISDOC příloha zůstává. **Elektronický podpis (PAdES) archivní konformitu zachová.** Ověřeno referenčním ISO validátorem veraPDF. (PR #143)
+
+## [4.30.1] — 2026-06-15
+
+### Changed
+
+- **Web dodavatele v patičce dokladu se zobrazuje jako čistá doména.** Z odkazu zmizí `http(s)://` i koncové lomítko (např. `https://mywebdesign.cz/` → `mywebdesign.cz`) a doména je prokliknutelná na plnou https adresu — na faktuře i výkazu práce. Sjednoceno s patičkou e-mailů.
+
+## [4.30.0] — 2026-06-15
+
+### Changed
+
+- **Nový vzhled písma ve všech PDF dokladech.** Faktury, přijaté faktury, výkazy práce, Kniha DPH i kniha jízd se nově sázejí fontem **Montserrat** (text — výraznější, modernější, brandový) a čísla (částky, variabilní symboly, čísla účtů, datumy) fontem **JetBrains Mono** s tabulkovými číslicemi, takže se hodnoty ve sloupcích pěkně zarovnají. Nahrazuje dosavadní DejaVu Sans. Oba fonty jsou volně licencované (SIL OFL) a vkládají se přímo do PDF — dokument vypadá stejně na každém zařízení i tiskárně.
+- **Přepracovaná patička dokladu.** Podpis dodavatele (název firmy · web · e-mail) je nově přehledný blok — název firmy v barvě značky nad jemnou oddělovací linkou a zápis v obchodním rejstříku jako drobný „fine print" pod tím. Sjednoceno mezi fakturou a výkazem práce; respektuje firemní barvu (branding).
+- **Patička s autorstvím systému.** Pata dokladů i e-mailů nově uvádí „Používá fakturační systém **MyInvoice.cz od MyWebdesign.cz**" s odkazem na obě stránky.
+
+## [4.29.0] — 2026-06-15
+
+### Added
+
+- **Kniha jízd nově umí elektromobily i plug-in hybridy.** U vozidla zvol druh paliva *Elektro* nebo *Hybrid* — nabíjení se eviduje v **kWh** místo litrů a spotřeba se počítá v **kWh/100 km**. U plug-in hybridu se palivo (litry) a elektřina (kWh) sledují **odděleně** a v ročním souhrnu se zobrazí dvě spotřeby vedle sebe (litry a kWh se nikdy nesčítají do jedné). Ruční záznam tankování má přepínač jednotky l/kWh, který se předvyplní podle vozidla. Beze změny databáze.
+- **Rozpoznávání přijatých faktur nově zahrnuje nabíjení.** Příznak dodavatele „Benzínka" se rozšířil na **„Čerpací / nabíjecí stanice"** — faktury od provozovatelů nabíjení (ČEZ, PRE, E.ON, Ionity…) účtované v kWh se vytěží stejným tlačítkem *Načíst z faktur* jako tankování a uloží se jako nabíjení v kWh navázané na vozidlo. Roční souhrn a jeho XLSX/PDF export dostaly sloupce *Nabito (kWh)* a *kWh/100 km*; orientační odhad tachometru u nabíjení počítá s elektrickou spotřebou.
+
+## [4.28.1] — 2026-06-15
+
+### Fixed
+
+- **Po aktualizaci přestalo fungovat menu / přechod na jiné stránky (Docker/Apache).** Prohlížeč si držel v cache starou `index.html`, která odkazovala na JS/CSS chunky se starým hashem — ty po updatu na novou verzi už na serveru neexistovaly, takže lazy-loaded stránky (klienti, zakázky, schvalování, daňová přiznání…) hlásily v konzoli „Failed to fetch dynamically imported module". `index.html` se nově servíruje s `Cache-Control: no-cache` (hashed assety zůstávají `immutable`), takže si prohlížeč po každém nasazení vyzvedne aktuální mapu chunků. IIS (`web.config`) to už řešil; chybělo to jen v `.htaccess`. (issue #140)
+- **Health endpoint `/api/health` hlásil natvrdo verzi `0.1.0`.** Nově vrací skutečnou verzi aplikace ze souboru `VERSION`.
+
+### Added
+
+- **Generátor ukázkových dat doplňuje i knihu jízd.** Po čistém setupu (`api/bin/sample.php` / setup wizard) přibude jedno firemní auto, 15 jízd (služebních i soukromých, se spojitě navazujícím tachometrem) a 6 tankování — pro rychlé vyzkoušení modulu Kniha jízd.
+
+## [4.28.0] — 2026-06-15
+
+### Fixed
+
+- **Přijaté služby ze zahraničí v režimu přenesení daňové povinnosti (reverse charge).** Služby od osob neusazených v tuzemsku (zahraniční dodavatelé bez české registrace k DPH) se importovaly chybně — buď jako „dovoz zboží" (ř. 7), nebo „bez nároku na odpočet", čímž úplně vypadly z přiznání i z vykázaného obratu. Nově se správně samovyměří jako přijetí služby podle § 9 odst. 1 ZDPH (ř. 12/13, resp. ř. 5/6 u EU) a uplatní zrcadlový nárok na odpočet (ř. 43). Daňový dopad je nulový (daň na výstupu = odpočet) — opravuje se zařazení na správné řádky výkazu a zahrnutí dokladů.
+- **Kniha DPH: „Výsledná DPH" nově sedí s přiznáním.** Samovyměřená daň u reverse charge se ve výsledné bilanci chybně načítala na stranu odpočtu, čímž ji podhodnocovala. Nově se bilance sčítá podle čísla řádku DPHDP3 (samovyměření na výstupu, zrcadlový odpočet na vstupu), takže se reverse charge korektně vyruší.
+- **Export do Pohody: ořez textu položky na 90 znaků.** Delší popis položky překračoval limit XSD (`maxLength`) a export neprošel validací.
+
+### Added
+
+- **Rozlišení přijaté služby z EU (ř. 5/6) a ze 3. země / od neusazené osoby (ř. 12/13).** Číselník DPH klasifikací dostal samostatný kód pro přijetí služby z jiného členského státu vedle služby ze 3. země. Importní auto-klasifikace nově u zahraničního dodavatele s nulovou sazbou defaultuje na *službu* (nejčastější případ – digitální předplatná), ne na dovoz zboží. (migrace 0111)
+- **Nástroj pro opravu historických dokladů** `api/bin/backfill-foreign-reverse-charge.php` — dohledá zahraniční reverse-charge doklady naimportované se špatným zařazením (špatný řádek, chybějící odpočet, fiktivně vyčíslená česká DPH u dodavatele bez CZ registrace) a opraví je. Idempotentní; výchozí režim je náhled (dry-run), zápis až s `--apply`, rozsah lze omezit obdobím (`--from`/`--to`).
+
+## [4.27.3] — 2026-06-14
+
+### Fixed
+
+- **Tankování z detailních faktur (Axigon) doplní litry.** U staršího „zhuštěného" formátu výpisu nešlo z druhé strany spolehlivě rozdělit množství, takže tankování se načetlo bez litrů. Nově se litry (a jednotková cena) doplní z položek faktury (první strana) — u jedné transakce přesně, u více se úhrn rozdělí poměrně dle částky. Datum tankování se bere z detailu, jinak z DUZP faktury.
+
+### Added
+
+- **Hromadné doplnění litrů u dříve načtených tankování** — tlačítko *Vytěžit historii* nově projede i už zpracované faktury, kterým chybí litry, a doplní je z položek. Každá faktura se zkusí nejvýše jednou (když litry nejsou ani v položkách, příště se přeskočí). *Rozpoznat znovu* doplní litry u konkrétní faktury.
+- **Orientační stav tachometru z knihy jízd.** Když tankování nemá vlastní stav tachometru, odhadne se z jízd téhož vozu. Heuristika rozliší tankování na začátku vs. konci jízdy podle času (je-li k dispozici), jinak podle spotřeby. Odhad se zobrazí (placeholder v editaci) i v exportu (s ≈), neukládá se.
+
+### Changed
+
+- **Export tankování na šířku (A4) s bohatšími sloupci** — přibyly *Jednotková cena*, *Cena bez DPH* a *Tachometr* (XLSX i PDF).
+
+## [4.27.2] — 2026-06-14
+
+### Changed
+
+- **Sjednocený toolbar v Knize jízd a Tankování.** Akční tlačítka (Export, Import, Nový záznam, Načíst z faktur) jsou nově uvnitř filtr-boxu zarovnaná doprava — filtry vlevo, akce vpravo v jednom ohraničeném panelu (na mobilu se zalomí pod sebe).
+
+## [4.27.1] — 2026-06-14
+
+### Fixed
+
+- **Kniha jízd: role „jen čtení" viděla zápisová tlačítka.** V záložkách Automobily, Kniha jízd, Tankování a Kategorie cest se uživateli s rolí *readonly* zobrazovala tlačítka „Nový/Nové…", Import, Upravit, Smazat, „Načíst z faktur" i „Vytěžit historii", přestože je server (RBAC) stejně odmítal. Nově je UI skrývá — readonly má jen pohled a exporty (XLSX/PDF zůstávají dostupné).
+
+### Added
+
+- **Našeptávání míst „Odkud" / „Kam"** v novém záznamu jízdy — pole nabízejí dříve zadaná místa (stejně jako už účel cesty).
+- **Souhrny: druhý graf „Kumulativní km YTD".** Vedle sloupcového grafu najetých km po měsících přibyl čárový graf s nabíhajícím součtem km od začátku roku, letošní vs. minulý rok (styl jako *Kumulativní zisk YTD* na CRM dashboardu).
+
+### Changed
+
+- **Sjednocení vzhledu filtrů.** Filtry v Knize jízd a Tankování jsou nově v ohraničeném boxu jako v ostatních přehledech (faktury).
+- **Manuál: kapitoly Dokumenty a Kniha jízd dostaly v nadpisu pořadové číslo** (25., 26.) — sjednoceno se zbytkem manuálu.
+
+## [4.27.0] — 2026-06-14
+
+### Added
+
+- **Kniha jízd (nový modul pod *Dokumenty*).** Kompletní daňová evidence vozidel, jízd a tankování na pěti záložkách:
+  - **Automobily** — číselník vozidel (SPZ, značka/model, typ paliva, počáteční stav tachometru, výchozí vozidlo). Auto s navázanými jízdami nebo tankováním nelze smazat (chrání historii).
+  - **Kniha jízd** — evidence jízd (datum, čas, odkud→kam, účel, tachometr od/do, ujeté km, kategorie). Tachometr zahájení se předvyplní posledním známým stavem, ujeté km a koncový stav se dopočítávají obousměrně, účel cesty našeptává dříve zadané hodnoty. **Import z CSV i XLSX** (mapování hlaviček CZ/EN, dopočet vzdálenosti, zakládání chybějících kategorií, dry-run náhled), **export do XLSX a PDF**.
+  - **Tankování** — ruční záznam nebo **automatické vytěžení z přijatých faktur** od dodavatelů označených jako „benzínka". Detailní výpisy **Axigon** se rozpoznávají interním parserem (jednotlivá tankování, místo, množství, částka); na ostatní formáty a starší zhuštěné výpisy navazuje **AI fallback** (BYOK Anthropic klíč), s posledním záchytem v podobě souhrnného záznamu. Architektura parserů je rozšiřitelná — další tankovací společnost = nová třída, beze změny zbytku. Faktura se vytěžuje **jen jednou, ale i zpětně** (jednorázové vytěžení historie), idempotentně bez duplicit.
+  - **Souhrny** — daňové a účetní přehledy za rok: poměr služebních/soukromých km (krácení), roční stav tachometru **počítaný z jízd**, spotřeba l/100 km, kontrola návaznosti tachometru (s detailem skoků), informativní srovnání s paušálem na dopravu a **graf najetých km po měsících proti minulému roku**. Export do XLSX a PDF.
+
+  Tankování je čistě evidenční vrstva nad přijatou fakturou — náklad i DPH účtuje faktura, kniha jízd je jen rozpadá na jízdy a vozidla, takže nevstupuje do žádných statistik ani daňových výstupů dvakrát. Modul je dostupný i přes veřejné REST API (`/api/v1/logbook/*`). Účetní má plný přístup, role „jen čtení" vidí a exportuje.
+
+## [4.26.2] — 2026-06-14
+
+### Fixed
+
+- **Cizoměnová přijatá faktura v Pohoda XML měla souhrn `homeCurrency` v měně dokladu místo v CZK.** Tuzemský souhrn má být vždy v korunách, ale u přijatých faktur (které nemají předpočítanou CZK rekapitulaci jako vydané) nesl částky v cizí měně označené jako CZK. Nově se přepočtou kurzem na CZK. Cizoměnový blok `foreignCurrency` (měna, kurz, celková částka) byl v pořádku už předtím. **Vydaných faktur se to netýkalo** — ty mají CZK rekapitulaci počítanou kurzem ČNB po jednotlivých sazbách.
+
+## [4.26.1] — 2026-06-14
+
+### Fixed
+
+- **Dokončení opravy exportu přijatých faktur (návaznost na 4.26.0).** Rekapitulace DPH se mezi databází a exportérem klíčovala odlišně (`vat_rate`/`without_vat` u přijatých vs. `rate`/`base` u vydaných), takže souhrn v Pohoda XML (`homeCurrency`) i ISDOC (`TaxTotal` / `LegalMonetaryTotal`) u přijatých faktur vycházel **nulový** a klasifikace DPH spadla na `UNX` / `nonSubsume` (osvobozeno) místo skutečné sazby. Nově se rozpis přemapuje na kanonický tvar — souhrn i rekapitulace nesou správné základy, daň i sazby. **Vydaných faktur se tento problém netýkal** (jejich rozpis byl klíčovaný správně).
+- **Členění DPH u přijatých faktur.** Pohoda export už přijaté faktuře nevnucuje výstupní (uskutečněné) členění DPH typu `UDA5` — to je nejen špatný směr (u přijaté faktury jde o vstupní DPH / nárok na odpočet), ale i kód specifický pro konkrétní instalaci Pohody. Posílá se jen typ plnění (`inland` / `nonSubsume`) a správné členění pro agendu *přijatá faktura* doplní Pohoda. U zálohové/proforma faktury se `classificationVAT` neposílá vůbec (schéma ho pro zálohy nepoužívá).
+- **Evidenční číslo a variabilní symbol přijaté faktury v Pohodě.** Přijatá faktura už nevnucuje číslo dokladu dodavatele do naší číselné řady (`numberRequested` s `checkDuplicity` → import padal na duplicitě, navíc u nečíselného čísla šlo o špatný typ pole) — interní číslo přidělí Pohoda z agendy přijatých faktur. Variabilní symbol se navíc normalizuje na číselný tvar (max 10 číslic, stejně jako pro banku a QR), aby prošel platebním stykem. Doplněn integrační test exportu přijatých faktur nad reálnými daty (XSD validace + nenulová rekapitulace).
+
+## [4.26.0] — 2026-06-14
+
+### Fixed
+
+- **Export přijatých faktur do Pohoda XML byl nevalidní vůči oficiálnímu schématu Stormware a konektory ho odmítaly.** Přijatá faktura se exportovala jako *vydaná* — `invoiceType` byl `issuedInvoice` místo `receivedInvoice` a v `partnerIdentity` byl uveden příjemce (vaše firma) místo dodavatele. Hromadný export navíc obaloval každou fakturu do vlastního `<dataPack>`, takže uvnitř `<dataPackItem>` vznikal zanořený `<dataPack>`. Nově se přijaté faktury exportují korektně (`receivedInvoice` / `receivedAdvanceInvoice` / `receivedCreditNotice`, partner = dodavatel) a celé období je v jednom plochém `<dataPack>` s jednou položkou na fakturu.
+- **Rekapitulace DPH a souhrnné částky v Pohoda i ISDOC exportu přijatých faktur byly nulové.** Adaptér přijaté faktury nepředával rozpis DPH ani součty, takže `invoiceSummary` (Pohoda) i `TaxTotal` / `LegalMonetaryTotal` (ISDOC) vycházely prázdné. Nově nesou skutečné hodnoty.
+- **Pohoda export (vydaných i přijatých faktur) neprocházel XSD validací kvůli měnovým blokům souhrnu.** `homeCurrency` obsahoval nepovolený `priceSum` a zaokrouhlení `round` jako prostou hodnotu (schéma vyžaduje strukturu `priceRound`); `foreignCurrency` nesl per-sazbové mezisoučty, které do něj nepatří. Opraveno. Daňový doklad k přijaté platbě se navíc už neexportuje s neexistujícím typem `issuedTaxDocument`, ale jako běžná vydaná faktura (`issuedInvoice`).
+
+### Added
+
+- **Validace exportu proti oficiálním schématům.** Do repozitáře přibyla schémata Pohoda (`api/xsd/pohoda/`) a sada testů, které generované XML pro vydané i přijaté faktury validují proti `invoice.xsd` (Pohoda) a `isdoc-invoice-6.0.2.xsd` (ISDOC).
+
+## [4.25.0] — 2026-06-12
+
+### Security
+
+- **API tokeny (PAT) jsou nově omezené jen na veřejné API.** Osobní přístupový token dosáhne pouze na dokumentovaný veřejný subset `/api/v1/*` (faktury, klienti, přijaté faktury, dokumenty, reporty, číselníky …) — pokus o interní nebo administrátorské endpointy (`/api/admin/*`, správa uživatelů a tokenů, citlivá nastavení podpisů / brandingu / IMAP) vrátí `403 token_endpoint_forbidden`, a to i u tokenu vytvořeného administrátorem. Případně uniklý token tak nedává přístup k celému účtu, ale jen ke čtení/zápisu veřejných dat v rozsahu svého scope. Výchozí scope nově vytvořeného tokenu je navíc `read` (dříve `read_write`) — princip nejmenšího oprávnění.
+- **Zpřísnění rolí (RBAC) na čtení.** Dosud procházel přes middleware každý požadavek GET pro všechny role a ochranu administrátorských endpointů zajišťovala pouze kontrola uvnitř konkrétní akce. Nově middleware povoluje GET jen na vyjmenované datové a exportní skupiny a administrátorské endpointy i citlivá nastavení blokuje už na vstupu (obrana do hloubky proti případné budoucí chybě v jednotlivé akci).
+- **Veřejné schvalování výkazu je odolné proti souběhu a zahlcení.** Rozhodnutí (schválit / zamítnout) je nově atomické — dva souběžné požadavky se stejným odkazem už nemohou fakturu vystavit a odeslat dvakrát. Veřejné schvalovací endpointy mají navíc limit počtu požadavků na IP adresu.
+- **Drobná zpevnění (defense-in-depth):** stahování příloh a archivních PDF posílá `X-Content-Type-Options: nosniff` a restriktivní CSP; diagnostika v `/api/health` (včetně upozornění na klíč šifrování) je nově jen pro přihlášené; redakce tajemství v nastavení dodavatele pokrývá i případné budoucí sloupce; ošetření neznámé velikosti při nahrávání bankovních výpisů; escapování zástupných znaků (`%`, `_`) ve fulltextovém hledání dokumentů; `LIBXML_NONET` při parsování odpovědi z registru plátců DPH; ověření vlastnictví cílové entity při propojování dokumentu.
+
+### Changed
+
+- **Účetní (role „účetní") může nově plně spravovat přijaté faktury** přes API (vytváření, úpravy, položky, PDF, přechody stavu, párování záloh) — dosud kvůli chybějícímu pravidlu v RBAC tyto operace propadaly do administrátorského omezení.
+
+## [4.24.0] — 2026-06-12
+
+### Added
+
+- **Systémový parser e-mailových avíz Fio banky (#58).** Avíza *„Fio banka - prijem/vydaj na konte"* od `automat@fio.cz` se nově zpracovávají automaticky jako u ostatních podporovaných bank — bez jakékoli konfigurace, stačí v *Nastavení → Bankovní avíza* namapovat účet. Parser řeší specifika Fio avíz: tělo neobsahuje datum platby (bere se z hlavičky e-mailu) ani měnu (výchozí CZK; uvedený kód měny se respektuje), směr platby určuje text *„Příjem/Výdaj na kontě"* (výdaje se evidují se záporným znaménkem, takže se nepárují proti pohledávkám) a číslo účtu bez kódu banky se doplní o `/2010`. Vytěžuje se variabilní symbol, protiúčet, konstantní symbol i zpráva příjemci; odesílatel se ověřuje proti doméně `fio.cz` (ochrana proti spoofingu subdoménou).
+
+## [4.23.0] — 2026-06-12
+
+### Added
+
+- **Částečné úhrady faktur a evidence plateb (#89).** Každá vydaná i zálohová faktura může mít **více evidovaných plateb** (splátky, více převodů, e-mailová avíza). V detailu je nový box **Platby** (datum, částka, zdroj, reference, mazání) a v liště akcí tlačítko **Částečná úhrada**; stávající **Označit zaplacené** zůstává jako zkratka „platba na celý zbytek" (plná zpětná kompatibilita, vč. API `mark-paid`). Stav úhrady ukazují nové badge **Částečně uhrazeno** a **Přeplaceno**; částečně uhrazená faktura zůstává pohledávkou se sníženým zůstatkem — přehledy (po splatnosti, aging, cashflow, CRM), upomínky, e-maily, **QR platba i PDF** (nový řádek *Uhrazeno / Zbývá uhradit*) počítají vždy jen se zbývající částkou. Bankovní párování (výpisy i e-mailová avíza) nově eviduje **N:1** — částečná platba se shodným variabilním symbolem se zaeviduje automaticky a další převody se přičítají; doplatek zálohy, ke které už existuje finální doklad, se správně připíše finálu. Veřejné REST API: `GET/POST /api/v1/invoices/{id}/payments`, `DELETE …/payments/{id}`.
+- **Daňový doklad k přijaté platbě u zálohových faktur (§ 28 odst. 2 ZDPH).** K (částečné) platbě zálohové faktury plátce DPH vystaví **daňový doklad k přijaté platbě** s DUZP = den přijetí úplaty — automaticky jako koncept při bankovním spárování, nebo na klik (modal Částečné úhrady / box Platby). DPH se počítá **shora koeficientem (§ 37)** a platba se rozdělí mezi sazby DPH zálohy poměrně; doklad se čísluje v řadě faktur a do **DPH přiznání, kontrolního hlášení i Knihy DPH** vstupuje v měsíci platby. Finální vyúčtování pak ke zdaněným platbám generuje **záporné odpočtové řádky (§ 37a)** — daní se jen zbytek, nikdy nic dvakrát (hlídáno oboustrannými pojistkami: daňový doklad nelze vystavit k záloze s existujícím finálem a ruční párování zálohy s vystavenými doklady k platbě je blokované). Vyúčtovat lze i částečně uhrazenou zálohu. U neplátce DPH a přenesené daňové povinnosti se doklad nevystavuje (u RC se záloha nedaní). Export: ISDOC `DocumentType 5` (daňový zálohový list), Pohoda `issuedTaxDocument`. Daňová správnost je pokrytá novým integračním testem (DPH/KH/Kniha napříč obdobími: součet daňového dokladu a finálu = přesně původní základy a daně).
+
+### Fixed
+
+- **CRM přehledy pohledávek (aging, týdenní cashflow) nadhodnocovaly dluh** — sčítaly celkovou částku dokladu místo zbývajícího dluhu a počítaly i finální doklady plně kryté zálohou (částka k úhradě 0). Nově sčítají skutečný zůstatek.
+- **Finální doklad vytvořený bankovním spárováním zálohy má DUZP = datum platby z výpisu** (dřív datum vytvoření konceptu) a výše odpočtu zálohy při ručním párování vychází ze **skutečně přijatých plateb**, ne z celkové částky zálohy.
+- **Popup editoru výkazu práce je použitelný na mobilu** — položky se na malých displejích zobrazují jako karty (jako položky faktury v detailu) s číselnou klávesnicí pro hodiny/sazbu; tlačítka „Přidat řádek" sjednocena se stylem editoru faktury.
+
+## [4.22.0] — 2026-06-11
+
+### Added
+
+- **Podpora formátu ISDOCX (ISDOC Package) ve všech importech (#136).** ISDOCX je ZIP balíček, do kterého řada účetních systémů zabaluje strukturovaný **ISDOC** i **čitelné PDF** faktury najednou. Dosud ho importy neuměly rozbalit a tiše spadly na AI extrakci nebo přeskočení. Nově ho přijmou **všechny** cesty: hromadný import (*Importy → Přijaté i Vystavené*), AI extrakce (*Externí integrace → AI*), nahrání faktury přímo v editoru přijaté faktury (drag & drop) i automatický **sken inbox** adresáře. Z balíčku se ISDOC vytáhne **deterministicky (zdarma, bez AI)** a vytvoří draft faktury, čitelné PDF se uloží pro náhled. Hlavní ISDOC se v balíčku určí podle `manifest.xml` (s fallbackem na `.isdoc` v kořeni archivu). Funguje i `.isdocx` **jako příloha uvnitř PDF/A-3**. Importy nově akceptují příponu `.isdocx` (uživatelé s vlastním `purchase_invoice.allowed_exts` v cfg.php si ji do seznamu doplní).
+
+### Fixed
+
+- **AI špatně rozpoznávala datumy na přijatých fakturách (zaměňovala datum vystavení, DUZP a splatnost).** AI extrakce neměla u datových polí v promptu žádné vodítko, takže role datumů odhadovala podle pozice na dokladu místo podle popisku — na produkci dala DUZP na datum splatnosti, jindy prohodila vystavení a splatnost. **DUZP (datum uskutečnění zdanitelného plnění) je přitom daňově zásadní** — rozhoduje o zařazení do období DPH. Nově prompt mapuje konkrétní české i slovenské popisky („Datum vystavení", „Datum uskut. zdaň. plnění" / „Datum zdanitelného plnění", „Datum splatnosti" …) na správná pole a uplatní logickou kontrolu (splatnost nikdy nepředchází vystavení). Navíc obranný mechanismus na straně serveru automaticky opraví prohozené datum vystavení ↔ splatnost.
+- **Po administrátorské opravě vystavené faktury (force-edit) zůstávalo přegenerované PDF se starými údaji stran (#135).** Force-edit uložil nová data faktury, ale JSON snapshoty stran (odběratel / dodavatel / banka) ponechal beze změny — a protože se u vystavených faktur PDF vykresluje právě z těchto snapshotů, oprava (např. adresy nebo IČO odběratele) se do nově vygenerovaného PDF nepromítla (ač to UI uživateli slibovalo). Nově se snapshoty při force-editu přepíšou z aktuálních dat; původní PDF zůstává v archivu. Historie faktury navíc u opravy uvádí, která konkrétní pole se změnila.
+
+## [4.21.1] — 2026-06-10
+
+### Fixed
+
+- **Variabilní symbol s pomlčkou (z čísla dokladu jako `2026-00001`) neprošel přes banku a kazil QR i párování plateb (#58).** Když dokladová řada obsahovala nečíselný znak (pomlčku/lomítko, např. řada `{YYYY}-{CCCCC}`), ukládal se takový variabilní symbol i do QR platby (SPAYD) — tu banka odmítá, protože VS musí být jen číslice — a automatické párování příchozích plateb (z výpisů i e-mailových avíz) ho nikdy nespárovalo, protože banka přenese jen číslice (`202600001`). Nově se VS pro platbu i QR vždy normalizuje na čistě číselný (max 10 znaků) a párování porovnává variabilní symbol **číselně** (ignoruje pomlčky, lomítka i vodicí nuly) na straně vydaných i přijatých faktur, takže se spárují i doklady s pomlčkou v čísle. V tištěné faktuře se v řádku *Var. symbol* zobrazuje platný číselný VS (velký titulek dokladu zůstává s pomlčkou).
+
+## [4.21.0] — 2026-06-10
+
+### Added
+
+- **„Zaplatit pomocí QR" u přijatých faktur.** V detailu nezaplacené přijaté faktury je nové tlačítko **Zaplatit pomocí QR**, které zobrazí QR platbu dodavateli pro naskenování v mobilním bankovnictví — CZK doklady ve formátu **QR Platba (SPAYD)**, cizoměnové jako **SEPA (EPC)**. Platební účet dodavatele se získává v pořadí: z **ISDOC** přílohy PDF → jednorázové **AI rozpoznání** z faktury (krátký dotaz na Anthropic Claude jen na účet/IBAN/variabilní symbol, spustí se automaticky při otevření okna a proběhne nejvýše jednou) → **ruční** zadání → záložní **obrázek QR vytažený z PDF** (čtvercový černobílý obrázek se zobrazí k naskenování i bez rozpoznání účtu). Známý účet se zobrazí i v **detailu** faktury (box vedle měny) a je editovatelný v **editoru** faktury (box *Platební účet dodavatele*) i přímo v okně QR. AI extrakce přijatých faktur nově platební účet rovnou ukládá.
+
+### Fixed
+
+- **Zahraniční DIČ s písmenem (např. nizozemské `NL123456789B01`) nešlo ověřit přes VIES.** Validace povolovala po prefixu země jen číslice (`/^[A-Z]{2}\d{4,12}$/`), takže DIČ s písmenem padalo na „DIČ musí mít prefix země a 4-12 číslic". Týkalo se i Rakouska (`ATU…`), Španělska, Francie a Irska. Nově se po prefixu země povolí 2-12 alfanumerických znaků, takže projdou všechny formáty DIČ ze systému VIES.
+
+## [4.20.1] — 2026-06-09
+
+### Fixed
+
+- **Skrytí akcí „Spáruj platby z banky" / „Zkontroluj koncepty přijatých faktur" / „Souhrnné hlášení" hlásilo `Invalid item_type`.** Nové typy akcí (z 4.20.0) chyběly v allowlistu i ve snapshotu pro režim „skrýt pro historická data" — doplněny, skrývání teď funguje pro všechny akce.
+- **Počítadlo (badge) u akce „Pošli upomínky" nesedělo s cílovým seznamem.** Počítalo jen ostré faktury, zatímco seznam `/invoices?overdue=1` od 4.20.0 zobrazuje i nezaplacené nespárované proformy. Dotaz akce nyní zrcadlí seznam (vč. proforem a vyřazení finálních dokladů k zaplacené proformě), takže číslo v odznaku odpovídá počtu v seznamu.
+
+## [4.20.0] — 2026-06-09
+
+### Added
+
+- **„Akce pro tebe" jsou nově na Přehledu (Dashboard) — jako první sekce.** Denní TODO seznam se přesunul z CRM dashboardu na úvodní Přehled, kde ho uvidíš hned po přihlášení. Logika (skrytí na den/týden/navždy/pro historická data i obnovení) zůstává beze změny; widget je vytažen do samostatné komponenty `ActionItemsWidget`.
+- **Nová sekce „Výkazy práce" na Přehledu.** Pokud máš rozpracované (koncept) vydané faktury, zobrazí se jako karty vedle sebe s **firmou** a **zakázkou**. Každá karta má tlačítko **Upravit** (otevře editor faktury) a **Výkaz** (otevře přímo popup výkazu práce — stejný jako v seznamu vydaných faktur), takže rozdělanou práci doplníš na jedno kliknutí.
+- **Tři nové akce v „Akce pro tebe":**
+  - **Spáruj platby z banky** → nespárované příchozí platby z bankovních výpisů (za posledních 90 dní) čekající na přiřazení k faktuře.
+  - **Zkontroluj koncepty přijatých faktur** → naimportované přijaté faktury (API / AI / PDF) zůstávají ve stavu koncept; připomene jejich revizi a zaúčtování.
+  - **Souhrnné hlášení za uplynulý měsíc** → upozornění na termín podání SH (25. dne), ale jen když za uplynulý měsíc skutečně existují EU plnění (jinak se SH nepodává a akce se nezobrazí).
+
+### Fixed
+
+- **Filtr „Nezaplacené" (`/invoices?unpaid=1`) nezobrazoval nezaplacené zálohové (proforma) faktury.** Filtr je vylučoval úplně; nově ukazuje i nezaplacené **nespárované** proformy (zálohovky bez navázaného finálního dokladu) — stejná pohledávková logika jako na dashboardu. Sjednoceno i s filtrem „Po splatnosti".
+- **Akce „Pošli upomínky" vedla na nefunkční odkaz.** Mířila na `/invoices?status=overdue` (neplatná hodnota stavu → prázdný seznam); nově správně na `/invoices?overdue=1`.
+- **Akce „Kontaktuj neaktivní klienty" nikam nevedla.** Místo obecného `/crm` teď skočí přímo na sekci „Riziko odchodu klientů" (kotva `#churn-risk`).
+
+## [4.19.7] — 2026-06-08
+
+### Fixed
+
+- **Děkovný e-mail za úhradu se neodesílal při automatickém spárování z banky ([#127](https://github.com/radekhulan/myinvoice/issues/127), díky @jssystemcz).** Při zapnutém „Posílat poděkování za úhradu → Automaticky při spárování platby z banky" se po zpracování e-mailového bankovního avíza faktura sice správně označila jako zaplacená, ale děkovný e-mail se neodeslal (a v e-mail logu po něm nebyla stopa). Poděkování posílala jen ruční cesta (označení jako uhrazené) a ruční spárování v UI; **automatické** cesty (e-mailové avízo, import GPC výpisu, cron) jdou přes `StatementMatcher`, který fakturu označoval jako paid napřímo a mailer nevolal. Nově se poděkování odešle ze společného místa všech automatických cest (trigger `bank_match`) — respektuje per-dodavatelský přepínač i ochranu proti dvojímu odeslání a případné selhání e-mailu nerozbije spárování.
+- **Oprava driftnutého číselníku DPH klasifikací (migrace 0106).** Na instalacích, kde globální systémový číselník (`vat_classifications`) mezitím odešel od stavu daňových migrací (kopie starší DB, re-seed), zůstaly chybné hodnoty: osvobozený tuzemský prodej (kód 3) korumpoval ř. 3 přiznání (pořízení zboží z JČS), přijaté plnění bez nároku na odpočet (kód 42) padalo do KH B.2/B.3 a chyběl kód `25s` (tuzemský režim přenesení daňové povinnosti – dodavatel → ř. 25). Idempotentní opravná migrace re-asertuje kanonický stav RC příznaků, samovyměření (ř. 43) i zařazení do řádků pro systémové kódy. Sahá výhradně na systémové řádky (uživatelské per-dodavatelské klasifikace zůstávají netknuté); na aktuální DB je bez efektu.
+
+### Internal
+
+- Úklid testů pro PHP 8.5: odstraněna no-op volání `curl_close()` a `ReflectionProperty::setAccessible()`; mocky používané jen jako stub přepsány na `createStub()`. Testová sada je bez deprecations a PHPUnit notices.
+
+## [4.19.6] — 2026-06-08
+
+### Added
+
+- **Export vydaných faktur do Stereo XML ([#126](https://github.com/radekhulan/myinvoice/pull/126), díky @blondak).** Administrace exportů (Daně → Export vydaných faktur) nově nabízí formát **Stereo XML** — DocumentPack XML pro import vydaných faktur do účetního systému **Kastner Stereo** (přes „Import faktury (XML)"). Funguje za měsíc i celé čtvrtletí, stejně jako ostatní formáty. Mapování DPH klasifikace na Stereo `TypeOfVAT` řeší `StereoVatTypeResolver` (zdroj pravdy = klasifikace řádků dokladu). Součástí je i sdílený `InvoiceExportDataResolver` pro dohledání dodavatele/klienta/banky (snapshot vyhrává nad live daty) — refaktor sjednocuje logiku dříve duplikovanou v ISDOC a Pohoda exportérech, beze změny jejich chování.
+- **SMTP log analýza: klikací souhrnné karty.** Karty **Doručeno / Odloženo / Odmítnuto** nad tabulkou fungují jako rychlý přepínač filtru stavu dole (klik zapne/vypne, aktivní karta se zvýrazní). Karta „Odmítnuto" sčítá `rejected` i `error`, proto filtruje složeně přes obě hodnoty (volba „Odmítnuté + chyby" je i v rozbalovacím filtru).
+
+### Changed
+
+- **Stránka „Export vydaných faktur" je širší.** Po přidání čtvrtého formátu (Stereo) má výběr formátů (PDF / ISDOC / Pohoda / Stereo) v řadě víc místa.
+
+## [4.19.5] — 2026-06-08
+
+### Fixed
+
+- **Oprava diakritiky ve jméně autora** v modálu „Chcete jinou funkci?" — „Radek Hulan" → „Radek Hulán" (cs i en).
+
+## [4.19.4] — 2026-06-08
+
+### Added
+
+- **Patička: „Podpořte autora" a „Chcete jinou funkci?".** Odkazy v patičce aplikace nově otevírají přehledná modální okna. **Podpora autora** zobrazí bankovní spojení pro dar (účet u Partners Banky, IBAN, BIC/SWIFT) a **QR kód** k platbě (roztažený na plnou šířku se zachovaným poměrem stran, jemně zesvětlený). **Chcete jinou funkci?** představí, kdo MyInvoice vyvíjí (MyWebdesign.cz s.r.o. — 20 let na trhu, seniorní vývoj akcelerovaný AI, reference jako Prazdroj, ZOOT či Syntex) a nabídne poptávku na vývoj vlastních funkcí, reportů či napojení s tlačítkem vedoucím na kontaktní formulář. Oba dialogy jsou plně lokalizované (cs/en).
+
+## [4.19.3] — 2026-06-08
+
+### Added
+
+- **Hromadný export umí celé čtvrtletí.** „Hromadný export" (dříve „Měsíční export", Daně → Hromadný export) má nově přepínač **Měsíc / Čtvrtletí** — kromě jednoho měsíce lze do jednoho ZIPu sbalit doklady za celý kvartál (`Q1`–`Q4`). Zařazení dokladů do období zůstává daňově korektní a shodné s výkazy DPH (vystavené dle DUZP, přijaté dle pozdějšího z DUZP/vystavení, výpisy dle data výpisu). **Kniha DPH** se u čtvrtletí přiloží jako **tři měsíční PDF** (jeden za každý měsíc kvartálu). Stejný kvartální režim už dříve nabídl i export vydaných a přijatých faktur.
+
+### Changed
+
+- **„Měsíční export" přejmenován na „Hromadný export".** Název v menu, na stránce i v ZIP balíčku (README) lépe vystihuje, že jde o kompletní balíček dokladů za zvolené období — měsíc i čtvrtletí. Manuál § 32.
+- **Export vydaných faktur má stejný vzhled jako Export přijatých.** Stránka „Export vydaných faktur" byla sjednocena s „Exportem přijatých faktur" — širší layout, výběr formátu v přehledné trojici karet s barevnými ikonami a konzistentní rozložení polí období / filtru / typu.
+- **Exporty defaultně nabízejí předchozí měsíc.** Všechny exporty (vydané, přijaté i hromadný) se otevírají s předvyplněným **minulým měsícem** místo rozpracovaného aktuálního — odpovídá tomu, že se export typicky dělá po uzávěrce právě skončeného měsíce.
+
+## [4.19.2] — 2026-06-08
+
+### Fixed
+
+- **CRM dashboard počítá tržby, náklady a zisk bez DPH (pro plátce).** Dosud CRM (KPI karty, srovnání období, grafy a tabulky zisku, top klienti/dodavatelé, rozpady kategorií) sčítal částky **včetně DPH**, takže se ziskovost a meziroční srovnání zkreslovaly o vracenou daň. Nově se — shodně se stránkami Tržby a Náklady — u plátce DPH počítá **bez DPH** (u neplátce včetně). Peněžní toky („Co přiteče/odteče", pohledávky a závazky po splatnosti) zůstávají správně **včetně DPH**. Stejná oprava i na Dashboardu (dlaždice „Náklady {rok}" a trend nákladů za 12 měsíců nově bez DPH).
+- **CRM čísla nově sedí s Tržbami/Náklady i pro starší období.** CRM přestal číst 13měsíční pre-agregovanou cache `crm_monthly_summary` (kvůli které byl „Loňský rok" a meziroční srovnání podhodnocené) a počítá **živě z faktur** stejnou metodikou jako stránky Tržby/Náklady — vč. zařazení podle DUZP (fallback datum vystavení) a správného vyřazení spárovaných/zaplacených záloh z nákladů. „Loňský rok" v CRM tak odpovídá „Obratu" ve Tržbách.
+
+## [4.19.1] — 2026-06-08
+
+### Added
+
+- **CRM dashboard — kompletní přehled zisku.** Headline karty (Tržby / Náklady / Zisk) nově kromě hodnoty za tento měsíc ukazují i **posledních 12 měsíců** a **YTD**, vždy s **meziroční změnou v %** (12 měsíců vs. předchozích 12, YTD vs. stejné období loni; u nákladů je růst červený, u tržeb a zisku zelený). Karta Zisk navíc zobrazuje marži YTD. Přibyla **srovnávací tabulka** pěti období (tento měsíc / minulý měsíc / 12 měsíců / YTD / loňský rok) s tržbami, náklady, ziskem a marží, dvojice grafů **Zisk za posledních 12 měsíců** a **Kumulativní zisk YTD vs. loni** (stejné jako v Tržbách/Nákladech, jen pro zisk — povolují ztrátu pod nulu) a **výsledovkové tabulky Zisk po rocích / po měsících** (tržby, zisk, marže). Tyto přehledy jsou nezávislé na přepínači analytického období. Manuál § 20.
+- **Proklik z tabulek CRM do faktur.** Řádky tabulek vedou na příslušný seznam s filtrem v URL: Náklady po rocích/měsících → přijaté faktury (rok, resp. rok+měsíc), Zisk po rocích/měsících → vydané faktury, Srovnání období → tržba na vydané, náklad na přijaté faktury za dané období.
+
+## [4.19.0] — 2026-06-08
+
+### Added
+
+- **Poznámky nad/pod položkami u pravidelné fakturace ([#123](https://github.com/radekhulan/myinvoice/issues/123), díky @jssystemcz za podnět).** Šablona pravidelné fakturace teď nabízí stejná dvě pole jako běžná faktura — **Poznámka nad položkami** a **Poznámka pod položkami** (sekce „Poznámky" v editoru šablony, stejná editace jako u vydané faktury). Text se přenáší na každou vygenerovanou fakturu a tiskne se nad, resp. pod tabulkou položek — ideální na opakované informace typu období poskytované služby, podmínky pronájmu nebo doplňující sdělení pro zákazníka. Obě pole podporují **placeholdery období** (`{YYYY}`, `{MM}`, `{DATE±…}`, `{BOM}`/`{EOM}` …) — vyhodnotí se při každém generování vůči DUZP (u proformy vůči datu vystavení), takže např. „Vyúčtování za období {BOM} – {EOM}" se na faktuře propíše jako konkrétní rozsah měsíce. Manuál § 12.2.2a.
+
+## [4.18.6] — 2026-06-07
+
+### Changed
+
+- **Manuál přeorganizovaný podle menu aplikace.** Pořadí kapitol teď kopíruje levé menu (Instalace a start · Prodej · Nákup · Finance · Dokumenty · Daně · Systém · Reference). Rozsáhlejší témata se rozpadla na samostatné kapitoly, aby se v nich dalo lépe orientovat: **CRM** → CRM dashboard / Tržby / Náklady; **Výkazy DPH** → Výkazy DPH (DPHDP3 + KH) / Kniha DPH / Souhrnné hlášení / Měsíční export; **Instalace** → Quickstart / Docker / Nativní / Po instalaci a CLI (Quickstart nově nabízí i instalační příkazy pro Git a Docker — winget / Homebrew); **Přijaté faktury** → odštěpen Export přijatých faktur a AI extrakce; z kapitoly **Banka** se vyčlenily **Bankovní účty a e-mailová avíza (IMAP)** do sekce Systém. Daňový průvodce (Fakturujeme) se přesunul na začátek sekce Daně. Doplněny chybějící popisy **Tržeb** a **Nákladů** (KPI, grafy, predikce).
+- **Sidebar manuálu.** Nahoře přibyla položka **Homepage** (rozcestník), názvy kapitol jsou kratší a přehlednější a barvy skupin nově odpovídají barvám sekcí v menu aplikace (Prodej = fialová, Nákup = jantarová, Finance = zelená, Daně = červená…); Systém a Reference dostaly vlastní odstíny (indigo / kámen).
+- **Callouty v manuálu.** Poznámkové bloky `> [!TIP] / [!NOTE] / [!IMPORTANT] / [!WARNING] / [!CAUTION]` se vykreslují jako barevné boxy s ikonou místo holého textu `[!TIP]`.
+
+## [4.18.5] — 2026-06-07
+
+### Changed
+
+- **Nový vzhled HTML manuálu.** Manuál na `/manual` přebírá design language aplikace: stejné barevné tokeny (indigo brand, teplé neutrály), topbar s přepínačem **Světlý / Tmavý / Podle systému** (volba sdílená s aplikací — manuál se otevře ve stejném režimu), postranní menu s barevnými pilulkami skupin jako menu aplikace, čísla kapitol, úvodní rozcestník s odkazy (MyInvoice.cz · GitHub · GHCR Docker · MyWebdesign.cz) a kartami kapitol, stránkování **Předchozí / Další** na konci kapitol, vyhledávání a mobilní drawer ve stylu aplikace. Vzhled je v samostatném `manual/manual.css` — sdílí ho i prezentační web myinvoice.cz (kopíruje `rebuild-manual.ps1`). Světlé screenshoty se v tmavém režimu automaticky převádí do tmavé podoby (detekce jasu + inverze s přesným namapováním pozadí na barvu formulářů aplikace); tmavých screenshotů se úprava nedotkne.
+- **Manuál popisuje jen aktuální stav.** Z kapitol zmizely historické poznámky „nové ve verzi X" a zmínky o integraci forku — historie patří do changelogu. Audit proti changelogu doplnil chybějící popisy: děkovný e-mail za úhradu (§ 18.5.5), kompletní seznam e-mailových šablon (§ 19.4), aktuální podoba rychlého vytváření v horní liště (§ 5.6) a ukotvení relativních cest v `cfg.php` (§ 2.4.1).
+
+### Fixed
+
+- **Daňové konstanty pro rok mimo tabulku.** Konstanty (paušály, slevy, sazby pro daňový optimalizátor, DPFO a další výpočty) padaly pro neznámý rok na natvrdo zadrátovaný rok 2026. Nově neznámý rok spadne na **nejbližší předchozí známý** — budoucí roky tak dostanou poslední ověřené hodnoty i poté, co do tabulky přibudou novější ročníky; rok před začátkem tabulky dostane nejstarší známý. Stejné chování má i DB vrstva s per-rok přepisy.
+- **Sjednocená tlačítka vytvoření** — „Nový účet" (Systém → Bankovní účty, sekce měnových účtů) a „Nový podpisový profil" (Elektronické podpisy) měly outline styl; nově plné primární tlačítko s „+" jako ostatní akce vytvoření.
+
+## [4.18.4] — 2026-06-06
+
+### Added
+
+- **Volitelné šifrování ZIP záloh heslem.** Nový klíč `cron.backup.password` v `cfg.php`: pokud je nastavený, všechny tři typy záloh (`cron-backup` = DB dump, `cron-backup-pdf` = PDF dokladů, `cron-backup-documents` = sekce Dokumenty) se šifrují **AES-256** — chrání zálohy at-rest i při kopírování na vzdálené úložiště. Prázdné heslo (default) = beze změny chování. Rozbalení šifrovaného archivu vyžaduje 7-Zip / WinRAR / `unzip -P` (vestavěný Průzkumník Windows AES-256 neumí); šifruje se obsah souborů, názvy uvnitř archivu zůstávají čitelné. Pokud je heslo nastavené a PHP ext-zip AES nepodporuje (libzip < 1.2), záloha se **záměrně nevytvoří** a úloha skončí chybou viditelnou v Plánovaných úlohách — tichá nešifrovaná záloha by byla horší než chybějící. Stav šifrování je v JSON reportu běhu (`cron_runs`). Manuál § 2.4.1 a § 27.
+
+## [4.18.3] — 2026-06-06
+
+### Fixed
+
+- **Relativní cesty v cfg.php se ukotvují k rootu aplikace.** `cfg.sample.php` měl u `cron.backup.output_dir` relativní hodnotu `'storage/backup'`, kterou backup crony braly doslovně — cesta se pak resolvovala proti pracovnímu adresáři procesu, který je pod Task Schedulerem/cronem jinde než root aplikace, takže zálohy končily v cizím adresáři (typicky pod adresářem cron runneru). Nově `Config::load()` každou relativní cestu ve známých path klíčích (`storage.*`, `cron.backup.output_dir`, `logging.path`, `purchase_invoice.archive_storage`/`inbox_dir`, `invoice.import_archive_storage`, `smtp.dkim.*`) ukotví k rootu aplikace; absolutní cesty (vč. Windows `C:\` a UNC `\\server`) i `MYINVOICE_DATA_DIR` override zůstávají beze změny. Sample cfg má nově `__DIR__ . '/storage/backup'` konzistentně s ostatními cestami.
+
+## [4.18.2] — 2026-06-06
+
+### Added
+
+- **Národní daňové číslo klienta — SK DIČ / IČ DPH, Steuernummer, NIP, Adószám ([#120](https://github.com/radekhulan/myinvoice/issues/120), díky @mikolashodan za podnět).** Slovenské subjekty mají tři čísla — IČO, **DIČ** (bez prefixu, má ho i neplátce DPH) a **IČ DPH** (`SK` + číslo, jen registrovaní k DPH) — a tamní praxe je vyžaduje na faktuře všechna. V kartě klienta se po výběru státu Slovensko pole DIČ přejmenuje na **IČ DPH** a přibude samostatné pole **DIČ** (tlačítko VIES ho předvyplní automaticky oseknutím prefixu). Faktura pak tiskne `IČO → DIČ → IČ DPH`; u neplátce jen IČO + DIČ. Řešeno obecně pro země s národním daňovým číslem vedle VAT ID: DE/AT **Steuernummer**, PL **NIP**, HU **Adószám** — pole se zobrazí s nativním labelem a stejně se tiskne (vystavené i přijaté doklady). Starší faktury SK klientů doplní DIČ automaticky odvozením z IČ DPH. Pro fakturu do jiné země EU je legislativně povinné jen VAT ID (čl. 226 směrnice 2006/112/ES) — národní čísla jsou lokální konvence. Migrace 0105 (`clients.tax_number`), API `/api/v1/clients` přijímá a vrací `tax_number`. Manuál § 7.2.1a a § 12.2.
+
+### Fixed
+
+- **Detaily plátce DPH u zahraničního klienta ověřují přes VIES ([#120](https://github.com/radekhulan/myinvoice/issues/120)).** Tlačítko **Detaily plátce DPH** posílalo každé DIČ do českého registru plátců (CRPDPH/MFČR), takže u slovenského či jiného zahraničního DIČ vždy nepravdivě hlásilo „Subjekt není evidován v registru plátců DPH". DIČ s jiným prefixem než CZ se nově ověřuje přes evropský **VIES** — panel zobrazí stav registrace k DPH, ověřené VAT ID, název a adresu subjektu. Česká DIČ jdou dál do CRPDPH (zveřejněné účty + nespolehlivý plátce).
+
+- **Chyby ARES/VIES lookupu se zobrazují u příslušného pole ([#120](https://github.com/radekhulan/myinvoice/issues/120)).** Hlášky „Subjekt nebyl v ARES nalezen" a „VIES lookup selhal" ve formuláři klienta padaly do obecného chybového boxu až dole u tlačítka Uložit — u delšího formuláře mimo viditelnou část obrazovky, takže uživatel nevěděl, proč se nic nenačetlo. Nově se chyba ukazuje červeně přímo pod polem IČO resp. DIČ, vedle stávajících upozornění na duplicitu.
+
+## [4.18.1] — 2026-06-06
+
+### Fixed
+
+- **API import přebírá platební stav z Fakturoidu a iDokladu ([#121](https://github.com/radekhulan/myinvoice/issues/121)).** Import z Fakturoidu (a stejně i z iDokladu) dosud ignoroval, že zdrojový systém doklad eviduje jako zaplacený — všechny importované faktury skončily jako nezaplacené a upomínkový cron na ně posílal klientům upomínky. Nově: doklad ve zdroji **zaplacený** (Fakturoid `status=paid`, iDoklad `PaymentStatus` Uhrazeno/Přeplaceno) se importuje rovnou jako **Zaplacená** s datem úhrady ze zdroje (`paid_on` / `DateOfPayment`, fallback DUZP → datum vystavení) a se snapshoty jako při vystavení; Fakturoid **stornovaný** doklad jako **Stornovaná**. Platí pro vydané faktury, dobropisy i přijaté faktury (expenses). Ostatní doklady (nezaplacené, částečně uhrazené) zůstávají záměrně Koncept k ruční kontrole — auto-vystavení by na reálně nezaplacené historické doklady spustilo hromadné upomínky. Manuál § 17.8.5 a § 17.9.4.
+
+## [4.18.0] — 2026-06-05
+
+### Added
+
+- **Kategorie tržby na šabloně opakované fakturace (#119).** Šablona může mít pevně zvolenou kategorii tržby, která přebíjí dosavadní dynamický fallback (výchozí kategorie zakázky → zákazníka) — hodí se pro stabilní zařazení domén, hostingu, licencí a paušálů, kde změna defaultu zakázky/zákazníka nemá tiše měnit kategorii budoucích faktur. Bez výběru (default, všechny existující šablony) zůstává chování beze změny. Kategorie se při generování ukládá na fakturu jako snapshot — pozdější změna šablony už vygenerované doklady nemění. Volba je v editoru šablony v sekci Faktura a na detailu šablony; API `/api/recurring` přijímá a vrací `revenue_category_id`. Manuál § 15.2.2.
+
+- **DPH konstanty v číselníku daňových konstant — už ne natvrdo v kódu.** Limit kontrolního hlášení 10 000 Kč (A.4/B.2 vs sumace A.5/B.3), základní a snížená sazba DPH jsou nově roční konstanty v `Nastavení → Číselníky → Daňové konstanty` — ve zvýrazněné skupině **„DPH a výkazy"** na začátku, protože na rozdíl od ostatních (DPFO/OSVČ) platí pro všechny plátce. Z nich se odvozuje: limit KH (generátor KH i sloupec KH v Knize DPH), práh rozřazení sazeb do sloupců výkazů (dřív 8× natvrdo `20.5` — DPH přiznání, KH, Kniha DPH, Pohoda export), sazba samovyměření u RC importů (AI extraktor) a auto-klasifikace přijatých dokladů. Výkazy berou konstanty **roku vykazovaného období**, takže budoucí změna limitu/sazby nerozbije zpětně generované výkazy; starší uložené overridy se automaticky doplní o nové klíče z defaultů. Manuál § 26.
+
+- **Kniha DPH: sloupec KH ukazuje efektivní sekci kontrolního hlášení.** A.4/A.5 a B.2/B.3 nejsou vlastnost klasifikačního kódu, ale dokladu — rozhoduje celková hodnota dokladu vč. DPH (limit 10 000 Kč) a DIČ protistrany. Kniha dosud tiskla statickou hodnotu z číselníku (kód 40 → „B.2" u všech přijatých), nově počítá sekci per doklad stejnou logikou jako generátor KH: drobný doklad pod limit ukáže B.3 (sumace), doklad bez DIČ protistrany jde do sumace i nad limit — shodně se sestavou POHODA.
+
+### Fixed
+
+- **Registry parserů bankovních avíz už není v cfg.sample.php.** Výčet parser tříd si uživatelé kopírovali do cfg.php, kde by zatuhlé class names po případném budoucím přejmenování shodily aplikaci. Registry žije v kódu (baseline defaults) a nové parsery se objeví s update aplikace bez zásahu do cfg; v sample zůstal jen zakomentovaný příklad override (vypnutí slotu / vlastní parser). Existující cfg.php s plným výčtem fungují beze změny.
+
+- **Sample data jsou daňově smysluplná.** Generátor testovacích dat dosud vyráběl daňové nesmysly: US dodavatelům (Anthropic, GitHub) účtoval českou 21% DPH bez reverse charge, tuzemským klientům nasazoval RC a EU klientovi s DIČ českou DPH; doklady neměly žádnou DPH klasifikaci. Nově: US dodavatelé služeb = reverse charge + kód 24 (dovoz služby — ř.12 + zrcadlový odpočet ř.43, v Knize DPH pár „43 ř.012/43 ř.043"), tuzemští dodavatelé kód 40/41 s mixem sazeb 21/12 % (v KH vznikají B.2 i B.3), EU klienti (SK/DE) reverse charge + kód 22 (služby do JČS, ř.21 + SHV), tuzemští klienti běžná DPH (A.4/A.5). Dobropisy dědí klasifikaci originálu. Sample tak pokrývá všechny hlavní scénáře DPH výkazů.
+
+### Changed
+
+- **Kniha DPH řadí jako POHODA.** Sekce vzestupně dle čísla členění (15 přijatá → 36 uskutečněná → 43 RC/dovozové páry → 47 majetek; dříve vystavené napřed) a doklady uvnitř sekce dle interního čísla dokladu (natural sort; dříve dle data plnění) — výstup tak jde porovnat se sestavou účetní řádek po řádku. RC/dovozový pár (samovyměření + mirror odpočet ř. 43) je nově celý pod členěním 43 — primary řádek (např. dovoz služby ř. 12) se už neukazuje mezi přijatými 15.xxx na začátku, ale hned před svým zrcadlovým odpočtem za sekcí 36, přesně jako POHODA („43 ř.012" + „43 ř.043").
+
+## [4.17.0] — 2026-06-05
+
+Hlavní novinka: **identifikovaná osoba** ([#94](https://github.com/radekhulan/myinvoice/issues/94), díky @mikolashodan za podnět) — plný režim § 6g–6l ZDPH pro neplátce s přeshraničními povinnostmi. Dále per-supplier kopie odchozích e-mailů (CC/BCC), refaktoring parserů avíz ([#118](https://github.com/radekhulan/myinvoice/pull/118), díky [@blondak](https://github.com/blondak)) a zpřístupnění měsíčního exportu rolím accountant/readonly.
+
+### Added
+
+- **Identifikovaná osoba — § 6g–6l ZDPH ([#94](https://github.com/radekhulan/myinvoice/issues/94), díky @mikolashodan za podnět).** Nový přepínač **Identifikovaná osoba** v nastavení dodavatele (jen pro neplátce; migrace 0103) pokrývá freelancery fakturující služby do EU bez tuzemského plátcovství — žádné přepínání plátce/neplátce: tuzemsko zůstává beze změny (bez DPH), navíc: **(1)** u **EU** klienta s DIČ se v editoru automaticky zapne reverse charge a předvyplní klasifikace 22 (EU služby) — s vysvětlujícím hintem, proč na dokladu není sazba DPH (samovyměří odběratel sazbou své země); klient ze 3. země RC nemá (mimo předmět DPH); sloupec částek se u RC dokladu neplátce/IO jmenuje **„Celkem bez DPH"** (editor i PDF) — částky jsou základ daně; PDF je daňový doklad s DIČ a klauzulí dle **čl. 196 směrnice 2006/112/ES** (tuzemský RC dál cituje § 92a — klauzule je nově country-aware pro všechny); **(2)** **pravidelná fakturace**: šablona má nově RC checkbox (dřív se flag jen přenášel „z faktury") se stejnou auto-logikou pro IO; generované faktury RC nesou a položky se auto-klasifikují kódem 22; **(3)** DPH přiznání se generuje s **`typ_platce='I'`** — jen řádky samovyměření z přeshraničních přijatých plnění (ř. 3–6, 12–13), **bez zrcadlového odpočtu ř. 43** (IO nemá nárok na odpočet), vždy měsíčně, nečekané řádky se vynechají s upozorněním; **(4)** kontrolní hlášení zobrazí upozornění, že IO KH nepodává; souhrnné hlášení funguje (podporovalo IO už dříve). Manuál § 6.1.1 a § 24.
+
+- **Kopie odchozích e-mailů dodavateli — per dodavatel, s volbou CC/BCC.** Dosud globální cfg flagy (`cc_supplier_on_send`, `cc_supplier_on_reminder`, `cc_supplier_on_approval[_reminder]`) lze nově přenastavit v nastavení dodavatele zvlášť pro **odeslání dokladu**, **upomínky** a **schvalování výkazů** (žádost + schvalovací upomínka sdílí jednu volbu — stejné členění účelů jako kontakty klienta z #86): *Dle konfigurace* (default — cfg zůstává živý fallback, efektivní hodnota je ve volbě vidět) / *Neposílat* / *Kopie (CC)* / *Skrytá kopie (BCC)*. Kopie jde přes jednotný `RecipientResolver` — v modalu odeslání je vidět jako chip „kopie dodavateli" a lze ji pro konkrétní e-mail smazat; dedup ji nepřidá, pokud je e-mail dodavatele už mezi příjemci. Manuál § 18.5.4.
+
+### Changed
+
+- **Kopie dodavateli při ručním odeslání už není „tichá".** Dříve se CC dodavateli přidávalo serverem až po odeslání z modalu (uživatel ho neviděl a nemohl odebrat); nově je předvyplněné přímo v poli CC/BCC modalu a co uživatel v modalu vidí, to se odešle — beze změn na pozadí.
+- **Refaktoring parserů bankovních e-mailových avíz ([#118](https://github.com/radekhulan/myinvoice/pull/118), díky [@blondak](https://github.com/blondak)).** Sdílené helpery čtyř parserů (normalizace, regexy, částky, data, účty, symboly, měny) přesunuté do společného `AbstractBankEmailNoticeParser`; bank-specifická detekce a extrakce polí zůstávají per parser (−430/+253 řádků, chování beze změny — pokryto stávajícími testy). Sjednocené helpery převzaly nejrobustnější z původních variant: parseAmount nově u všech bank zvládá oba oddělovače tisíců i znaménko, „N/A" hodnoty se nulují.
+
+### Fixed
+
+- **Měsíční export pro role accountant a readonly.** Stránka Daně → Měsíční export byla viditelná všem rolím, ale spuštění exportu vracelo „Pro tuto akci nemáš oprávnění" — workflow background jobu (start/zrušení/smazání) jede přes POST/DELETE, které RBAC middleware propouštěl jen adminovi, přestože export je věcně čtení (readonly = čtení + export). Endpointy měsíčního exportu jsou nově explicitně povolené všem rolím; akce si dál drží vlastní guard.
+- **Změna plátce/neplátce DPH se projeví hned, bez hard refreshe ([#94](https://github.com/radekhulan/myinvoice/issues/94)).** Editor faktur čte plátcovství ze supplier store plněného při startu z `/me` — po uložení nastavení dodavatele se store nově aktualizuje, takže DPH sloupce/sazby v editoru odpovídají okamžitě (dříve až po F5).
+
+## [4.16.0] — 2026-06-05
+
+Daňové opravy reverse charge z EU (díky Pavlovi za podrobné hlášení s reálným dokladem): AI import pořízení zboží z JČS ([#116](https://github.com/radekhulan/myinvoice/issues/116)) a zařazení samovyměření do správného DPH období ([#117](https://github.com/radekhulan/myinvoice/issues/117)).
+
+### Added
+
+- **AI import rozpozná povahu plnění (zboží vs. služba) u reverse charge ([#116](https://github.com/radekhulan/myinvoice/issues/116)).** U zahraničního dokladu bez DPH extraktor nově klasifikuje, zda jde o zboží (VIN/vozidlo/hardware) nebo službu (SaaS/licence), a podle toho nastaví položkám **tuzemskou sazbu 21 %** a klasifikační kód — **23** „Pořízení zboží z JČS" (ř. 3 + ř. 43, KH A.2), **24** „Přijetí služby", **25** „Dovoz zboží ze 3. země". Dříve řádky přebíraly 0 % z cizího dokladu a kód služby → samovyměřená daň vyšla nulová a doklad minul KH A.2. Částka k úhradě se nemění (daň na RC dokladu zůstává 0, samovyměření dopočítají výkazy); do dokladu se zapíše informační varování s rekapitulací automatiky.
+- **DUZP pořízení zboží z JČS dle § 25 ZDPH při AI importu.** Zahraniční doklad nese jen datum dodání — zákonné DUZP (15. den měsíce následujícího po dodání, příp. dřívější datum vystavení) se dopočítá automaticky a k němu se naváže i kurz ČNB (§ 4 odst. 8). Editor přijaté faktury u reverse charge zobrazuje nápovědu k DUZP.
+
+### Fixed
+
+- **Pořízení zboží z JČS s pozdě vystavenou fakturou patří do období DUZP ([#117](https://github.com/radekhulan/myinvoice/issues/117)).** Přijaté zahraniční reverse charge doklady (pořízení zboží z EU, služby z EU/3. země, dovoz) se v DPH přiznání, kontrolním hlášení, knize DPH i měsíčním exportu nově zařazují podle **DUZP**, ne podle pozdějšího z dat DUZP/vystavení — povinnost přiznat daň (ř. 3) vzniká k DUZP bez ohledu na držení dokladu (§ 25 odst. 1) a pozdní doklad neblokuje ani zrcadlový odpočet ř. 43 (§ 73 odst. 1 písm. b, potvrzeno SDEU C-895/19). Zboží převzaté v dubnu s fakturou vystavenou v červnu tak správně spadne do května. Tuzemská plnění (vč. tuzemského RC) zůstávají na pozdějším z dat (§ 73 odst. 1 písm. a).
+- **Samovyměření reverse charge u řádků se sazbou 0 %.** Pojistka ve výkazech: má-li RC řádek sazbu 0 % (typicky doklady importované před touto verzí), použije se pro samovyměření i rate bucket KH sazba klasifikačního kódu (21 %) — dosud takové doklady tiše vykazovaly základ s nulovou daní. Oprava se projeví i na už zaevidovaných dokladech (net dopad 0 — daň i odpočet se zvednou stejně).
+- **GPC výpis Fio EUR účtu se importoval jako CZK a platby se nepárovaly ([#109](https://github.com/radekhulan/myinvoice/issues/109) follow-up).** Fio dle své specifikace plní pole měny v GPC transakcích konstantně `0203` (CZK) i u cizoměnového účtu — detekce měny výpisu dávala per-transakčnímu kódu přednost, takže EUR výpis dostal CZK, zobrazil se v Kč a currency guard při párování zahodil všechny EUR faktury (oprava 4.14.0 přes IBAN se ke slovu vůbec nedostala). Měna **registrovaného bankovního účtu** (GPC výpis je vždy z jednoho účtu = jedna měna) je nově autoritativní pro výpis i transakce; per-transakční kód zůstává jen fallback pro neregistrované účty (Creditas/KB ho plní reálně — ověřeno na vzorcích obou bank). Po updatu stačí výpis smazat a naimportovat znovu.
+
+## [4.15.0] — 2026-06-04
+
+Velká novinka: **e-mailové kontakty odběratele podle účelu** ([#86](https://github.com/radekhulan/myinvoice/issues/86), díky [@blondak](https://github.com/blondak) za výborný návrh) — komu chodí doklady, upomínky a schvalování výkazů, vč. rolí CC/BCC a účelů u e-mailů zakázky.
+
+### Added
+
+- **E-mailové kontakty odběratele podle účelu ([#86](https://github.com/radekhulan/myinvoice/issues/86)).** U klienta lze evidovat až 10 e-mailových kontaktů s účely **Doklady** (faktury, dobropisy, poděkování za platbu), **Upomínky**, **Schvalování** (výkazy víceprací) a **Komunikace**, každý s rolí **to/cc/bcc** (role může být per účel) a stavem aktivní/neaktivní. Jakmile má účel přiřazený aktivní kontakt, hlavní e-mail se pro daný typ zprávy přestane automaticky přidávat (zůstává záchranný fallback — tlačítko „Převzít hlavní e-mail" ho přidá explicitně). Upomínky bez vlastního kontaktu spadnou na kontakty Doklady. Kontakty se zobrazují v detailu klienta a spravují ve formuláři klienta i přes API (`email_contacts`, replace-all).
+- **Účely u fakturačních e-mailů zakázky.** Každý ze 3 e-mailů zakázky lze omezit na typy zpráv (Doklady/Upomínky/Schvalování); nic nevybráno = všechny typy (dosavadní chování). Účely jsou vidět v detailu zakázky.
+- **Režim kombinace e-mailů zakázky s kontakty klienta** — `Výchozí` (dosavadní per-typ chování: doklady/upomínky přidat, schvalování nahradit), `Vždy přidat`, `Vždy nahradit`.
+- **Jednotný `RecipientResolver`** nahrazuje šest dříve duplicitních výpočtů příjemců (odeslání, auto-odeslání po schválení, upomínky, žádost o schválení, cron připomínek schválení, poděkování za platbu). Dedup napříč to/cc/bcc (case-insensitive, priorita to > cc > bcc), stabilní pořadí, validace; finální příjemci vč. provenance v activity logu. Pokryto 62 testy vč. 24-řádkové kombinační matice — **bez nastavených kontaktů je chování bit-perfect stejné jako dřív** (žádná datová migrace, žádná změna pro existující instalace).
+- **Modal odeslání a upomínky zobrazuje původ příjemců** (kontakt: popisek/účel · zakázka · hlavní e-mail) — příjemce vyřeší backend (`GET /api/v1/invoices/{id}/recipients`), CC/BCC jsou v modalu viditelné a editovatelné. Seznam jde dál libovolně ručně upravit.
+
+### Fixed
+
+- **Kontakt jen s rolí kopie (cc/bcc) nezablokuje odeslání** — typicky „kopie účtárně, hlavní příjemce zůstává jednatel": prázdné TO se doplní hlavním e-mailem klienta.
+
+## [4.14.0] — 2026-06-04
+
+Novinka: **placeholdery období v pravidelné fakturaci** ([#108](https://github.com/radekhulan/myinvoice/issues/108), díky [@blondak](https://github.com/blondak) za návrh) + oprava párování GPC výpisů cizoměnových účtů evidovaných IBANem ([#109](https://github.com/radekhulan/myinvoice/issues/109)).
+
+### Added
+
+- **Placeholdery období v popisech položek a poznámkách šablon pravidelné fakturace ([#108](https://github.com/radekhulan/myinvoice/issues/108), část 1).** Tokeny se při každém vygenerování faktury nahradí podle DUZP (u proformy podle data vystavení): `{YYYY}`/`{YY}` (rok, posun po letech `{YYYY+1}`), `{M}`/`{MM}` (měsíc, posun po měsících vč. přetečení roku), `{MMMM}` (název měsíce dle jazyka dokladu), `{Q}` (čtvrtletí), `{D}`/`{DD}` (den), `{DATE}` s datovou aritmetikou `±N` `D`/`M`/`Y` (`{DATE+1Y-1D}`) a `{BOM}`/`{EOM}` (začátek/konec měsíce, posun po měsících). Typický use case: `Prodloužení domény example.cz na období {DATE} - {DATE+1Y-1D}`. Posun po měsících/letech je clampovaný na poslední den cílového měsíce (31. 1. `{DATE+1M}` → 28. 2., jako MySQL `DATE_ADD`). Nerozpoznané tokeny zůstávají netknuté — stávající šablony fungují beze změny; dosavadní synchronizace `M/YYYY` s DUZP zůstává samostatnou volbou. Rozbalovací nápověda přímo v editoru šablony, dokumentace v manuálu § 15.2.3. (Část 2 — ceníkové položky — zůstává otevřená v issue.)
+
+### Fixed
+
+- **Párování GPC výpisů cizoměnových účtů evidovaných IBANem ([#109](https://github.com/radekhulan/myinvoice/issues/109)).** GPC výpis nese domácí číslo účtu, ale cizoměnové účty (typicky EUR) se v Bankovních účtech evidují často jen IBANem — výpis se pak nepřiřadil k účtu: zůstal bez měny (UI ho zobrazilo v Kč) a transakce se nepárovaly (`unknown_supplier_for_account`). Import výpisu i matcher nově porovnávají i domácí část českého IBANu (funguje i IBAN omylem vepsaný do pole „Číslo účtu"); kód banky se umí vzít z IBANu. Po updatu stačí výpis smazat a naimportovat znovu.
+
+## [4.13.2] — 2026-06-04
+
+Opravy z hlášení komunity: ztráta PDF přijatých faktur při Docker updatu ([#115](https://github.com/radekhulan/myinvoice/issues/115)), špatné číslo dokladu dodavatele u importu z Fakturoidu ([#113](https://github.com/radekhulan/myinvoice/issues/113)) a robustnější parser avíz České spořitelny ([#110](https://github.com/radekhulan/myinvoice/issues/110)).
+
+### Fixed
+
+- **PDF přijatých faktur přežijí Docker image update ([#115](https://github.com/radekhulan/myinvoice/issues/115)).** Dokumentovaný produkční deploy (bind-mount `cfg.docker.php` z `cfg.sample.php`) směroval archiv originálních PDF přijatých faktur do vrstvy kontejneru místo do `/data` volume — při každém `docker compose pull && up` soubory zmizely (vydané faktury a Dokumenty byly v pořádku). Cesty `purchase_invoice.archive_storage` a `invoice.import_archive_storage` se nově při nastaveném `MYINVOICE_DATA_DIR` vždy přepíší pod data volume, stejně jako ostatní `storage.*` cesty. Soubory nahrané od posledního recreate kontejneru lze před updatem zachránit: `docker compose cp app:/var/www/html/storage/purchase-invoices ./pi-backup` a po updatu nakopírovat do `/data/storage/purchase-invoices` (metadata v DB zůstala, doklady budou zase stažitelné).
+- **Import nákladů z Fakturoidu ukládá skutečné číslo dokladu dodavatele ([#113](https://github.com/radekhulan/myinvoice/issues/113)).** Pole „číslo dokladu dodavatele" se plnilo interním číslem přiděleným Fakturoidem (`number`) místo čísla původního dokladu (`original_number`). Priorita prohozena; interní číslo se použije jen jako fallback, když originál chybí. Už naimportované doklady se zpětně nemění (číslo lze upravit ručně v detailu).
+- **E-mailová avíza: záchranný fallback pro vlastní účet ([#110](https://github.com/radekhulan/myinvoice/issues/110)).** Avízo České spořitelny „Odešla platba" nemusí obsahovat řádek „Číslo účtu:" a zpracování pak končilo chybou `parse_failed`. Když konfigurovaný vzor pole `recipient_account` nic nenajde, vytáhne se vlastní účet z úvodní věty avíza („z účtu … odešla platba" / „na účet … dorazila platba"). Přesné doladění vzorů odchozí šablony čeká na anonymizovaný vzorek (issue zůstává otevřené).
+
 ## [4.13.1] — 2026-06-03
 
 Nové systémové parsery bankovních e-mailových avíz **UniCredit Bank** a **ČSOB** (díky [@blondak](https://github.com/blondak), [#106](https://github.com/radekhulan/myinvoice/pull/106), navazuje na [#58](https://github.com/radekhulan/myinvoice/issues/58)) + zpevnění celé parser registry.

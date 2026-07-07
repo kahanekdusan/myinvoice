@@ -18,6 +18,7 @@ use Psr\Log\LoggerInterface;
  *   - GET  https://api.idoklad.cz/v3/Contacts
  *   - GET  https://api.idoklad.cz/v3/IssuedInvoices
  *   - GET  https://api.idoklad.cz/v3/ReceivedInvoices
+ *   - GET  https://api.idoklad.cz/v3/ReceivedReceipts
  *
  * Rate limit per docs: 60 req/min. Vlastní hint counter — pokud >50 req/min,
  * sleep 1s před requestem (smooth rate).
@@ -310,35 +311,55 @@ final class IdokladClient
 
     /**
      * Stáhne PDF pro vydanou fakturu (rendered iDoklad PDF). Endpoint:
-     *   GET /v3/IssuedInvoices/{id}/Document  (application/pdf bytes).
+     *   GET /v2/IssuedInvoices/{id}/GetPdf  (Accept: application/json).
+     *
+     * Pozn.: PDF render je dostupný JEN na v2 API — v3 vrací UnsupportedApiVersion,
+     * a cesta je /GetPdf, ne /Document (/Document 404). Tělo je bare base64 JSON
+     * string (celé tělo je "JVBERi0..."), tj. json_decode → base64 → %PDF bajty.
      */
     public function downloadIssuedPdf(int $supplierId, int $idokladInvoiceId): ?string
     {
         $token = $this->getToken($supplierId);
-        $url = self::API_BASE . '/IssuedInvoices/' . $idokladInvoiceId . '/Document';
+        $url = str_replace('/v3', '/v2', self::API_BASE) . '/IssuedInvoices/' . $idokladInvoiceId . '/GetPdf';
         $this->throttle($supplierId);
         $resp = $this->http->get($url, [
-            'headers' => ['Authorization' => 'Bearer ' . $token, 'Accept' => 'application/pdf'],
+            'headers' => ['Authorization' => 'Bearer ' . $token, 'Accept' => 'application/json'],
         ]);
         if ($resp->getStatusCode() !== 200) return null;
-        $body = (string) $resp->getBody();
-        return str_starts_with($body, '%PDF') ? $body : null;
+        return self::decodeIssuedPdfBody((string) $resp->getBody());
+    }
+
+    /**
+     * Rozbalí tělo v2 GetPdf odpovědi (JSON string literal s base64 PDF) na surové
+     * PDF bajty. Vrátí null, pokud tělo není validní base64 PDF dokument.
+     */
+    public static function decodeIssuedPdfBody(string $body): ?string
+    {
+        $b64 = json_decode($body, true);
+        if (!is_string($b64) || $b64 === '') {
+            return null;
+        }
+        $pdf = base64_decode($b64, true);
+
+        return ($pdf !== false && str_starts_with($pdf, '%PDF')) ? $pdf : null;
     }
 
     /**
      * List attachments pro přijatou fakturu (PDF originály od dodavatele).
      *
      * iDoklad v3 endpoint: GET /v3/Attachments/{documentId}/{documentType}/{compressed}
-     * documentType = `ReceivedInvoice` (enum 5). Odpověď nese bajty inline jako
+     * documentType = `ReceivedInvoice` (enum 5) pro přijaté faktury, `ReceivedReceipt`
+     * (enum 11) pro přijaté účtenky — přílohy žijí v odděleném scope per typ dokladu.
+     * Odpověď nese bajty inline jako
      * base64 `FileBytes` — žádný separátní download request.
      * (Starý endpoint /ReceivedInvoices/{id}/Attachments vracel 404 → žádné PDF, viz #80.)
      *
      * @return list<array<string,mixed>>  [{Id, FileName, FileBytes(base64)}]
      */
-    public function listReceivedAttachments(int $supplierId, int $idokladInvoiceId): array
+    public function listReceivedAttachments(int $supplierId, int $idokladInvoiceId, string $documentType = 'ReceivedInvoice'): array
     {
         try {
-            $r = $this->get($supplierId, 'Attachments/' . $idokladInvoiceId . '/ReceivedInvoice/false', 1, 100);
+            $r = $this->get($supplierId, 'Attachments/' . $idokladInvoiceId . '/' . $documentType . '/false', 1, 100);
             return $r['Items'];
         } catch (\Throwable $e) {
             $this->logger->info('iDoklad listReceivedAttachments failed', ['invoice_id' => $idokladInvoiceId, 'error' => $e->getMessage()]);

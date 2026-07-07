@@ -22,11 +22,19 @@ namespace MyInvoice\Service\Tax;
 final class TaxConstants
 {
     /**
-     * @return array<string, mixed> konstanty pro daný rok
+     * Konstanty pro daný rok; neznámý rok spadne na nejbližší předchozí známý
+     * (budoucí roky tak dostanou poslední ověřené hodnoty, ne natvrdo zadrátovaný
+     * rok), rok před začátkem tabulky na nejstarší známý.
+     * @return array<string, mixed>
      */
     public static function forYear(int $year): array
     {
-        return self::TABLE[$year] ?? self::TABLE[2026];
+        if (isset(self::TABLE[$year])) {
+            return self::TABLE[$year];
+        }
+        $known = self::availableYears();
+        $below = array_filter($known, static fn (int $y): bool => $y < $year);
+        return self::TABLE[$below !== [] ? max($below) : min($known)];
     }
 
     public static function availableYears(): array
@@ -64,15 +72,21 @@ final class TaxConstants
             'health_assessment_pct' => 0.50, // zdravotní: 50 % zisku
             'social_min_base_main'      => 195540, // 35 % × 46 557 × 12
             'social_min_base_secondary' => 61476,  // min. roční zákl. vedlejší činnost
+            // Rozhodná částka (daňový základ / zisk) pro povinnou účast na důchodovém
+            // pojištění u vedlejší SVČ — pod ní se sociální pojištění neplatí (ČSSZ).
+            'social_secondary_participation_threshold' => 111736, // 2025
             'health_min_base'           => 279342, // 50 % × 46 557 × 12
             // Výdajové paušály — strop uplatnitelných výdajů dle sazby
             'expense_caps' => [30 => 600000, 40 => 800000, 60 => 1200000, 80 => 1600000],
             // Odpočty — stropy
             'mortgage_cap' => 150000,
             'pension_cap'  => 48000,
-            // DPH
+            // DPH — platí pro VŠECHNY plátce (nejen OSVČ)
             'vat_limit_low'  => 2000000,
             'vat_limit_high' => 2536500,
+            'vat_rate_standard' => 21.0,  // základní sazba § 47 ZDPH
+            'vat_rate_reduced'  => 12.0,  // snížená sazba (od 2024 jednotná 12 %)
+            'kh_item_threshold' => 10000, // limit KH: nad → A.4/B.2 jednotlivě, do → A.5/B.3 sumace
         ],
         2026 => [
             'year' => 2026,
@@ -95,12 +109,16 @@ final class TaxConstants
             'health_assessment_pct' => 0.50,
             'social_min_base_main'      => 235044, // 40 % × 48 967 × 12
             'social_min_base_secondary' => 64644,  // min. roční zákl. vedlejší činnost
+            'social_secondary_participation_threshold' => 117521, // 2026 (ČSSZ)
             'health_min_base'           => 293802, // 50 % × 48 967 × 12
             'expense_caps' => [30 => 600000, 40 => 800000, 60 => 1200000, 80 => 1600000],
             'mortgage_cap' => 150000,
             'pension_cap'  => 48000,
             'vat_limit_low'  => 2000000,
             'vat_limit_high' => 2536500,
+            'vat_rate_standard' => 21.0,
+            'vat_rate_reduced'  => 12.0,
+            'kh_item_threshold' => 10000,
         ],
     ];
 }

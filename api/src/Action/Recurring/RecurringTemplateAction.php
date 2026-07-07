@@ -275,7 +275,8 @@ final class RecurringTemplateAction
             if ($forceDraft && (string) ($tpl['draft_open_mode'] ?? 'at_issue') === 'period_start') {
                 // period_start: ruční „Vygenerovat koncept" = stejný otevřený koncept jako
                 // cron na začátku období (openDraft) — idempotentní, NEposouvá rozvrh,
-                // koncept se pak vystaví v den next_run_date (cron issuePeriod).
+                // koncept se pak vystaví den po next_run_date (cron issuePeriod), s datem
+                // vystavení i DUZP na next_run_date (konci období).
                 $d = $this->generator->openDraft($id, $userId, $ip, $ua);
                 $result = [
                     'invoice_id'        => $d['invoice_id'],
@@ -389,6 +390,21 @@ final class RecurringTemplateAction
         if (array_key_exists('discount_percent', $data) && $data['discount_percent'] !== null && $data['discount_percent'] !== '') {
             if (!is_numeric($data['discount_percent']) || (float) $data['discount_percent'] < 0 || (float) $data['discount_percent'] > 100) {
                 $err['discount_percent'][] = 'Sleva musí být mezi 0 a 100 %';
+            }
+        }
+        // Pevná kategorie tržby (#119) — IDOR guard: musí existovat a patřit dodavateli
+        // šablony. Archivovanou nezakazujeme (edit dřív uložené šablony musí projít).
+        if (!empty($data['revenue_category_id'])) {
+            if (!is_numeric($data['revenue_category_id'])) {
+                $err['revenue_category_id'][] = 'Neplatná kategorie tržby';
+            } else {
+                $stmt = $this->db->pdo()->prepare(
+                    'SELECT COUNT(*) FROM revenue_categories WHERE id = ? AND supplier_id = ?'
+                );
+                $stmt->execute([(int) $data['revenue_category_id'], (int) $data['supplier_id']]);
+                if ((int) $stmt->fetchColumn() === 0) {
+                    $err['revenue_category_id'][] = 'Neplatná kategorie tržby';
+                }
             }
         }
         // U non-bank-transfer ztrácí auto_send_email smysl (klient nemá co platit) — povolíme,

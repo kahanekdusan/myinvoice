@@ -2,7 +2,7 @@
 /* @page se NEPOUŽÍVÁ — A4 + margins jsou nastaveny v Mpdf konstruktoru. */
 
 body {
-    font-family: 'DejaVu Sans', sans-serif;
+    font-family: 'montserrat', 'DejaVu Sans', sans-serif;
     font-size: 10pt;
     color: #15131D;
     line-height: 1.4;
@@ -74,7 +74,7 @@ td.meta { width: 45%; text-align: right; }
     font-size: 22pt;
     font-weight: bold;
     color: #15131D;
-    font-family: 'DejaVu Sans Mono', monospace;
+    font-family: 'jetbrainsmono', 'DejaVu Sans Mono', monospace;
     line-height: 1.05;
     letter-spacing: -0.5pt;
 }
@@ -107,8 +107,14 @@ td.meta { width: 45%; text-align: right; }
     width: 50%;
     vertical-align: top;
     padding: 4mm;
-    border: 0.5pt solid #E7E3EE;
     background: #FBFAFD;
+}
+/* Odběratel zvýrazněn jen podbarvením (bez rámečku) — na dokladu „skočí do oka" víc
+   než blok dodavatele. Default bg zrcadlí akcentovou plochu (ISDOC badge); při
+   zapnutém brandingu ho PdfBranding přebarví tintem zvolené barvy
+   (`.parties td.party-customer`), takže respektuje uživatelskou paletu. */
+.parties td.party-customer {
+    background: #EFEAFF;
 }
 .parties h2 {
     margin: 0 0 4mm;
@@ -126,7 +132,7 @@ td.meta { width: 45%; text-align: right; }
     color: #15131D;
 }
 .ic-dic {
-    font-family: 'DejaVu Sans Mono', monospace;
+    font-family: 'jetbrainsmono', 'DejaVu Sans Mono', monospace;
     font-size: 9pt;
     color: #5A5470;
     margin-top: 5mm;
@@ -160,7 +166,7 @@ td.meta-value {
     font-weight: bold;
     white-space: nowrap;
 }
-td.meta-value.mono { font-family: 'DejaVu Sans Mono', monospace; }
+td.meta-value.mono { font-family: 'jetbrainsmono', 'DejaVu Sans Mono', monospace; }
 
 /* Univerzální — zákaz wrap pro číselné buňky */
 .nowrap { white-space: nowrap; }
@@ -195,8 +201,11 @@ table.items td {
     vertical-align: top;
 }
 table.items tr:nth-child(even) td { background: #FBFAFD; }
-table.items .num { text-align: right; font-family: 'DejaVu Sans Mono', monospace; }
+table.items .num { text-align: right; font-family: 'jetbrainsmono', 'DejaVu Sans Mono', monospace; }
 table.items .center { text-align: center; }
+/* DPH sloupec je užší (místo dostal Cena/j) — sazba „21 %" / „12,5 %" o stupínek
+   menší, aby se vešla bez zalomení. */
+table.items .vat { font-size: 8.5pt; }
 
 /* ─── SUMACE ─── */
 .totals {
@@ -223,7 +232,7 @@ td.tot-label {
 }
 td.tot-num {
     text-align: right;
-    font-family: 'DejaVu Sans Mono', monospace;
+    font-family: 'jetbrainsmono', 'DejaVu Sans Mono', monospace;
     width: 38mm;
     font-weight: bold;
 }
@@ -290,7 +299,7 @@ table.czk-recap td.tot-label {
 }
 table.czk-recap td.tot-num {
     text-align: right;
-    font-family: 'DejaVu Sans Mono', monospace;
+    font-family: 'jetbrainsmono', 'DejaVu Sans Mono', monospace;
     width: 32mm;
     font-weight: bold;
 }
@@ -306,18 +315,35 @@ table.czk-recap tr.grand td {
     padding: 2mm 3mm;
 }
 
-/* ─── QR + bank ─── */
-table.bank-frame {
+/* ─── Platební panel: QR + bankovní spojení v jednom podbarveném boxu ─── */
+.pay-panel {
     width: 100%;
-    border: 0.5pt solid #C9C0E9;
+    height: 100%;                 /* roztáhne panel na výšku řádku → spodní hrana lícuje s „Celkem" vpravo */
     border-collapse: collapse;
+    background: #EFEAFF;          /* bgSoft — branding ji přebarví tintem akcentu */
+    border: 0.5pt solid #C9C0E9;  /* lineMedium — sladěno s ostatními akcent. plochami */
     border-radius: 2mm;
 }
-table.bank-frame td {
-    padding: 3mm;
+.pay-panel td {
+    padding: 3.5mm;
     font-size: 10pt;
     line-height: 1.5;
+    vertical-align: middle;       /* obsah svisle na střed → vyrovná prázdné místo při roztažení */
 }
+/* Zaplacená faktura: platební panel dostane jemný zelený nádech (success), místo
+   brandového tintu. Vyšší specificita (2 třídy) přebije branding override `.pay-panel`
+   bez ohledu na pořadí — UHRAZENO tak vždy sedí na zeleném podkladu. */
+.pay-panel.pay-panel-paid {
+    background: #EAF6EC;
+    border-color: #BFE0C6;
+}
+/* QR uvnitř panelu — bez vlastního rámečku/paddingu, splývá s podbarvením. */
+.pay-panel td.pay-qr {
+    width: 40mm;
+    text-align: center;
+    white-space: nowrap;
+}
+.pay-panel td.pay-qr img { width: 33mm; height: 33mm; }
 .bank-label {
     font-size: 9pt;
     text-transform: uppercase;
@@ -328,7 +354,7 @@ table.bank-frame td {
     line-height: 1.2;
 }
 .bank-value {
-    font-family: 'DejaVu Sans Mono', monospace;
+    font-family: 'jetbrainsmono', 'DejaVu Sans Mono', monospace;
     font-weight: bold;
     color: #15131D;
     font-size: 9.5pt;
@@ -339,23 +365,6 @@ table.bank-frame td {
     font-size: 9pt;
     color: #5A5470;
     line-height: 1.6;
-}
-
-.qr-box {
-    text-align: center;
-    padding: 2mm;
-    border: 1pt solid #D2CCDF;
-    border-radius: 2mm;
-    background: #FFFFFF;
-}
-.qr-box img { width: 35mm; height: 35mm; }
-.qr-box .qr-label {
-    font-size: 8pt;
-    color: #6753AE;
-    text-transform: uppercase;
-    letter-spacing: 1pt;
-    font-weight: 700;
-    margin-top: 1mm;
 }
 
 /* Notes a poznámky */
@@ -374,30 +383,44 @@ table.bank-frame td {
     font-weight: 600;
 }
 
-/* Footer */
-.commercial-register {
-    margin-top: 6mm;
-    margin-bottom: -4mm;
-    text-align: center;
-    font-size: 8pt;
-    color: #7A748C;
-    font-family: 'DejaVu Sans', sans-serif;
-}
+/* Footer — podpis dodavatele + zápis v OR */
 .footer {
-    margin-top: 6mm;
-    padding-top: 3mm;
-    border-top: 0.5pt solid #E7E3EE;
+    margin-top: 9mm;
+    padding-top: 3.5mm;
+    border-top: 0.6pt solid #E0DAF0;
     text-align: center;
-    font-size: 8pt;
+    font-size: 8.5pt;
+    color: #6E6885;
+    font-family: 'montserrat', 'DejaVu Sans', sans-serif;
+    letter-spacing: 0.2pt;
+}
+.footer-name {
+    font-weight: 700;
+    color: #3B2D83;
+}
+.footer-dot {
+    color: #C5BFD3;
+}
+.footer a, .footer-link {
+    color: inherit;
+    text-decoration: none;
+}
+.commercial-register {
+    margin-top: 1.8mm;
+    text-align: center;
+    font-size: 7.5pt;
     color: #A7A0BA;
-    font-family: 'DejaVu Sans', sans-serif;
+    font-family: 'montserrat', 'DejaVu Sans', sans-serif;
+    /* Bez letter-spacingu mPDF na 7.5pt přebíjí kern pár „Pl" tak, že „l" zmizí
+       (např. „v Plzni" → „v P zni"). Drobné rozpáčení glyfy vrátí a zlepší čitelnost. */
+    letter-spacing: 0.15pt;
 }
 /* mPDF htmlpagefooter — attribution na patě KAŽDÉ stránky */
 .page-attribution {
     text-align: center;
     font-size: 7pt;
     color: #C5BFD3;
-    font-family: 'DejaVu Sans', sans-serif;
+    font-family: 'montserrat', 'DejaVu Sans', sans-serif;
 }
 .page-attribution a {
     color: #A7A0BA;

@@ -16,12 +16,23 @@ final class StatementImporter
         private readonly Connection $db,
         private readonly GpcParser $parser,
         private readonly StatementMatcher $matcher,
+        // Cross-source dedup GPC ← e-mailové avízo: převezme párování (i manuální/split)
+        // z už spárované avízo-transakce místo dvojího párování téže platby.
+        private readonly EmailNoticeReconciler $reconciler,
     ) {}
 
     /**
+     * @param ?int $currencyId Cílový měnový účet (currencies.id). Když je zadán, jeho
+     *   měna + kód banky jsou AUTORITATIVNÍ a přebijí lookup podle čísla účtu. Nutné
+     *   u víceměnových účtů se sdíleným číslem (Raiffeisenbank: CZK/EUR/USD = jedno
+     *   číslo), kde GPC hlavička měnu nenese a z čísla účtu ji nelze odvodit (#167).
+     *   Volající (BankStatementAction) ověřuje příslušnost k supplierovi i shodu
+     *   čísla účtu; tady už jen načteme code/bank_code. NULL = dnešní chování
+     *   (lookup podle account_number — folder scan, jednoznačný účet).
+     *
      * @return array{statement_id:int, transactions:int, matched:int, duplicate:bool}
      */
-    public function import(string $content, string $fileName, ?int $userId): array
+    public function import(string $content, string $fileName, ?int $userId, ?int $currencyId = null): array
     {
         $hash = hash('sha256', $content);
         $pdo = $this->db->pdo();
@@ -39,24 +50,37 @@ final class StatementImporter
 
         // GPC header (074) NEMÁ pole pro měnu — máme to jen v 075 transakcích
         // (pozice 118-122, ISO 4217 numeric). Odvodíme měnu výpisu v pořadí:
-        //   1) Per transakce má parser currency vyplněnou (CREDITAS, Fio, KB ji
-        //      v 075 plní) → vezmeme dominantní non-null currency.
-        //   2) Fallback: lookup do currencies podle account_number — pokud má
-        //      supplier účet s naším account_number vedený v EUR, použijeme EUR.
-        //   3) Bez 1 ani 2: NULL (UI fallback CZK).
-        // Per bug report: GPC EUR výpis (Creditas, 00978) se zobrazoval jako
-        // CZK protože bank_statements.currency zůstával NULL.
-        $statementCurrency = $this->detectStatementCurrency($parsed['transactions'])
-            ?? $this->lookupAccountCurrency($h['account_number']);
+        //   1) Lookup do currencies podle account_number/IBAN — GPC výpis je vždy
+        //      z JEDNOHO účtu (= jedna měna), takže měna registrovaného účtu je
+        //      AUTORITATIVNÍ. Per-tx pole nelze upřednostnit: Fio ho dle své
+        //      specifikace plní KONSTANTNĚ "0203" (CZK) i u EUR účtu (#109 —
+        //      EUR výpis se pak zobrazil v Kč a kvůli currency guardu v matcheru
+        //      se nikdy nespároval).
+        //   2) Fallback (účet neregistrovaný): dominantní non-null currency
+        //      z 075 transakcí (CREDITAS/KB plní reálný kód; původní Creditas
+        //      bug report — EUR výpis s 00978 se zobrazoval jako CZK, protože
+        //      bank_statements.currency zůstával NULL).
+        //   3) Bez 1 i 2: NULL (UI fallback CZK).
+        // Účet z currencies (autoritativní měna + kód banky). GPC header kód banky
+        // nenese (na rozdíl od e-mailových avíz) → doplníme ho z konfigurovaného účtu,
+        // ať jsou data normalizovaná napříč zdroji (jinak GPC výpis bank_code = NULL).
+        // Explicitně zvolený měnový účet (#167) je autoritativní; jinak lookup podle čísla.
+        $account = $currencyId !== null
+            ? $this->loadCurrencyById($currencyId)
+            : $this->lookupAccount($h['account_number']);
+        $accountCurrency = $account['code'] ?? null;
+        $accountBankCode = $account['bank_code'] ?? null;
+        $statementCurrency = $accountCurrency
+            ?? $this->detectStatementCurrency($parsed['transactions']);
 
         $pdo->prepare(
             'INSERT INTO bank_statements
-                 (file_name, file_hash, file_content, account_number, currency,
+                 (file_name, file_hash, file_content, account_number, bank_code, currency,
                   statement_number, statement_date,
                   prev_balance, curr_balance, credit_total, debit_total, transaction_count, imported_by)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
         )->execute([
-            $fileName, $hash, $content, $h['account_number'], $statementCurrency,
+            $fileName, $hash, $content, $h['account_number'], $accountBankCode, $statementCurrency,
             $h['statement_number'], $h['statement_date'],
             $h['prev_balance'], $h['curr_balance'], $h['credit_total'], $h['debit_total'],
             count($parsed['transactions']), $userId,
@@ -72,10 +96,12 @@ final class StatementImporter
 
         $matched = 0;
         foreach ($parsed['transactions'] as $tx) {
-            // Per-tx currency má prioritu (multi-currency výpisy by stejně tak
-            // měly v 075 mít odlišný kód) — fallback na statement currency, aby
-            // se EUR transakce z banky, která 075.currency nevyplňuje, neztratila.
-            $txCurrency = $tx['currency'] ?? $statementCurrency;
+            // Měna registrovaného účtu přebíjí i per-tx pole (#109): výpis je
+            // jednoměnový a Fio do 075 píše konstantně CZK i u EUR účtu — per-tx
+            // hodnota by rozbila currency guard v matcheru. Per-tx kód se použije
+            // jen jako fallback, když účet není registrovaný (CREDITAS/KB ho
+            // plní reálně) — aby se EUR transakce neztratila.
+            $txCurrency = $accountCurrency ?? $tx['currency'] ?? $statementCurrency;
             $insertTx->execute([
                 $statementId, $tx['posted_at'], $tx['amount'], $txCurrency,
                 $tx['variable_symbol'], $tx['constant_symbol'], $tx['specific_symbol'],
@@ -83,6 +109,16 @@ final class StatementImporter
                 $tx['description'], $tx['bank_ref'],
             ]);
             $txId = (int) $pdo->lastInsertId();
+
+            // Cross-source dedup: pokud tato platba už dorazila e-mailovým avízem a je
+            // spárovaná, převezmi párování (i manuální/split) na oficiální GPC transakci
+            // místo dvojího párování (jinak falešný přeplatek). GPC = zdroj pravdy.
+            $takeover = $this->reconciler->takeOverFromEmailNotice($txId);
+            if ($takeover !== null) {
+                $matched++;
+                continue;
+            }
+
             $r = $this->matcher->match($txId);
             if (in_array($r['status'], ['auto_exact', 'auto_partial'], true)) {
                 $matched++;
@@ -130,20 +166,49 @@ final class StatementImporter
      * pracuje bez tenant kontextu, ale account_number je defakto unikátní).
      *
      * AccountNumberNormalizer::equals normalizuje leading zeros / dashes pro
-     * porovnání (např. `0000000112866714` z GPC vs `112866714` z UI inputu).
+     * porovnání (např. `0000000123456789` z GPC vs `123456789` z UI inputu).
+     * Porovnává se i domácí část IBANu (#109) — cizoměnové účty bývají
+     * evidované jen IBANem a bez toho EUR výpis spadl na CZK fallback.
+     *
+     * @return array{code:string, bank_code:?string}|null
      */
-    private function lookupAccountCurrency(string $accountNumber): ?string
+    private function lookupAccount(string $accountNumber): ?array
     {
         if ($accountNumber === '') return null;
         $stmt = $this->db->pdo()->query(
-            'SELECT account_number, code FROM currencies WHERE account_number IS NOT NULL'
+            'SELECT account_number, iban, code, bank_code FROM currencies
+              WHERE account_number IS NOT NULL OR iban IS NOT NULL'
         );
         if ($stmt === false) return null;
         foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
-            if (AccountNumberNormalizer::equals((string) $row['account_number'], $accountNumber)) {
-                return (string) $row['code'];
+            $iban = isset($row['iban']) && is_string($row['iban']) ? $row['iban'] : null;
+            if (AccountNumberNormalizer::matchesAny($accountNumber, $row['account_number'] ?? null, $iban)) {
+                return [
+                    'code'      => (string) $row['code'],
+                    'bank_code' => isset($row['bank_code']) && (string) $row['bank_code'] !== '' ? (string) $row['bank_code'] : null,
+                ];
             }
         }
         return null;
+    }
+
+    /**
+     * Měna + kód banky podle konkrétního currencies.id — pro víceměnové účty se
+     * sdíleným číslem (#167), kde lookup podle account_number nestačí (vrátil by
+     * první z N měnových variant). Příslušnost k supplierovi a shodu čísla účtu
+     * ověřuje caller (BankStatementAction); tady už jen načteme řádek.
+     *
+     * @return array{code:string, bank_code:?string}|null
+     */
+    private function loadCurrencyById(int $currencyId): ?array
+    {
+        $stmt = $this->db->pdo()->prepare('SELECT code, bank_code FROM currencies WHERE id = ?');
+        $stmt->execute([$currencyId]);
+        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+        if ($row === false) return null;
+        return [
+            'code'      => (string) $row['code'],
+            'bank_code' => isset($row['bank_code']) && (string) $row['bank_code'] !== '' ? (string) $row['bank_code'] : null,
+        ];
     }
 }

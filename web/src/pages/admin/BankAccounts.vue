@@ -1,6 +1,8 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { useRoute, useRouter } from 'vue-router'
+import { bankNameByCode, isKnownBankName } from '@/utils/czBankCodes'
 import {
   settingsApi,
   type BankEmailAccountMapping,
@@ -11,11 +13,73 @@ import {
   type Supplier,
 } from '@/api/settings'
 import { clientsApi, type CrpDphAccount } from '@/api/clients'
+import { bankApi, type AccountBalancesResponse } from '@/api/bank'
 import { apiErrorMessage } from '@/api/errors'
 import { useToast } from '@/composables/useToast'
+import { formatMoney, formatDate } from '@/composables/useFormat'
+import { useChartColors } from '@/composables/useTheme'
+import BalanceTrendChart from '@/components/charts/BalanceTrendChart.vue'
+
+// embedded = vykresleno jako záložky uvnitř BankPage.vue (Finance → Bankovní účty);
+// hlavičku a lištu záložek pak dodává obálka, aktivní tab řídí přes ?tab=.
+defineProps<{ embedded?: boolean }>()
 
 const { t } = useI18n()
 const toast = useToast()
+const route = useRoute()
+const router = useRouter()
+
+type Tab = 'accounts' | 'balances' | 'email'
+const VALID_TABS: Tab[] = ['accounts', 'balances', 'email']
+function initialTab(): Tab {
+  const q = String(route.query.tab || '')
+  return (VALID_TABS as string[]).includes(q) ? (q as Tab) : 'accounts'
+}
+const tab = ref<Tab>(initialTab())
+// Drž aktivní záložku v URL (?tab=…) — kvůli deep-linkům a zpětné navigaci.
+watch(tab, (v) => {
+  if (route.query.tab !== v) router.replace({ query: { ...route.query, tab: v } })
+  if (v === 'balances') loadBalances()
+})
+// Obrácený směr (embedded): přepnutí záložky v obálce mění jen ?tab= → propiš dovnitř.
+watch(() => route.query.tab, (q) => {
+  const v = String(q || '')
+  if ((VALID_TABS as string[]).includes(v) && tab.value !== v) tab.value = v as Tab
+})
+
+function tabLabel(tt: Tab): string {
+  return tt === 'accounts' ? t('bank_accounts.tab_accounts')
+    : tt === 'balances' ? t('bank_accounts.tab_balances')
+    : t('bank_accounts.tab_email_notices')
+}
+
+// Záložka „Stavy na účtech" — lazy načtení zůstatků z GPC výpisů.
+const chartColors = useChartColors()
+const balances = ref<AccountBalancesResponse | null>(null)
+const balancesLoading = ref(false)
+const balancesLoaded = ref(false)
+const balancesError = ref<string | null>(null)
+
+async function loadBalances() {
+  if (balancesLoaded.value || balancesLoading.value) return
+  balancesLoading.value = true
+  balancesError.value = null
+  try {
+    balances.value = await bankApi.accountBalances()
+    balancesLoaded.value = true
+  } catch (e) {
+    balancesError.value = apiErrorMessage(e, t('bank_accounts.balances_load_failed'))
+  } finally {
+    balancesLoading.value = false
+  }
+}
+
+const balanceMonthLabels = (a: { months: { month: string }[] }) => a.months.map(m => m.month)
+const balanceMonthValues = (a: { months: { balance: number | null }[] }) => a.months.map(m => m.balance)
+const accountColor = (i: number) => chartColors.value.palette[i % chartColors.value.palette.length]
+
+// Načti hned, když stránka startuje rovnou na téhle záložce (deep-link ?tab=balances).
+onMounted(() => { if (tab.value === 'balances') loadBalances() })
 
 const supplier = ref<Supplier | null>(null)
 const currencies = ref<CurrencyAccount[]>([])
@@ -40,7 +104,6 @@ const currencyFormOpen = ref(false)
 const imapFormOpen = ref(false)
 const editingImapId = ref<number | null>(null)
 const providerFormOpen = ref(false)
-const emailNoticesOpen = ref(false)
 const parserText = ref('')
 const parserSender = ref('info@rb.cz')
 const parserSubject = ref('Pohyb na účtě')
@@ -58,6 +121,14 @@ const bankDraftAccounts = ref<CrpDphAccount[]>([])
 const supplierHasDic = computed(() => /^\d{8,10}$/.test((supplier.value?.dic || '').replace(/\D/g, '')))
 
 const currencyDraft = reactive<Partial<CurrencyAccount>>({})
+// Auto-doplnění názvu banky podle kódu (číselník ČNB). Přepíše jen prázdný
+// nebo z číselníku pocházející název — ručně zadaný text nepřepisuje.
+watch(() => currencyDraft.bank_code, (code) => {
+  const name = bankNameByCode(code)
+  if (name && (!currencyDraft.bank_name || isKnownBankName(currencyDraft.bank_name))) {
+    currencyDraft.bank_name = name
+  }
+})
 const imapDraft = reactive<Partial<BankEmailImapSettings> & { password?: string }>(defaultImapDraft())
 const regexFieldDefinitions = [
   { key: 'variable_symbol', required: true },
@@ -70,6 +141,7 @@ const regexFieldDefinitions = [
   { key: 'constant_symbol', required: false },
   { key: 'message', required: false },
   { key: 'bank_ref', required: false },
+  { key: 'balance', required: false },
 ] as const
 type RegexFieldKey = typeof regexFieldDefinitions[number]['key']
 interface RegexProviderDraft {
@@ -95,6 +167,8 @@ function defaultImapDraft(): Partial<BankEmailImapSettings> & { password?: strin
     encryption: 'ssl',
     validate_cert: true,
     require_email_auth: false,
+    allow_forwarded: false,
+    forwarded_from: '',
     email_auth_serv_id: '',
     username: '',
     password: '',
@@ -162,10 +236,6 @@ async function load() {
       messages.value = overview.messages
       messagesTotal.value = overview.messages_total ?? overview.messages.length
       messagesPage.value = 1
-      // Rozbal jen když už něco existuje; jinak nech sbalené s dotazem.
-      emailNoticesOpen.value = imapAccounts.value.length > 0
-        || messages.value.length > 0
-        || mappings.value.some(m => m.enabled)
     } else {
       bankEmailLoadError.value = apiErrorMessage(overviewResult.reason, t('bank_accounts.load_config_failed'))
       mappings.value = []
@@ -446,11 +516,21 @@ function providerOwnerLabel(provider: BankEmailProvider): string {
   return provider.supplier_id === null ? t('bank_accounts.owner_system') : t('bank_accounts.owner_supplier')
 }
 
+// Jen 'regex' je editovatelný/duplikovatelný uživatelský provider; ostatní jsou
+// vestavěné kódové parsery konkrétní banky (needitují se). Fio dřív v tomhle
+// výčtu chybělo a propadalo na „Regex", takže v tabulce vypadalo stejně jako
+// editovatelný regex provider ČS — proto má teď taky vlastní název a neznámé
+// typy padají na obecný „Vestavěný parser", ne na „Regex".
 function parserTypeLabel(parserType: BankEmailProvider['parser_type']): string {
-  if (parserType === 'raiffeisenbank') return 'Raiffeisenbank'
-  if (parserType === 'unicredit') return 'UniCredit Bank'
-  if (parserType === 'csob') return 'ČSOB'
-  return 'Regex'
+  switch (parserType) {
+    case 'regex': return 'Regex'
+    case 'raiffeisenbank': return 'Raiffeisenbank'
+    case 'unicredit': return 'UniCredit Bank'
+    case 'csob': return 'ČSOB'
+    case 'fio': return 'Fio banka'
+    case 'creditas': return 'Creditas'
+    default: return t('bank_accounts.parser_builtin')
+  }
 }
 
 function providerSelectLabel(provider: BankEmailProvider): string {
@@ -506,6 +586,31 @@ function startEditProvider(provider: BankEmailProvider) {
     field_patterns: patterns,
     normalizer_config_json: JSON.stringify(provider.normalizer_config ?? {}, null, 2),
   })
+  providerFormOpen.value = true
+}
+
+// Duplikát libovolného (i systémového/globálního) regex provideru jako nový,
+// editovatelný provider dodavatele. Systémový ČS provider sám editovat nejde,
+// ale takhle si z něj uživatel udělá vlastní kopii a doladí ji (např. smaže
+// body_pattern, zvolní diakritiku) a otestuje přes „Test parseru" (#158).
+function startCloneProvider(provider: BankEmailProvider) {
+  if (provider.parser_type !== 'regex') return
+  const patterns = defaultFieldPatterns()
+  for (const field of regexFieldDefinitions) {
+    patterns[field.key] = String(provider.field_patterns?.[field.key] ?? '')
+  }
+  Object.assign(providerDraft, {
+    id: null, // null → uloží se jako nový provider, originál zůstane netknutý
+    name: `${provider.name} ${t('bank_accounts.provider_copy_suffix')}`,
+    code: '',
+    enabled: provider.enabled,
+    sender_whitelist: provider.sender_whitelist ?? '',
+    subject_pattern: provider.subject_pattern ?? '',
+    body_pattern: provider.body_pattern ?? '',
+    field_patterns: patterns,
+    normalizer_config_json: JSON.stringify(provider.normalizer_config ?? {}, null, 2),
+  })
+  syncProviderCode() // dogeneruje unikátní code z názvu kopie
   providerFormOpen.value = true
 }
 
@@ -593,14 +698,27 @@ async function deleteMessage(m: BankEmailProcessedMessage) {
 
 <template>
   <div>
-    <div class="mb-4">
+    <div v-if="!embedded" class="mb-4">
       <h1 class="text-2xl font-semibold">{{ t('bank_accounts.title') }}</h1>
       <p class="text-sm text-neutral-500 mt-0.5">{{ t('bank_accounts.subtitle') }}</p>
     </div>
 
     <div v-if="loading" class="text-sm text-neutral-500">{{ t('bank_accounts.loading') }}</div>
 
-    <div v-else class="space-y-5">
+    <div v-else>
+      <!-- Záložky ve stylu Číselníků / admin/emails; v embedded režimu je dodává BankPage. -->
+      <div v-if="!embedded" class="border-b border-neutral-200 mb-4 flex gap-1 overflow-x-auto">
+        <button v-for="tt in VALID_TABS" :key="tt"
+          @click="tab = tt"
+          class="cursor-pointer px-4 py-2 text-sm border-b-2 transition whitespace-nowrap"
+          :class="tab === tt
+            ? 'border-primary-600 text-primary-700 font-medium'
+            : 'border-transparent text-neutral-600 hover:text-neutral-900'">
+          {{ tabLabel(tt) }}
+        </button>
+      </div>
+
+      <div v-show="tab === 'accounts'" class="space-y-5">
       <section class="bg-surface border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
         <header class="px-5 py-3 border-b border-neutral-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
           <div class="min-w-0">
@@ -608,8 +726,8 @@ async function deleteMessage(m: BankEmailProcessedMessage) {
             <p class="text-xs text-neutral-500 mt-0.5">{{ t('bank_accounts.currencies_subtitle') }}</p>
           </div>
           <button type="button" @click="startNewCurrencyAccount()"
-            class="cursor-pointer shrink-0 self-start sm:self-auto whitespace-nowrap h-9 px-3 bg-surface border border-neutral-300 rounded-md text-sm hover:bg-neutral-50">
-            {{ t('bank_accounts.new_account') }}
+            class="cursor-pointer shrink-0 self-start sm:self-auto whitespace-nowrap inline-flex items-center gap-1.5 h-9 px-3 bg-primary-600 hover:bg-primary-700 text-white text-sm font-medium rounded-md">
+            + {{ t('bank_accounts.new_account') }}
           </button>
         </header>
 
@@ -693,22 +811,151 @@ async function deleteMessage(m: BankEmailProcessedMessage) {
           {{ t('bank_accounts.multi_account_hint') }}
         </div>
       </section>
+      </div>
 
-      <!-- E-mailová bankovní avíza (IMAP) — sbalené, dokud uživatel nezapne -->
-      <section class="bg-surface border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
-        <button type="button" @click="emailNoticesOpen = !emailNoticesOpen"
-          class="cursor-pointer w-full px-5 py-3 flex items-center justify-between gap-3 text-left hover:bg-neutral-50">
-          <div>
-            <h2 class="text-sm font-semibold uppercase tracking-wide text-neutral-500">{{ t('bank_accounts.email_notices_title') }}</h2>
-            <p class="text-xs text-neutral-500 mt-0.5">{{ t('bank_accounts.email_notices_question') }}</p>
-          </div>
-          <svg class="w-5 h-5 text-neutral-400 shrink-0 transition" :class="{ 'rotate-180': emailNoticesOpen }" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7" />
-          </svg>
-        </button>
-      </section>
+      <!-- Stavy na účtech — tabulka + měsíční vývoj + celkový CZK graf (dle GPC výpisů) -->
+      <div v-show="tab === 'balances'" class="space-y-5">
+        <div v-if="balancesLoading" class="text-sm text-neutral-500">{{ t('bank_accounts.balances_loading') }}</div>
+        <div v-else-if="balancesError" class="bg-warning-50 border border-warning-200 text-warning-700 rounded-lg px-4 py-3 text-sm">
+          {{ balancesError }}
+        </div>
+        <template v-else-if="balances">
+          <!-- Přehled účtů + aktuální stav -->
+          <section class="bg-surface border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
+            <header class="px-5 py-3 border-b border-neutral-200">
+              <h2 class="text-sm font-semibold uppercase tracking-wide text-neutral-500">{{ t('bank_accounts.balances_title') }}</h2>
+              <p class="text-xs text-neutral-500 mt-0.5">{{ t('bank_accounts.balances_subtitle') }}</p>
+            </header>
 
-      <div v-if="emailNoticesOpen" class="space-y-5">
+            <div v-if="balances.accounts.length === 0" class="px-5 py-4 text-sm text-neutral-500">
+              {{ t('bank_accounts.balances_empty') }}
+            </div>
+
+            <template v-else>
+              <!-- Desktop: tabulka -->
+              <div class="hidden md:block overflow-x-auto">
+                <table class="w-full text-sm table-sticky-first">
+                  <thead class="bg-neutral-50 text-xs text-neutral-500 uppercase tracking-wide">
+                    <tr>
+                      <th class="px-3 py-2 text-left font-medium">{{ t('bank_accounts.balances_th_account') }}</th>
+                      <th class="px-3 py-2 text-left font-medium">{{ t('bank_accounts.th_currency') }}</th>
+                      <th class="px-3 py-2 text-right font-medium">{{ t('bank_accounts.balances_th_current') }}</th>
+                      <th class="px-3 py-2 text-right font-medium">{{ t('bank_accounts.balances_th_current_czk') }}</th>
+                      <th class="px-3 py-2 text-left font-medium">{{ t('bank_accounts.balances_th_as_of') }}</th>
+                      <th class="px-3 py-2 text-right font-medium">{{ t('bank_accounts.balances_th_statements') }}</th>
+                    </tr>
+                  </thead>
+                  <tbody class="divide-y divide-neutral-100">
+                    <tr v-for="(a, i) in balances.accounts" :key="a.id">
+                      <td class="px-3 py-2">
+                        <div class="flex items-center gap-2">
+                          <span class="inline-block w-2.5 h-2.5 rounded-full shrink-0" :style="{ backgroundColor: accountColor(i) }"></span>
+                          <div class="min-w-0">
+                            <div class="font-medium truncate">{{ a.label }}</div>
+                            <div class="text-xs text-neutral-500 font-mono">
+                              {{ a.account_number }}<span v-if="a.bank_code"> / {{ a.bank_code }}</span>
+                            </div>
+                          </div>
+                        </div>
+                      </td>
+                      <td class="px-3 py-2 font-mono">{{ a.code }}</td>
+                      <td class="px-3 py-2 text-right font-mono whitespace-nowrap">{{ formatMoney(a.current_balance, a.code) }}</td>
+                      <td class="px-3 py-2 text-right font-mono whitespace-nowrap text-neutral-600">
+                        {{ a.current_balance_czk !== null ? formatMoney(a.current_balance_czk, 'CZK') : '—' }}
+                      </td>
+                      <td class="px-3 py-2 text-xs whitespace-nowrap">
+                        {{ formatDate(a.statement_date) }}
+                        <span v-if="a.current_source === 'email_notice'" :title="t('bank_accounts.balances_source_email_hint')"
+                          class="ml-1 inline-flex items-center px-1.5 py-0.5 rounded bg-neutral-100 text-neutral-500 font-medium">
+                          {{ t('bank_accounts.balances_source_email') }}
+                        </span>
+                      </td>
+                      <td class="px-3 py-2 text-right text-xs">{{ a.statement_count }}</td>
+                    </tr>
+                  </tbody>
+                  <tfoot class="bg-neutral-50 border-t border-neutral-200">
+                    <tr>
+                      <td class="px-3 py-2 font-medium" colspan="3">{{ t('bank_accounts.balances_total_czk') }}</td>
+                      <td class="px-3 py-2 text-right font-mono font-semibold whitespace-nowrap">{{ formatMoney(balances.total_czk.current, 'CZK') }}</td>
+                      <td class="px-3 py-2" colspan="2"></td>
+                    </tr>
+                  </tfoot>
+                </table>
+              </div>
+
+              <!-- Mobile: karty -->
+              <div class="md:hidden divide-y divide-neutral-100">
+                <div v-for="(a, i) in balances.accounts" :key="`mb-${a.id}`" class="p-3 space-y-1.5">
+                  <div class="flex items-center gap-2 min-w-0">
+                    <span class="inline-block w-2.5 h-2.5 rounded-full shrink-0" :style="{ backgroundColor: accountColor(i) }"></span>
+                    <span class="font-medium truncate">{{ a.label }}</span>
+                    <span class="font-mono text-xs text-neutral-500 ml-auto">{{ a.code }}</span>
+                  </div>
+                  <div class="font-mono text-xs text-neutral-500 break-all">{{ a.account_number }}<span v-if="a.bank_code"> / {{ a.bank_code }}</span></div>
+                  <div class="flex items-baseline justify-between gap-2">
+                    <span class="font-mono font-semibold">{{ formatMoney(a.current_balance, a.code) }}</span>
+                    <span v-if="a.current_balance_czk !== null && a.code !== 'CZK'" class="font-mono text-xs text-neutral-500">≈ {{ formatMoney(a.current_balance_czk, 'CZK') }}</span>
+                  </div>
+                  <div class="text-xs text-neutral-500">
+                    {{ t('bank_accounts.balances_th_as_of') }}: {{ formatDate(a.statement_date) }}
+                    <span v-if="a.current_source === 'email_notice'" :title="t('bank_accounts.balances_source_email_hint')"
+                      class="ml-1 inline-flex items-center px-1.5 py-0.5 rounded bg-neutral-100 text-neutral-500 font-medium">
+                      {{ t('bank_accounts.balances_source_email') }}
+                    </span>
+                  </div>
+                </div>
+                <div class="p-3 flex items-baseline justify-between bg-neutral-50">
+                  <span class="font-medium">{{ t('bank_accounts.balances_total_czk') }}</span>
+                  <span class="font-mono font-semibold">{{ formatMoney(balances.total_czk.current, 'CZK') }}</span>
+                </div>
+              </div>
+            </template>
+
+            <div v-if="balances.missing_rates.length > 0" class="px-5 py-2 text-xs text-warning-700 bg-warning-50 border-t border-warning-200">
+              {{ t('bank_accounts.balances_missing_rates', { codes: balances.missing_rates.join(', ') }) }}
+            </div>
+          </section>
+
+          <!-- Měsíční vývoj — malý graf na každý účet -->
+          <section v-if="balances.accounts.length > 0" class="bg-surface border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
+            <header class="px-5 py-3 border-b border-neutral-200">
+              <h2 class="text-sm font-semibold uppercase tracking-wide text-neutral-500">{{ t('bank_accounts.balances_monthly_title') }}</h2>
+              <p class="text-xs text-neutral-500 mt-0.5">{{ t('bank_accounts.balances_monthly_subtitle') }}</p>
+            </header>
+            <div class="p-5 grid gap-5 sm:grid-cols-2">
+              <div v-for="(a, i) in balances.accounts" :key="`ch-${a.id}`" class="border border-neutral-200 rounded-lg p-3">
+                <div class="flex items-center gap-2 mb-2">
+                  <span class="inline-block w-2.5 h-2.5 rounded-full shrink-0" :style="{ backgroundColor: accountColor(i) }"></span>
+                  <span class="text-sm font-medium truncate">{{ a.label }}</span>
+                  <span class="text-xs text-neutral-500 font-mono ml-auto">{{ a.code }}</span>
+                </div>
+                <div class="h-40">
+                  <BalanceTrendChart :labels="balanceMonthLabels(a)" :values="balanceMonthValues(a)" :currency="a.code" :color="accountColor(i)" />
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <!-- Celkový graf všech účtů přepočtený na CZK -->
+          <section v-if="balances.total_czk.months.length > 0" class="bg-surface border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
+            <header class="px-5 py-3 border-b border-neutral-200">
+              <h2 class="text-sm font-semibold uppercase tracking-wide text-neutral-500">{{ t('bank_accounts.balances_total_title') }}</h2>
+              <p class="text-xs text-neutral-500 mt-0.5">{{ t('bank_accounts.balances_total_subtitle') }}</p>
+            </header>
+            <div class="p-5">
+              <div class="h-72">
+                <BalanceTrendChart
+                  :labels="balances.total_czk.months.map(m => m.month)"
+                  :values="balances.total_czk.months.map(m => m.balance_czk)"
+                  currency="CZK" fill />
+              </div>
+            </div>
+          </section>
+        </template>
+      </div>
+
+      <!-- E-mailová bankovní avíza (IMAP) — vlastní záložka, vždy rozbalená -->
+      <div v-show="tab === 'email'" class="space-y-5">
       <div v-if="bankEmailLoadError" class="bg-warning-50 border border-warning-200 text-warning-700 rounded-lg px-4 py-3 text-sm">
         {{ bankEmailLoadError }}
       </div>
@@ -920,6 +1167,21 @@ async function deleteMessage(m: BankEmailProcessedMessage) {
                 class="w-full h-10 px-3 bg-surface border border-neutral-300 rounded-md text-sm font-mono" />
               <p class="text-xs text-neutral-500 mt-1">{{ t('bank_accounts.email_auth_serv_id_hint') }}</p>
             </div>
+            <div class="md:col-span-3 grid md:grid-cols-2 gap-4 mt-7 items-start">
+              <label class="flex items-start gap-2 text-sm">
+                <input v-model="imapDraft.allow_forwarded" type="checkbox" class="mt-0.5 rounded border-neutral-300 text-primary-600" />
+                <span>
+                  {{ t('bank_accounts.allow_forwarded') }}
+                  <span class="block text-xs text-neutral-500">{{ t('bank_accounts.allow_forwarded_hint') }}</span>
+                </span>
+              </label>
+              <div v-if="imapDraft.allow_forwarded">
+                <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('bank_accounts.forwarded_from') }}</label>
+                <input v-model="imapDraft.forwarded_from" type="text" placeholder="jan@firma.cz"
+                  class="w-full h-10 px-3 bg-surface border border-neutral-300 rounded-md text-sm font-mono" />
+                <p class="text-xs text-neutral-500 mt-1">{{ t('bank_accounts.forwarded_from_hint') }}</p>
+              </div>
+            </div>
             <div>
               <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('bank_accounts.on_success') }}</label>
               <select v-model="imapDraft.success_action" class="w-full h-10 px-3 bg-surface border border-neutral-300 rounded-md text-sm">
@@ -999,8 +1261,12 @@ async function deleteMessage(m: BankEmailProcessedMessage) {
                   <span :class="p.enabled ? 'text-success-600' : 'text-neutral-500'">{{ p.enabled ? t('common.yes') : t('common.no') }}</span>
                 </td>
                 <td class="px-3 py-2 text-right whitespace-nowrap">
-                  <button v-if="p.id !== null && p.supplier_id !== null && p.parser_type === 'regex'" type="button" @click="startEditProvider(p)"
+                  <button v-if="p.parser_type === 'regex'" type="button" @click="startCloneProvider(p)"
                     class="cursor-pointer text-primary-600 hover:text-primary-700 text-xs">
+                    {{ t('bank_accounts.provider_clone') }}
+                  </button>
+                  <button v-if="p.id !== null && p.supplier_id !== null && p.parser_type === 'regex'" type="button" @click="startEditProvider(p)"
+                    class="cursor-pointer text-primary-600 hover:text-primary-700 text-xs ml-2">
                     {{ t('common.edit') }}
                   </button>
                   <button v-if="p.id !== null && p.supplier_id !== null" type="button" @click="removeProvider(p)"
@@ -1085,7 +1351,10 @@ async function deleteMessage(m: BankEmailProcessedMessage) {
                   <div class="font-mono text-xs truncate">{{ m.message_id || m.fallback_hash }}</div>
                   <div class="text-xs text-neutral-500 truncate">{{ m.sender }} · {{ m.subject }}</div>
                 </td>
-                <td class="px-3 py-2">{{ m.status }}<div v-if="m.error_message" class="text-xs text-danger-500">{{ m.error_message }}</div></td>
+                <td class="px-3 py-2">
+                  <span :class="m.matched ? 'text-success-600' : (['match_failed','parse_failed','security_rejected','postprocess_failed'].includes(m.effective_status || m.status) ? 'text-danger-500' : '')">{{ m.effective_status || m.status }}</span>
+                  <div v-if="m.error_message" class="text-xs text-danger-500">{{ m.error_message }}</div>
+                </td>
                 <td class="px-3 py-2">{{ m.provider_code || '—' }}</td>
                 <td class="px-3 py-2 font-mono text-xs">
                   {{ m.parsed_payload?.variable_symbol || '—' }}

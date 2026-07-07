@@ -163,7 +163,15 @@ final class IsdocParser
             'project_number' => $projectNumber,
             'client'         => $client,    // AccountingCustomerParty (zákazník)
             'supplier'       => $supplier,  // AccountingSupplierParty (dodavatel — pro purchase invoice mapper)
+            // Platební účet dodavatele z <PaymentMeans> — pro „Zaplatit pomocí QR"
+            // u přijatých faktur (číslo účtu / IBAN / VS).
+            'payment'        => $this->parsePayment($xpath, $root),
             'items'          => $items,
+            // Částka „k úhradě" z <LegalMonetaryTotal>/<PayableAmount> — už zahrnuje
+            // <PayableRoundingAmount> (haléřové zaokrouhlení dodavatele). Mapper z ní
+            // dopočítá rounding offset proti součtu položek (viz IsdocToPurchaseInvoiceMapper).
+            // U cizoměnového dokladu preferuje *Curr (v měně faktury, jako řádkové totály).
+            'payable_amount' => $this->parsePayableAmount($xpath, $root, $hasForeignCurrency),
             // Rekapitulace DPH po sazbách z <TaxTotal>/<TaxSubTotal> — pro seed
             // override (PurchaseVatRecapSeeder), aby naše evidence seděla na doklad.
             // Nedaňový doklad (VATApplicable=false) DPH nepřiznává → prázdná rekapitulace.
@@ -209,6 +217,32 @@ final class IsdocParser
             $out[$key]['vat']  += abs($vat);
         }
         return $out;
+    }
+
+    /**
+     * Platební údaje dodavatele z `<PaymentMeans>/<Payment>/<Details>`.
+     * Schema generuje BankAccount group jako INLINE elementy (žádný <BankAccount>
+     * wrapper): ID = číslo účtu, BankCode, IBAN, BIC; plus VariableSymbol.
+     * Slouží pro QR platbu u přijatých faktur (zdroj `isdoc`).
+     *
+     * @return array{account_number:?string,bank_code:?string,iban:?string,bic:?string,variable_symbol:?string}
+     */
+    private function parsePayment(\DOMXPath $xpath, \DOMElement $root): array
+    {
+        $base = 'i:PaymentMeans/i:Payment/i:Details/';
+        $account = $this->text($xpath, $base . 'i:ID', $root);
+        $bank    = $this->text($xpath, $base . 'i:BankCode', $root);
+        $iban    = strtoupper((string) preg_replace('/\s+/', '', $this->text($xpath, $base . 'i:IBAN', $root)));
+        $bic     = strtoupper((string) preg_replace('/\s+/', '', $this->text($xpath, $base . 'i:BIC', $root)));
+        $vs      = $this->text($xpath, $base . 'i:VariableSymbol', $root);
+
+        return [
+            'account_number'  => $account !== '' ? $account : null,
+            'bank_code'       => $bank !== '' ? $bank : null,
+            'iban'            => $iban !== '' ? $iban : null,
+            'bic'             => $bic !== '' ? $bic : null,
+            'variable_symbol' => $vs !== '' ? $vs : null,
+        ];
     }
 
     /**
@@ -297,6 +331,20 @@ final class IsdocParser
             'unit_price_without_vat' => $unitPrice,
             'vat_rate'               => $vatRate,
         ];
+    }
+
+    /**
+     * Částka „k úhradě" z <LegalMonetaryTotal>/<PayableAmount>. Už zahrnuje
+     * <PayableRoundingAmount> (zaokrouhlení) i <PaidDepositsAmount> (zálohy).
+     * U cizoměnového dokladu preferuje *Curr (v měně faktury, jako řádkové totály).
+     * Vrací null, když doklad částku k úhradě neuvádí.
+     */
+    private function parsePayableAmount(\DOMXPath $xpath, \DOMElement $root, bool $foreignCurrency): ?float
+    {
+        $curr = $this->text($xpath, 'i:LegalMonetaryTotal/i:PayableAmountCurr', $root);
+        $loc  = $this->text($xpath, 'i:LegalMonetaryTotal/i:PayableAmount', $root);
+        $val  = ($foreignCurrency && $curr !== '') ? $curr : $loc;
+        return $val !== '' ? (float) $val : null;
     }
 
     private function text(\DOMXPath $xpath, string $expr, \DOMNode $context): string

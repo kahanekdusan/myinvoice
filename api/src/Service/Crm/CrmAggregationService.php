@@ -21,6 +21,143 @@ final class CrmAggregationService
 {
     public function __construct(private readonly Connection $db) {}
 
+    // ── Sjednocená metodika s Tržbami/Náklady (Stats/PurchaseSummary) ──────────
+    // Tržby/náklady/zisk se prezentují BEZ DPH pro plátce (DPH je průběžná položka),
+    // GROSS jen pro neplátce. Datová báze = DUZP s fallbackem na vystavení, ať
+    // období sedí s „Obratem" ve Tržbách. Cash metriky (cashflow, aging) zůstávají
+    // gross — řeší se vlastními dotazy níže.
+    /** Datum pro zařazení tržby do období (DUZP, fallback vystavení) — jako Stats. */
+    private const REV_DATE  = "COALESCE(i.tax_date, i.issue_date)";
+    /** Datum nákladu (pozdější z DUZP/vystavení) — jako Náklady. */
+    private const COST_DATE = "GREATEST(COALESCE(pi.tax_date, pi.issue_date), pi.issue_date)";
+    private const REV_STATUS  = "('issued', 'sent', 'reminded', 'paid')";
+    // tax_document = daňový doklad k přijaté platbě (#89): patří do tržeb; finál
+    // k záloze pak nese jen zbytek (záporné odpočtové řádky) → žádné dvojí započtení.
+    private const REV_TYPES   = "('invoice', 'credit_note', 'tax_document')";
+    private const COST_STATUS = "('received', 'booked', 'paid')";
+
+    /** Je dodavatel plátce DPH? Určuje net (plátce) vs gross (neplátce) bázi. */
+    private function isVatPayer(int $supplierId): bool
+    {
+        $stmt = $this->db->pdo()->prepare('SELECT is_vat_payer FROM supplier WHERE id = ?');
+        $stmt->execute([$supplierId]);
+        return (bool) $stmt->fetchColumn();
+    }
+
+    /**
+     * Zálohovou (advance) přijatou fakturu vyřaď z nákladů, pokud není zaplacená
+     * NEBO je spárovaná s vyúčtovací fakturou (proti dvojímu započtení) — shodně
+     * s PurchaseSummaryAction::advanceCostExclude.
+     */
+    private function advanceCostExclude(): string
+    {
+        return " AND NOT (COALESCE(pi.document_kind, '') = 'advance'"
+             . " AND (pi.status <> 'paid'"
+             . " OR EXISTS (SELECT 1 FROM purchase_invoices adv_s"
+             . " WHERE adv_s.advance_purchase_invoice_id = pi.id)))";
+    }
+
+    /** @return array<string,float|int> nulový akumulátor pro merge tržeb a nákladů per měna */
+    private function zeroAcc(): array
+    {
+        return ['rg' => 0.0, 'rn' => 0.0, 'rgc' => 0.0, 'rnc' => 0.0, 'ic' => 0,
+                'cg' => 0.0, 'cn' => 0.0, 'cgc' => 0.0, 'cnc' => 0.0, 'pc' => 0];
+    }
+
+    /** Sestaví KPI řádek z akumulátoru — vybere net (plátce) / gross (neplátce) do hlavních polí. */
+    private function buildKpi(string $currency, array $a, bool $payer, ?string $period): array
+    {
+        $rev     = $payer ? $a['rn']  : $a['rg'];
+        $revCzk  = $payer ? $a['rnc'] : $a['rgc'];
+        $cost    = $payer ? $a['cn']  : $a['cg'];
+        $costCzk = $payer ? $a['cnc'] : $a['cgc'];
+        return [
+            'period'          => $period,
+            'currency'        => $currency,
+            'revenue'         => $rev,
+            'revenue_net'     => $a['rn'],
+            'costs'           => $cost,
+            'costs_net'       => $a['cn'],
+            'profit'          => $rev - $cost,
+            'revenue_czk'     => $revCzk,
+            'revenue_net_czk' => $a['rnc'],
+            'costs_czk'       => $costCzk,
+            'costs_net_czk'   => $a['cnc'],
+            'profit_czk'      => $revCzk - $costCzk,
+            'invoice_count'   => $a['ic'],
+            'purchase_count'  => $a['pc'],
+            'vat_output'      => $a['rg'] - $a['rn'],
+            'vat_input'       => $a['cg'] - $a['cn'],
+        ];
+    }
+
+    /**
+     * Živá agregace tržeb + nákladů za půlotevřený interval [$from, $toExcl) per měna.
+     * Net pro plátce, gross pro neplátce; stejné predikáty i datová báze jako stránky
+     * Tržby (revenue) a Náklady (costs) → čísla sedí mezi sekcemi.
+     *
+     * @return list<array<string,mixed>>
+     */
+    private function aggregateRange(int $supplierId, bool $payer, string $from, string $toExcl, ?string $period = null): array
+    {
+        $pdo = $this->db->pdo();
+        $acc = [];
+
+        $rev = $pdo->prepare(
+            "SELECT cur.code AS currency,
+                    SUM(COALESCE(i.total_with_vat, 0))    AS g,
+                    SUM(COALESCE(i.total_without_vat, 0)) AS n,
+                    SUM(COALESCE(i.total_with_vat, 0)    * COALESCE(IF(cur.code='CZK',1,i.exchange_rate),1)) AS gc,
+                    SUM(COALESCE(i.total_without_vat, 0) * COALESCE(IF(cur.code='CZK',1,i.exchange_rate),1)) AS nc,
+                    COUNT(*) AS cnt
+               FROM invoices i
+               JOIN currencies cur ON cur.id = i.currency_id
+              WHERE i.supplier_id = ?
+                AND " . self::REV_DATE . " >= ? AND " . self::REV_DATE . " < ?
+                AND i.status IN " . self::REV_STATUS . "
+                AND i.invoice_type IN " . self::REV_TYPES . "
+           GROUP BY cur.code"
+        );
+        $rev->execute([$supplierId, $from, $toExcl]);
+        foreach ($rev->fetchAll(\PDO::FETCH_ASSOC) as $r) {
+            $c = (string) $r['currency'];
+            $acc[$c] = $acc[$c] ?? $this->zeroAcc();
+            $acc[$c]['rg'] = (float) $r['g'];  $acc[$c]['rn'] = (float) $r['n'];
+            $acc[$c]['rgc'] = (float) $r['gc']; $acc[$c]['rnc'] = (float) $r['nc'];
+            $acc[$c]['ic'] = (int) $r['cnt'];
+        }
+
+        $cost = $pdo->prepare(
+            "SELECT cur.code AS currency,
+                    SUM(COALESCE(pi.total_with_vat, 0))    AS g,
+                    SUM(COALESCE(pi.total_without_vat, 0)) AS n,
+                    SUM(COALESCE(pi.total_with_vat, 0)    * COALESCE(IF(cur.code='CZK',1,pi.exchange_rate),1)) AS gc,
+                    SUM(COALESCE(pi.total_without_vat, 0) * COALESCE(IF(cur.code='CZK',1,pi.exchange_rate),1)) AS nc,
+                    COUNT(*) AS cnt
+               FROM purchase_invoices pi
+               JOIN currencies cur ON cur.id = pi.currency_id
+              WHERE pi.supplier_id = ?
+                AND " . self::COST_DATE . " >= ? AND " . self::COST_DATE . " < ?
+                AND pi.status IN " . self::COST_STATUS . $this->advanceCostExclude() . "
+           GROUP BY cur.code"
+        );
+        $cost->execute([$supplierId, $from, $toExcl]);
+        foreach ($cost->fetchAll(\PDO::FETCH_ASSOC) as $r) {
+            $c = (string) $r['currency'];
+            $acc[$c] = $acc[$c] ?? $this->zeroAcc();
+            $acc[$c]['cg'] = (float) $r['g'];  $acc[$c]['cn'] = (float) $r['n'];
+            $acc[$c]['cgc'] = (float) $r['gc']; $acc[$c]['cnc'] = (float) $r['nc'];
+            $acc[$c]['pc'] = (int) $r['cnt'];
+        }
+
+        ksort($acc);
+        $out = [];
+        foreach ($acc as $c => $a) {
+            $out[] = $this->buildKpi((string) $c, $a, $payer, $period);
+        }
+        return $out;
+    }
+
     /**
      * SQL predikát pro pohledávkové doklady (co nám klienti dluží), alias `i`.
      * Kromě ostrých faktur a dobropisů zahrnuje i NEZAPLACENÉ NESPÁROVANÉ proformy
@@ -70,32 +207,138 @@ final class CrmAggregationService
     }
 
     /**
-     * Overview KPI: aktuální měsíc + minulý měsíc + YTD (per currency).
+     * Overview KPI (per currency):
+     *   - current_month / last_month — aktuální a minulý měsíc
+     *   - ytd / prev_year_ytd        — od začátku roku + stejné okno loni (fair YoY)
+     *   - last_12m / prev_12m        — klouzavých 12 měsíců + předchozích 12 (trailing YoY)
+     *   - prev_year_full             — celý předchozí kalendářní rok
      *
      * @return array{
      *   current_month: array<int, array<string,mixed>>,
      *   last_month: array<int, array<string,mixed>>,
      *   ytd: array<int, array<string,mixed>>,
+     *   last_12m: array<int, array<string,mixed>>,
+     *   prev_12m: array<int, array<string,mixed>>,
+     *   prev_year_full: array<int, array<string,mixed>>,
+     *   prev_year_ytd: array<int, array<string,mixed>>,
+     *   current_month_pipeline: array<int, array<string,mixed>>,
      *   currencies: list<string>
      * }
      */
     public function overview(int $supplierId): array
     {
-        // Auto-recompute pokud je summary starší než 5 minut — odpadá ruční klik "Přepočítat"
-        // po každém importu/úpravě faktury. sp je rychlá (~ms), tenant-scoped.
-        $this->recomputeIfStale($supplierId);
+        $payer = $this->isVatPayer($supplierId);
+        $d = static fn (\DateTimeImmutable $x): string => $x->format('Y-m-d');
 
-        $now = new \DateTimeImmutable();
-        $currentMonth = $now->format('Y-m');
-        $lastMonth = $now->modify('-1 month')->format('Y-m');
-        $yearStart = $now->format('Y-01');
+        $today          = new \DateTimeImmutable('today');
+        $tomorrow       = $today->modify('+1 day');
+        $firstThisMonth = $today->modify('first day of this month');
+        $firstNextMonth = $firstThisMonth->modify('+1 month');
+        $firstPrevMonth = $firstThisMonth->modify('-1 month');
+        $first12        = $firstThisMonth->modify('-11 months'); // trailing 12 kal. měsíců vč. aktuálního
+        $first24        = $firstThisMonth->modify('-23 months');
+
+        $year     = (int) $today->format('Y');
+        $yearStart     = new \DateTimeImmutable(sprintf('%04d-01-01', $year));
+        $prevYearStart = new \DateTimeImmutable(sprintf('%04d-01-01', $year - 1));
+        $prevYearYtdEnd = $tomorrow->modify('-1 year'); // loni do stejného dne (půlotevřeně)
 
         return [
-            'current_month' => $this->loadMonth($supplierId, $currentMonth),
-            'last_month'    => $this->loadMonth($supplierId, $lastMonth),
-            'ytd'           => $this->loadRange($supplierId, $yearStart, $currentMonth),
-            'currencies'    => $this->listCurrencies($supplierId),
+            'current_month'  => $this->aggregateRange($supplierId, $payer, $d($firstThisMonth), $d($firstNextMonth), $firstThisMonth->format('Y-m')),
+            'last_month'     => $this->aggregateRange($supplierId, $payer, $d($firstPrevMonth), $d($firstThisMonth), $firstPrevMonth->format('Y-m')),
+            'ytd'            => $this->aggregateRange($supplierId, $payer, $d($yearStart), $d($tomorrow)),
+            'last_12m'       => $this->aggregateRange($supplierId, $payer, $d($first12), $d($firstNextMonth)),
+            'prev_12m'       => $this->aggregateRange($supplierId, $payer, $d($first24), $d($first12)),
+            'prev_year_full' => $this->aggregateRange($supplierId, $payer, $d($prevYearStart), $d($yearStart)),
+            'prev_year_ytd'  => $this->aggregateRange($supplierId, $payer, $d($prevYearStart), $d($prevYearYtdEnd)),
+            'current_month_pipeline' => $this->currentMonthPipeline($supplierId, $payer, $d($firstThisMonth), $d($firstNextMonth)),
+            'currencies'     => $this->listCurrencies($supplierId),
         ];
+    }
+
+    /**
+     * Dopředné („pipeline") tržby aktuálního měsíce, které JEŠTĚ NEjsou v ostrých tržbách
+     * ({@see aggregateRange}) — doplňují dlaždici „Tržby tento měsíc" o očekávané příjmy:
+     *   - koncepty:           vydané faktury ve stavu draft (invoice/credit_note/tax_document)
+     *   - nespárované proformy: otevřené proformy bez navazujícího ostrého daňového dokladu
+     *                           (stejná „unmatched" sémantika jako {@see receivableDocTypeSql})
+     *
+     * Net pro plátce, gross pro neplátce (shodně s revenue). Per měna + CZK přepočet
+     * (revenue_czk pole) pro agregaci „Vše" na klientovi.
+     *
+     * @return list<array{currency:string, draft_revenue:float, draft_revenue_czk:float,
+     *                    draft_count:int, proforma_revenue:float, proforma_revenue_czk:float,
+     *                    proforma_count:int}>
+     */
+    private function currentMonthPipeline(int $supplierId, bool $payer, string $from, string $toExcl): array
+    {
+        $pdo = $this->db->pdo();
+        $zero = static fn (): array => ['dg' => 0.0, 'dn' => 0.0, 'dgc' => 0.0, 'dnc' => 0.0, 'dc' => 0,
+                                        'pg' => 0.0, 'pn' => 0.0, 'pgc' => 0.0, 'pnc' => 0.0, 'pc' => 0];
+        $acc = [];
+
+        // Koncepty — vydané faktury ve stavu draft (proformy řeší druhý dotaz zvlášť).
+        $draft = $pdo->prepare(
+            "SELECT cur.code AS currency,
+                    SUM(COALESCE(i.total_with_vat,0))    AS g, SUM(COALESCE(i.total_without_vat,0)) AS n,
+                    SUM(COALESCE(i.total_with_vat,0)    * COALESCE(IF(cur.code='CZK',1,i.exchange_rate),1)) AS gc,
+                    SUM(COALESCE(i.total_without_vat,0) * COALESCE(IF(cur.code='CZK',1,i.exchange_rate),1)) AS nc,
+                    COUNT(*) AS cnt
+               FROM invoices i JOIN currencies cur ON cur.id = i.currency_id
+              WHERE i.supplier_id = ?
+                AND " . self::REV_DATE . " >= ? AND " . self::REV_DATE . " < ?
+                AND i.status = 'draft'
+                AND i.invoice_type IN " . self::REV_TYPES . "
+           GROUP BY cur.code"
+        );
+        $draft->execute([$supplierId, $from, $toExcl]);
+        foreach ($draft->fetchAll(\PDO::FETCH_ASSOC) as $r) {
+            $c = (string) $r['currency'];
+            $acc[$c] = $acc[$c] ?? $zero();
+            $acc[$c]['dg'] = (float) $r['g'];  $acc[$c]['dn'] = (float) $r['n'];
+            $acc[$c]['dgc'] = (float) $r['gc']; $acc[$c]['dnc'] = (float) $r['nc'];
+            $acc[$c]['dc'] = (int) $r['cnt'];
+        }
+
+        // Nespárované proformy — otevřené (issued/sent/reminded) bez dceřiného ostrého dokladu.
+        $prof = $pdo->prepare(
+            "SELECT cur.code AS currency,
+                    SUM(COALESCE(i.total_with_vat,0))    AS g, SUM(COALESCE(i.total_without_vat,0)) AS n,
+                    SUM(COALESCE(i.total_with_vat,0)    * COALESCE(IF(cur.code='CZK',1,i.exchange_rate),1)) AS gc,
+                    SUM(COALESCE(i.total_without_vat,0) * COALESCE(IF(cur.code='CZK',1,i.exchange_rate),1)) AS nc,
+                    COUNT(*) AS cnt
+               FROM invoices i JOIN currencies cur ON cur.id = i.currency_id
+              WHERE i.supplier_id = ?
+                AND " . self::REV_DATE . " >= ? AND " . self::REV_DATE . " < ?
+                AND i.invoice_type = 'proforma'
+                AND i.status IN ('issued', 'sent', 'reminded')
+                AND NOT EXISTS (SELECT 1 FROM invoices ch
+                                 WHERE ch.parent_invoice_id = i.id AND ch.invoice_type = 'invoice')
+           GROUP BY cur.code"
+        );
+        $prof->execute([$supplierId, $from, $toExcl]);
+        foreach ($prof->fetchAll(\PDO::FETCH_ASSOC) as $r) {
+            $c = (string) $r['currency'];
+            $acc[$c] = $acc[$c] ?? $zero();
+            $acc[$c]['pg'] = (float) $r['g'];  $acc[$c]['pn'] = (float) $r['n'];
+            $acc[$c]['pgc'] = (float) $r['gc']; $acc[$c]['pnc'] = (float) $r['nc'];
+            $acc[$c]['pc'] = (int) $r['cnt'];
+        }
+
+        ksort($acc);
+        $out = [];
+        foreach ($acc as $c => $a) {
+            $out[] = [
+                'currency'             => (string) $c,
+                'draft_revenue'        => $payer ? $a['dn']  : $a['dg'],
+                'draft_revenue_czk'    => $payer ? $a['dnc'] : $a['dgc'],
+                'draft_count'          => $a['dc'],
+                'proforma_revenue'     => $payer ? $a['pn']  : $a['pg'],
+                'proforma_revenue_czk' => $payer ? $a['pnc'] : $a['pgc'],
+                'proforma_count'       => $a['pc'],
+            ];
+        }
+        return $out;
     }
 
     /**
@@ -106,48 +349,63 @@ final class CrmAggregationService
      */
     public function monthlyHistory(int $supplierId, int $monthsBack = 12, ?string $currency = null): array
     {
-        $start = (new \DateTimeImmutable())->modify('-' . $monthsBack . ' months')->format('Y-m');
-        $params = [$supplierId, $start];
-        $where = ' AND period_ym >= ?';
-        if ($currency !== null) {
-            $where .= ' AND currency = ?';
-            $params[] = $currency;
-        }
-        $stmt = $this->db->pdo()->prepare(
-            "SELECT period_ym, currency, revenue, revenue_net, costs, costs_net,
-                    revenue_czk, revenue_net_czk, costs_czk, costs_net_czk,
-                    invoice_count, purchase_count, vat_output, vat_input
-               FROM crm_monthly_summary
-              WHERE supplier_id = ?{$where}
-           ORDER BY period_ym ASC, currency ASC"
-        );
-        $stmt->execute($params);
-        $rows = $stmt->fetchAll(\PDO::FETCH_ASSOC);
+        $payer = $this->isVatPayer($supplierId);
+        $firstThisMonth = (new \DateTimeImmutable('today'))->modify('first day of this month');
+        $from   = $firstThisMonth->modify('-' . ($monthsBack - 1) . ' months')->format('Y-m-d');
+        $toExcl = $firstThisMonth->modify('+1 month')->format('Y-m-d');
+        $pdo = $this->db->pdo();
+        $acc = []; // "ym|currency" => zeroAcc
 
-        return array_map(function ($r) {
-            $rev = (float) $r['revenue'];
-            $costs = (float) $r['costs'];
-            $revCzk = (float) ($r['revenue_czk'] ?? 0);
-            $costsCzk = (float) ($r['costs_czk'] ?? 0);
-            return [
-                'period'          => (string) $r['period_ym'],
-                'currency'        => (string) $r['currency'],
-                'revenue'         => $rev,
-                'revenue_net'     => (float) $r['revenue_net'],
-                'costs'           => $costs,
-                'costs_net'       => (float) $r['costs_net'],
-                'profit'          => $rev - $costs,
-                'revenue_czk'     => $revCzk,
-                'revenue_net_czk' => (float) ($r['revenue_net_czk'] ?? 0),
-                'costs_czk'       => $costsCzk,
-                'costs_net_czk'   => (float) ($r['costs_net_czk'] ?? 0),
-                'profit_czk'      => $revCzk - $costsCzk,
-                'invoice_count'   => (int) $r['invoice_count'],
-                'purchase_count'  => (int) $r['purchase_count'],
-                'vat_output'      => (float) $r['vat_output'],
-                'vat_input'       => (float) $r['vat_input'],
-            ];
-        }, $rows);
+        $rev = $pdo->prepare(
+            "SELECT DATE_FORMAT(" . self::REV_DATE . ", '%Y-%m') AS ym, cur.code AS currency,
+                    SUM(COALESCE(i.total_with_vat,0)) AS g, SUM(COALESCE(i.total_without_vat,0)) AS n,
+                    SUM(COALESCE(i.total_with_vat,0)    * COALESCE(IF(cur.code='CZK',1,i.exchange_rate),1)) AS gc,
+                    SUM(COALESCE(i.total_without_vat,0) * COALESCE(IF(cur.code='CZK',1,i.exchange_rate),1)) AS nc,
+                    COUNT(*) AS cnt
+               FROM invoices i JOIN currencies cur ON cur.id = i.currency_id
+              WHERE i.supplier_id = ?
+                AND " . self::REV_DATE . " >= ? AND " . self::REV_DATE . " < ?
+                AND i.status IN " . self::REV_STATUS . " AND i.invoice_type IN " . self::REV_TYPES . "
+           GROUP BY ym, cur.code"
+        );
+        $rev->execute([$supplierId, $from, $toExcl]);
+        foreach ($rev->fetchAll(\PDO::FETCH_ASSOC) as $r) {
+            $k = $r['ym'] . '|' . $r['currency'];
+            $acc[$k] = $acc[$k] ?? $this->zeroAcc();
+            $acc[$k]['rg'] = (float) $r['g'];  $acc[$k]['rn'] = (float) $r['n'];
+            $acc[$k]['rgc'] = (float) $r['gc']; $acc[$k]['rnc'] = (float) $r['nc']; $acc[$k]['ic'] = (int) $r['cnt'];
+        }
+
+        $cost = $pdo->prepare(
+            "SELECT DATE_FORMAT(" . self::COST_DATE . ", '%Y-%m') AS ym, cur.code AS currency,
+                    SUM(COALESCE(pi.total_with_vat,0)) AS g, SUM(COALESCE(pi.total_without_vat,0)) AS n,
+                    SUM(COALESCE(pi.total_with_vat,0)    * COALESCE(IF(cur.code='CZK',1,pi.exchange_rate),1)) AS gc,
+                    SUM(COALESCE(pi.total_without_vat,0) * COALESCE(IF(cur.code='CZK',1,pi.exchange_rate),1)) AS nc,
+                    COUNT(*) AS cnt
+               FROM purchase_invoices pi JOIN currencies cur ON cur.id = pi.currency_id
+              WHERE pi.supplier_id = ?
+                AND " . self::COST_DATE . " >= ? AND " . self::COST_DATE . " < ?
+                AND pi.status IN " . self::COST_STATUS . $this->advanceCostExclude() . "
+           GROUP BY ym, cur.code"
+        );
+        $cost->execute([$supplierId, $from, $toExcl]);
+        foreach ($cost->fetchAll(\PDO::FETCH_ASSOC) as $r) {
+            $k = $r['ym'] . '|' . $r['currency'];
+            $acc[$k] = $acc[$k] ?? $this->zeroAcc();
+            $acc[$k]['cg'] = (float) $r['g'];  $acc[$k]['cn'] = (float) $r['n'];
+            $acc[$k]['cgc'] = (float) $r['gc']; $acc[$k]['cnc'] = (float) $r['nc']; $acc[$k]['pc'] = (int) $r['cnt'];
+        }
+
+        $rows = [];
+        foreach ($acc as $k => $a) {
+            [$ym, $cur] = explode('|', (string) $k, 2);
+            if ($currency !== null && $cur !== $currency) {
+                continue;
+            }
+            $rows[] = $this->buildKpi($cur, $a, $payer, $ym);
+        }
+        usort($rows, static fn ($x, $y) => ($x['period'] <=> $y['period']) ?: strcmp($x['currency'], $y['currency']));
+        return $rows;
     }
 
     /**
@@ -162,14 +420,16 @@ final class CrmAggregationService
         // a ranking je správný napříč měnami (1000 EUR > 20 000 CZK).
         // Parametr $currency zachován pro BC (ignoruje se — vždy ranking v CZK).
         unset($currency);
+        // Net pro plátce (DPH se vrací), gross pro neplátce — shodně s ostatními tržbami.
+        $rev = $this->isVatPayer($supplierId) ? 'i.total_without_vat' : 'i.total_with_vat';
         $start = (new \DateTimeImmutable())->modify('-' . $monthsBack . ' months')->format('Y-m-01');
         $params = [$supplierId, $start];
         $sql = "
             SELECT i.client_id, c.company_name,
-                   SUM(COALESCE(i.total_with_vat, 0) * COALESCE(IF(cur.code = 'CZK', 1, i.exchange_rate), 1)) AS revenue_czk,
+                   SUM(COALESCE($rev, 0) * COALESCE(IF(cur.code = 'CZK', 1, i.exchange_rate), 1)) AS revenue_czk,
                    COUNT(*) AS invoice_count,
                    GROUP_CONCAT(DISTINCT cur.code ORDER BY cur.code SEPARATOR ',') AS currencies,
-                   SUM(SUM(COALESCE(i.total_with_vat, 0) * COALESCE(IF(cur.code = 'CZK', 1, i.exchange_rate), 1))) OVER () AS total_all
+                   SUM(SUM(COALESCE($rev, 0) * COALESCE(IF(cur.code = 'CZK', 1, i.exchange_rate), 1))) OVER () AS total_all
               FROM invoices i
               JOIN clients c ON c.id = i.client_id
               JOIN currencies cur ON cur.id = i.currency_id
@@ -207,39 +467,62 @@ final class CrmAggregationService
      */
     public function yearlyHistory(int $supplierId, ?string $currency = null): array
     {
-        $params = [$supplierId];
-        $where = '';
-        if ($currency !== null) {
-            $where = ' AND currency = ?';
-            $params[] = $currency;
-        }
-        $stmt = $this->db->pdo()->prepare(
-            "SELECT SUBSTRING(period_ym, 1, 4) AS year, currency,
-                    SUM(revenue)        AS revenue,
-                    SUM(costs)          AS costs,
-                    SUM(invoice_count)  AS invoice_count,
-                    SUM(purchase_count) AS purchase_count
-               FROM crm_monthly_summary
-              WHERE supplier_id = ?{$where}
-           GROUP BY year, currency
-           ORDER BY year DESC, currency ASC"
-        );
-        $stmt->execute($params);
-        $rows = $stmt->fetchAll(\PDO::FETCH_ASSOC);
+        $payer = $this->isVatPayer($supplierId);
+        $pdo = $this->db->pdo();
+        $acc = []; // "year|currency" => zeroAcc
 
-        return array_map(static function ($r) {
-            $rev = (float) $r['revenue'];
-            $costs = (float) $r['costs'];
-            return [
-                'year'           => (int) $r['year'],
-                'currency'       => (string) $r['currency'],
-                'revenue'        => $rev,
-                'costs'          => $costs,
-                'profit'         => $rev - $costs,
-                'invoice_count'  => (int) $r['invoice_count'],
-                'purchase_count' => (int) $r['purchase_count'],
+        $rev = $pdo->prepare(
+            "SELECT YEAR(" . self::REV_DATE . ") AS yr, cur.code AS currency,
+                    SUM(COALESCE(i.total_with_vat,0)) AS g, SUM(COALESCE(i.total_without_vat,0)) AS n,
+                    COUNT(*) AS cnt
+               FROM invoices i JOIN currencies cur ON cur.id = i.currency_id
+              WHERE i.supplier_id = ?
+                AND i.status IN " . self::REV_STATUS . " AND i.invoice_type IN " . self::REV_TYPES . "
+           GROUP BY yr, cur.code"
+        );
+        $rev->execute([$supplierId]);
+        foreach ($rev->fetchAll(\PDO::FETCH_ASSOC) as $r) {
+            $k = $r['yr'] . '|' . $r['currency'];
+            $acc[$k] = $acc[$k] ?? $this->zeroAcc();
+            $acc[$k]['rg'] = (float) $r['g']; $acc[$k]['rn'] = (float) $r['n']; $acc[$k]['ic'] = (int) $r['cnt'];
+        }
+
+        $cost = $pdo->prepare(
+            "SELECT YEAR(" . self::COST_DATE . ") AS yr, cur.code AS currency,
+                    SUM(COALESCE(pi.total_with_vat,0)) AS g, SUM(COALESCE(pi.total_without_vat,0)) AS n,
+                    COUNT(*) AS cnt
+               FROM purchase_invoices pi JOIN currencies cur ON cur.id = pi.currency_id
+              WHERE pi.supplier_id = ?
+                AND pi.status IN " . self::COST_STATUS . $this->advanceCostExclude() . "
+           GROUP BY yr, cur.code"
+        );
+        $cost->execute([$supplierId]);
+        foreach ($cost->fetchAll(\PDO::FETCH_ASSOC) as $r) {
+            $k = $r['yr'] . '|' . $r['currency'];
+            $acc[$k] = $acc[$k] ?? $this->zeroAcc();
+            $acc[$k]['cg'] = (float) $r['g']; $acc[$k]['cn'] = (float) $r['n']; $acc[$k]['pc'] = (int) $r['cnt'];
+        }
+
+        $rows = [];
+        foreach ($acc as $k => $a) {
+            [$yr, $cur] = explode('|', (string) $k, 2);
+            if ($currency !== null && $cur !== $currency) {
+                continue;
+            }
+            $rv = $payer ? $a['rn'] : $a['rg'];
+            $ct = $payer ? $a['cn'] : $a['cg'];
+            $rows[] = [
+                'year'           => (int) $yr,
+                'currency'       => $cur,
+                'revenue'        => $rv,
+                'costs'          => $ct,
+                'profit'         => $rv - $ct,
+                'invoice_count'  => $a['ic'],
+                'purchase_count' => $a['pc'],
             ];
-        }, $rows);
+        }
+        usort($rows, static fn ($x, $y) => ($y['year'] <=> $x['year']) ?: strcmp($x['currency'], $y['currency']));
+        return $rows;
     }
 
     /**
@@ -250,14 +533,16 @@ final class CrmAggregationService
         // CZK přepočet přes pi.exchange_rate — multi-currency vendor se neroztrhne.
         // Parametr $currency zachován pro BC (ignoruje se — vždy ranking v CZK).
         unset($currency);
+        // Net pro plátce (vstupní DPH je odpočitatelná), gross pro neplátce — jako Náklady.
+        $cost = $this->isVatPayer($supplierId) ? 'pi.total_without_vat' : 'pi.total_with_vat';
         $start = (new \DateTimeImmutable())->modify('-' . $monthsBack . ' months')->format('Y-m-01');
         $params = [$supplierId, $start];
         $sql = "
             SELECT pi.vendor_id, c.company_name,
-                   SUM(COALESCE(pi.total_with_vat, 0) * COALESCE(IF(cur.code = 'CZK', 1, pi.exchange_rate), 1)) AS costs_czk,
+                   SUM(COALESCE($cost, 0) * COALESCE(IF(cur.code = 'CZK', 1, pi.exchange_rate), 1)) AS costs_czk,
                    COUNT(*) AS purchase_count,
                    GROUP_CONCAT(DISTINCT cur.code ORDER BY cur.code SEPARATOR ',') AS currencies,
-                   SUM(SUM(COALESCE(pi.total_with_vat, 0) * COALESCE(IF(cur.code = 'CZK', 1, pi.exchange_rate), 1))) OVER () AS total_all
+                   SUM(SUM(COALESCE($cost, 0) * COALESCE(IF(cur.code = 'CZK', 1, pi.exchange_rate), 1))) OVER () AS total_all
               FROM purchase_invoices pi
               JOIN clients c ON c.id = pi.vendor_id
          LEFT JOIN currencies cur ON cur.id = pi.currency_id
@@ -292,78 +577,24 @@ final class CrmAggregationService
     }
 
     /**
-     * @return list<array<string,mixed>>
-     */
-    private function loadMonth(int $supplierId, string $periodYm): array
-    {
-        $stmt = $this->db->pdo()->prepare(
-            "SELECT period_ym, currency, revenue, revenue_net, costs, costs_net,
-                    revenue_czk, revenue_net_czk, costs_czk, costs_net_czk,
-                    invoice_count, purchase_count, vat_output, vat_input
-               FROM crm_monthly_summary
-              WHERE supplier_id = ? AND period_ym = ?
-           ORDER BY currency ASC"
-        );
-        $stmt->execute([$supplierId, $periodYm]);
-        return array_map(fn ($r) => $this->castSummary($r), $stmt->fetchAll(\PDO::FETCH_ASSOC));
-    }
-
-    /**
-     * @return list<array<string,mixed>>
-     */
-    private function loadRange(int $supplierId, string $fromYm, string $toYm): array
-    {
-        $stmt = $this->db->pdo()->prepare(
-            "SELECT currency,
-                    SUM(revenue) AS revenue, SUM(revenue_net) AS revenue_net,
-                    SUM(costs)   AS costs,   SUM(costs_net)   AS costs_net,
-                    SUM(revenue_czk) AS revenue_czk, SUM(revenue_net_czk) AS revenue_net_czk,
-                    SUM(costs_czk)   AS costs_czk,   SUM(costs_net_czk)   AS costs_net_czk,
-                    SUM(invoice_count) AS invoice_count,
-                    SUM(purchase_count) AS purchase_count,
-                    SUM(vat_output) AS vat_output, SUM(vat_input) AS vat_input
-               FROM crm_monthly_summary
-              WHERE supplier_id = ? AND period_ym >= ? AND period_ym <= ?
-           GROUP BY currency
-           ORDER BY currency ASC"
-        );
-        $stmt->execute([$supplierId, $fromYm, $toYm]);
-        return array_map(fn ($r) => $this->castSummary($r), $stmt->fetchAll(\PDO::FETCH_ASSOC));
-    }
-
-    private function castSummary(array $r): array
-    {
-        return [
-            'period'         => $r['period_ym'] ?? null,
-            'currency'       => (string) $r['currency'],
-            'revenue'        => (float) $r['revenue'],
-            'revenue_net'    => (float) $r['revenue_net'],
-            'costs'          => (float) $r['costs'],
-            'costs_net'      => (float) $r['costs_net'],
-            'profit'         => (float) $r['revenue'] - (float) $r['costs'],
-            // CZK-přepočtené hodnoty (pro agregaci „Vše" napříč měnami)
-            'revenue_czk'     => (float) ($r['revenue_czk'] ?? 0),
-            'revenue_net_czk' => (float) ($r['revenue_net_czk'] ?? 0),
-            'costs_czk'       => (float) ($r['costs_czk'] ?? 0),
-            'costs_net_czk'   => (float) ($r['costs_net_czk'] ?? 0),
-            'profit_czk'      => (float) ($r['revenue_czk'] ?? 0) - (float) ($r['costs_czk'] ?? 0),
-            'invoice_count'  => (int) $r['invoice_count'],
-            'purchase_count' => (int) $r['purchase_count'],
-            'vat_output'     => (float) $r['vat_output'],
-            'vat_input'      => (float) $r['vat_input'],
-        ];
-    }
-
-    /**
+     * Měny, ve kterých má dodavatel relevantní doklady (vydané tržby + přijaté náklady).
+     * Živě z faktur, ať se nabídka měn shoduje s tím, co aggregateRange skutečně vrací.
+     *
      * @return list<string>
      */
     private function listCurrencies(int $supplierId): array
     {
         $stmt = $this->db->pdo()->prepare(
-            'SELECT DISTINCT currency FROM crm_monthly_summary WHERE supplier_id = ? ORDER BY currency'
+            "SELECT DISTINCT code FROM (
+                SELECT cur.code AS code FROM invoices i JOIN currencies cur ON cur.id = i.currency_id
+                 WHERE i.supplier_id = ? AND i.status IN " . self::REV_STATUS . " AND i.invoice_type IN " . self::REV_TYPES . "
+                UNION
+                SELECT cur.code AS code FROM purchase_invoices pi JOIN currencies cur ON cur.id = pi.currency_id
+                 WHERE pi.supplier_id = ? AND pi.status IN " . self::COST_STATUS . "
+             ) t ORDER BY code"
         );
-        $stmt->execute([$supplierId]);
-        return array_column($stmt->fetchAll(\PDO::FETCH_ASSOC), 'currency');
+        $stmt->execute([$supplierId, $supplierId]);
+        return array_column($stmt->fetchAll(\PDO::FETCH_ASSOC), 'code');
     }
 
     /**
@@ -386,12 +617,13 @@ final class CrmAggregationService
                 END AS bucket,
                 COALESCE(c.code, 'CZK') AS currency,
                 COUNT(*) AS cnt,
-                SUM(COALESCE(i.total_with_vat, 0)) AS total
+                SUM(COALESCE(i.amount_to_pay, 0) - COALESCE(i.paid_total, 0)) AS total
               FROM invoices i
          LEFT JOIN currencies c ON c.id = i.currency_id
              WHERE i.supplier_id = ?
                AND i.status IN ('issued', 'sent', 'reminded')
                AND " . $this->receivableDocTypeSql() . "
+               AND (i.invoice_type NOT IN ('invoice','proforma','tax_document') OR i.amount_to_pay - i.paid_total > 0)
           GROUP BY bucket, currency
           ORDER BY currency, FIELD(bucket, 'not_due', 'overdue_30', 'overdue_60', 'overdue_90', 'overdue_90_plus')
         ";
@@ -617,11 +849,12 @@ final class CrmAggregationService
         // CZK přepočet — bez něj sumace EUR+CZK ve stejné kategorii dává nesmysl
         // (100 EUR + 50 000 CZK = 50 100). Parametr $currency BC, vždy CZK.
         unset($currency);
+        $cost = $this->isVatPayer($supplierId) ? 'pi.total_without_vat' : 'pi.total_with_vat';
         $start = (new \DateTimeImmutable())->modify('-' . $monthsBack . ' months')->format('Y-m-d');
         $params = [$supplierId, $start];
         $sql = "
             SELECT pi.expense_category_id, ec.code, ec.label,
-                   SUM(COALESCE(pi.total_with_vat, 0) * COALESCE(IF(cur.code = 'CZK', 1, pi.exchange_rate), 1)) AS total,
+                   SUM(COALESCE($cost, 0) * COALESCE(IF(cur.code = 'CZK', 1, pi.exchange_rate), 1)) AS total,
                    COUNT(*) AS cnt
               FROM purchase_invoices pi
          LEFT JOIN expense_categories ec ON ec.id = pi.expense_category_id
@@ -662,11 +895,12 @@ final class CrmAggregationService
         // CZK přepočet — bez něj sumace EUR+CZK ve stejné kategorii dává nesmysl.
         // Parametr $currency BC, vždy CZK (jako expenseBreakdown).
         unset($currency);
+        $rev = $this->isVatPayer($supplierId) ? 'i.total_without_vat' : 'i.total_with_vat';
         $start = (new \DateTimeImmutable())->modify('-' . $monthsBack . ' months')->format('Y-m-d');
         $params = [$supplierId, $start];
         $sql = "
             SELECT i.revenue_category_id, rc.code, rc.label,
-                   SUM(COALESCE(i.total_with_vat, 0) * COALESCE(IF(cur.code = 'CZK', 1, i.exchange_rate), 1)) AS total,
+                   SUM(COALESCE($rev, 0) * COALESCE(IF(cur.code = 'CZK', 1, i.exchange_rate), 1)) AS total,
                    COUNT(*) AS cnt
               FROM invoices i
          LEFT JOIN revenue_categories rc ON rc.id = i.revenue_category_id
@@ -702,12 +936,13 @@ final class CrmAggregationService
     {
         // GROUP BY jen po klientovi (ne per currency) — multi-currency klient byl rozdělen
         // do N řádků (jedna měna = jedna pozice v listu, partial revenue). CZK přepočet.
+        $rev = $this->isVatPayer($supplierId) ? 'i.total_without_vat' : 'i.total_with_vat';
         $today = (new \DateTimeImmutable())->format('Y-m-d');
         $stmt = $this->db->pdo()->prepare(
             "SELECT c.id AS client_id, c.company_name,
                     MAX(i.issue_date) AS last_invoice_date,
                     DATEDIFF(?, MAX(i.issue_date)) AS days_since,
-                    SUM(COALESCE(i.total_with_vat, 0) * COALESCE(IF(cur.code = 'CZK', 1, i.exchange_rate), 1)) AS total_revenue,
+                    SUM(COALESCE($rev, 0) * COALESCE(IF(cur.code = 'CZK', 1, i.exchange_rate), 1)) AS total_revenue,
                     GROUP_CONCAT(DISTINCT cur.code ORDER BY cur.code SEPARATOR ',') AS currencies
                FROM clients c
                JOIN invoices i ON i.client_id = c.id AND i.status NOT IN ('draft', 'cancelled')
@@ -743,22 +978,29 @@ final class CrmAggregationService
      *   total: int
      * }
      */
-    public function actionItems(int $supplierId, ?int $userId = null): array
+    public function actionItems(int $supplierId, ?int $userId = null, ?\DateTimeImmutable $now = null): array
     {
         $items = [];
         $pdo = $this->db->pdo();
-        $today = (new \DateTimeImmutable())->format('Y-m-d');
+        $nowDt = $now ?? new \DateTimeImmutable();
+        $today = $nowDt->format('Y-m-d');
 
         // Load dismissals once
         $dismissals = $this->loadDismissals($supplierId, $userId);
 
-        // 1. Overdue vystavené faktury — pošli upomínku
+        // 1. Overdue vystavené faktury — pošli upomínku.
+        // Stejná pohledávková sémantika jako cílový seznam /invoices?overdue=1
+        // (InvoiceRepository): vč. nezaplacených NESPÁROVANÝCH proforem, vyřazení
+        // finálních dokladů k zaplacené proformě (amount_to_pay = 0). Drží count = seznam.
         $stmt = $pdo->prepare(
-            "SELECT id FROM invoices
-              WHERE supplier_id = ?
-                AND status IN ('issued', 'sent', 'reminded')
-                AND invoice_type != 'proforma'
-                AND due_date < ?"
+            "SELECT i.id FROM invoices i
+              WHERE i.supplier_id = ?
+                AND i.status IN ('issued', 'sent', 'reminded')
+                AND i.due_date <= ?
+                AND (i.invoice_type != 'proforma'
+                     OR NOT EXISTS (SELECT 1 FROM invoices ch
+                                     WHERE ch.parent_invoice_id = i.id AND ch.invoice_type = 'invoice'))
+                AND (i.invoice_type NOT IN ('invoice','proforma','tax_document') OR i.amount_to_pay - i.paid_total > 0)"
         );
         $stmt->execute([$supplierId, $today]);
         $overdueIds = array_map('intval', $stmt->fetchAll(\PDO::FETCH_COLUMN));
@@ -771,8 +1013,43 @@ final class CrmAggregationService
                 'title'    => 'Pošli upomínky',
                 'hint'     => sprintf('%d %s po splatnosti', $overdueCount,
                     $overdueCount === 1 ? 'faktura' : ($overdueCount < 5 ? 'faktury' : 'faktur')),
-                'link'     => '/invoices?status=overdue',
+                'link'     => '/invoices?overdue=1',
                 'count'    => $overdueCount,
+            ];
+        }
+
+        // 1b. Nespárované příchozí platby z banky — spáruj s vystavenými fakturami.
+        // Scope banky je přes account_number z currencies dodavatele (bank_statements
+        // nemá supplier_id) — stejný predikát jako BankStatementAction::list().
+        // Jen příchozí (amount > 0) za posledních 90 dní, aby se nevynořovaly prastaré
+        // vlastní převody/poplatky; starší šum lze i tak skrýt přes dismiss „historická".
+        $stmt = $pdo->prepare(
+            "SELECT bt.id FROM bank_transactions bt
+               JOIN bank_statements bs ON bs.id = bt.statement_id
+              WHERE bt.match_status = 'unmatched'
+                AND bt.amount > 0
+                AND bt.posted_at >= DATE_SUB(?, INTERVAL 90 DAY)
+                AND EXISTS (
+                    SELECT 1 FROM currencies cur
+                     WHERE cur.supplier_id = ?
+                       AND TRIM(LEADING '0' FROM REGEXP_REPLACE(IFNULL(cur.account_number, ''), '[^0-9]', ''))
+                         = TRIM(LEADING '0' FROM REGEXP_REPLACE(IFNULL(bs.account_number, ''),  '[^0-9]', ''))
+                       AND (bs.bank_code IS NULL OR cur.bank_code IS NULL OR cur.bank_code = bs.bank_code)
+                )"
+        );
+        $stmt->execute([$today, $supplierId]);
+        $bankIds = array_map('intval', $stmt->fetchAll(\PDO::FETCH_COLUMN));
+        $bankIds = $this->filterByDismissal($bankIds, $dismissals, 'bank_unmatched');
+        $bankCount = count($bankIds);
+        if ($bankCount > 0) {
+            $items[] = [
+                'type'     => 'bank_unmatched',
+                'severity' => $bankCount > 5 ? 'high' : 'medium',
+                'title'    => 'Spáruj platby z banky',
+                'hint'     => sprintf('%d nespárovaných příchozích %s z výpisů', $bankCount,
+                    $bankCount === 1 ? 'platba' : ($bankCount < 5 ? 'platby' : 'plateb')),
+                'link'     => '/bank',
+                'count'    => $bankCount,
             ];
         }
 
@@ -824,34 +1101,86 @@ final class CrmAggregationService
             ];
         }
 
-        // 4. Reports deadlines — DPH/KH/SH se podávají 25. následujícího měsíce
-        // (date-based, historical mode chová se jako forever na aktuální měsíc)
-        if (!$this->isFullyDismissed($dismissals, 'tax_deadline')) {
+        // 3b. Koncepty přijatých faktur — naimportované (API/AI/PDF) zůstávají ve stavu
+        // draft kvůli upomínkám/kontrole; vyzvi k revizi a zaúčtování.
+        $stmt = $pdo->prepare(
+            "SELECT id FROM purchase_invoices WHERE supplier_id = ? AND status = 'draft'"
+        );
+        $stmt->execute([$supplierId]);
+        $purchaseDraftIds = array_map('intval', $stmt->fetchAll(\PDO::FETCH_COLUMN));
+        $purchaseDraftIds = $this->filterByDismissal($purchaseDraftIds, $dismissals, 'purchase_drafts');
+        $purchaseDraftCount = count($purchaseDraftIds);
+        if ($purchaseDraftCount > 0) {
+            $items[] = [
+                'type'     => 'purchase_drafts',
+                'severity' => 'low',
+                'title'    => 'Zkontroluj koncepty přijatých faktur',
+                'hint'     => sprintf('%d %s čeká na revizi/zaúčtování', $purchaseDraftCount,
+                    $purchaseDraftCount === 1 ? 'koncept' : ($purchaseDraftCount < 5 ? 'koncepty' : 'konceptů')),
+                'link'     => '/purchase-invoices?status=draft',
+                'count'    => $purchaseDraftCount,
+            ];
+        }
+
+        // 4. Reports deadlines — DPH přiznání + Kontrolní hlášení se podávají 25. dne
+        // po skončení zdaňovacího období. Respektuje periodicitu dodavatele
+        // (supplier.vat_period + taxpayer_type) — viz taxDeadlineItems().
+        // (date-based, historical mode chová se jako forever na aktuální období)
+        foreach ($this->taxDeadlineItems($supplierId, $nowDt) as $taxItem) {
+            if (!$this->isFullyDismissed($dismissals, (string) $taxItem['type'])) {
+                $items[] = $taxItem;
+            }
+        }
+
+        // 4b. Souhrnné hlášení (SH) — také se podává 25. následujícího měsíce, ale JEN
+        // pokud za uplynulý měsíc existují EU B2B plnění (dodání zboží/služeb do JČS
+        // plátci s DIČ, kódy 20/22/31 nebo reverse charge na EU odběratele). Bez nich
+        // se SH nepodává — proto se akce zobrazí jen když je co reportovat.
+        // Pozn.: kontrolujeme měsíční periodu; čtvrtletní filtry (jen služby) mohou být
+        // mírně přepomenuty, lze skrýt přes dismiss.
+        if (!$this->isFullyDismissed($dismissals, 'shv_deadline')) {
             $now = new \DateTimeImmutable($today);
-            $currentMonth = (int) $now->format('n');
-            $currentYear = (int) $now->format('Y');
-            $deadlineDate = $currentMonth === 1
-                ? "{$currentYear}-01-25"
-                : sprintf('%04d-%02d-25', $currentYear, $currentMonth);
-            $deadlineDt = new \DateTimeImmutable($deadlineDate);
-            $daysToDeadline = (int) $now->diff($deadlineDt)->format('%r%a');
-            $stmt = $pdo->prepare("SELECT is_vat_payer FROM supplier WHERE id = ?");
-            $stmt->execute([$supplierId]);
-            $isVatPayer = (bool) $stmt->fetchColumn();
-            if ($isVatPayer && $daysToDeadline >= -3 && $daysToDeadline <= 7) {
-                $sev = $daysToDeadline < 0 ? 'high' : ($daysToDeadline <= 2 ? 'high' : 'medium');
-                $items[] = [
-                    'type'     => 'tax_deadline',
-                    'severity' => $sev,
-                    'title'    => 'DPH + KH za uplynulý měsíc',
-                    'hint'     => $daysToDeadline < 0
-                        ? sprintf('Termín byl %d dní zpět — podej co nejdříve!', abs($daysToDeadline))
-                        : sprintf('Termín podání za %d %s (do %s)', $daysToDeadline,
-                            $daysToDeadline === 1 ? 'den' : ($daysToDeadline < 5 ? 'dny' : 'dní'),
-                            $deadlineDate),
-                    'link'     => '/reports/dph',
-                    'days'     => $daysToDeadline,
-                ];
+            $deadlineDate = sprintf('%04d-%02d-25', (int) $now->format('Y'), (int) $now->format('n'));
+            $daysToDeadline = (int) $now->diff(new \DateTimeImmutable($deadlineDate))->format('%r%a');
+            if ($daysToDeadline >= -3 && $daysToDeadline <= 7) {
+                $prevMonth = $now->modify('first day of last month');
+                $periodStart = $prevMonth->format('Y-m-01');
+                $periodEnd = $prevMonth->format('Y-m-t');
+                $stmt = $pdo->prepare(
+                    "SELECT 1
+                       FROM invoices i
+                       JOIN clients c ON c.id = i.client_id
+                  LEFT JOIN countries co ON co.id = c.country_id
+                       JOIN invoice_items ii ON ii.invoice_id = i.id
+                      WHERE i.supplier_id = ?
+                        AND i.status IN ('issued','sent','reminded','paid')
+                        AND i.invoice_type IN ('invoice','credit_note','tax_document')
+                        AND COALESCE(co.is_eu, 0) = 1
+                        AND COALESCE(co.iso2, 'CZ') <> 'CZ'
+                        AND c.dic IS NOT NULL AND c.dic <> ''
+                        AND COALESCE(i.tax_date, i.issue_date) BETWEEN ? AND ?
+                        AND (
+                              COALESCE(ii.vat_classification_code, i.vat_classification_code) IN ('20','22','31')
+                              OR i.reverse_charge = 1
+                        )
+                      LIMIT 1"
+                );
+                $stmt->execute([$supplierId, $periodStart, $periodEnd]);
+                $hasEuSupplies = (bool) $stmt->fetchColumn();
+                if ($hasEuSupplies) {
+                    $items[] = [
+                        'type'     => 'shv_deadline',
+                        'severity' => $daysToDeadline < 0 ? 'high' : ($daysToDeadline <= 2 ? 'high' : 'medium'),
+                        'title'    => 'Souhrnné hlášení za uplynulý měsíc',
+                        'hint'     => $daysToDeadline < 0
+                            ? sprintf('Termín byl %d dní zpět — podej co nejdříve!', abs($daysToDeadline))
+                            : sprintf('Máš EU plnění — termín podání za %d %s (do %s)', $daysToDeadline,
+                                $daysToDeadline === 1 ? 'den' : ($daysToDeadline < 5 ? 'dny' : 'dní'),
+                                $deadlineDate),
+                        'link'     => '/reports/shv',
+                        'days'     => $daysToDeadline,
+                    ];
+                }
             }
         }
 
@@ -879,7 +1208,7 @@ final class CrmAggregationService
                 'title'    => 'Kontaktuj neaktivní klienty',
                 'hint'     => sprintf('%d %s 90+ dní bez objednávky', $churnCount,
                     $churnCount === 1 ? 'klient je' : 'klientů je'),
-                'link'     => '/crm',
+                'link'     => '/crm#churn-risk',
                 'count'    => $churnCount,
             ];
         }
@@ -888,6 +1217,115 @@ final class CrmAggregationService
             'items' => $items,
             'total' => count($items),
             'dismissed_count' => count($dismissals),
+        ];
+    }
+
+    /**
+     * Daňové termíny (DPH přiznání + Kontrolní hlášení) podle periodicity dodavatele.
+     *
+     * Pravidla (zákon 235/2004 Sb.):
+     *   - **DPH přiznání** — měsíční plátce: 25. dne následujícího měsíce za uplynulý
+     *     měsíc; čtvrtletní plátce: 25. dne měsíce po skončení čtvrtletí (Q1→25.4,
+     *     Q2→25.7, Q3→25.10, Q4→25.1).
+     *   - **Kontrolní hlášení (§101e)** — právnická osoba (PO) VŽDY měsíčně; fyzická
+     *     osoba (FO) ve lhůtě pro přiznání → kopíruje DPH periodu.
+     *
+     * DPH a KH se sloučí do jedné položky jen když mají shodné období i termín
+     * (měsíční plátce, nebo čtvrtletní FO). U čtvrtletní PO se KH (měsíční) a DPH
+     * (čtvrtletní) zobrazí jako dvě samostatné položky s odlišnou periodou.
+     *
+     * Položka se zobrazí jen v okně −3..+7 dní kolem termínu.
+     *
+     * @return list<array<string,mixed>>
+     */
+    private function taxDeadlineItems(int $supplierId, \DateTimeImmutable $now): array
+    {
+        $stmt = $this->db->pdo()->prepare(
+            'SELECT is_vat_payer, taxpayer_type, vat_period FROM supplier WHERE id = ?'
+        );
+        $stmt->execute([$supplierId]);
+        $row = $stmt->fetch(\PDO::FETCH_ASSOC) ?: [];
+        if (!(bool) ($row['is_vat_payer'] ?? false)) {
+            return [];
+        }
+
+        $taxpayerType = (string) ($row['taxpayer_type'] ?? '');
+        $vatPeriod = ((string) ($row['vat_period'] ?? 'monthly')) === 'quarterly' ? 'quarterly' : 'monthly';
+        // KH: PO vždy měsíčně; FO kopíruje DPH periodu.
+        $khMonthly = $taxpayerType === 'po' || $vatPeriod === 'monthly';
+
+        $m = (int) $now->format('n');
+        $y = (int) $now->format('Y');
+
+        // DPH termín + popis období
+        if ($vatPeriod === 'monthly') {
+            $dphActive = true;
+            $dphDeadline = sprintf('%04d-%02d-25', $y, $m);
+            $dphPeriod = 'za uplynulý měsíc';
+        } else {
+            // Čtvrtletní termín existuje jen v měsících 1/4/7/10.
+            $dphActive = in_array($m, [1, 4, 7, 10], true);
+            $dphDeadline = sprintf('%04d-%02d-25', $y, $m);
+            $endedQuarter = $m === 1 ? 4 : (int) (($m - 1) / 3); // 4→Q1, 7→Q2, 10→Q3, 1→Q4
+            $quarterYear = $m === 1 ? $y - 1 : $y;
+            $dphPeriod = sprintf('za %d. čtvrtletí %d', $endedQuarter, $quarterYear);
+        }
+
+        // Sloučit DPH+KH? Jen pokud sdílí periodu (měsíční plátce nebo čtvrtletní FO).
+        $combine = $vatPeriod === 'monthly' || !$khMonthly;
+
+        $items = [];
+        if ($combine) {
+            if ($dphActive) {
+                $title = $vatPeriod === 'monthly'
+                    ? 'DPH + KH za uplynulý měsíc'
+                    : 'DPH + KH ' . $dphPeriod;
+                $item = $this->buildDeadlineItem('tax_deadline', $title, $dphDeadline, '/reports/dph', $now);
+                if ($item !== null) {
+                    $items[] = $item;
+                }
+            }
+        } else {
+            // Čtvrtletní PO: KH měsíčně + DPH čtvrtletně, dvě samostatné položky.
+            $khItem = $this->buildDeadlineItem('kh_deadline', 'Kontrolní hlášení za uplynulý měsíc',
+                sprintf('%04d-%02d-25', $y, $m), '/reports/kh', $now);
+            if ($khItem !== null) {
+                $items[] = $khItem;
+            }
+            if ($dphActive) {
+                $dphItem = $this->buildDeadlineItem('tax_deadline', 'DPH ' . $dphPeriod,
+                    $dphDeadline, '/reports/dph', $now);
+                if ($dphItem !== null) {
+                    $items[] = $dphItem;
+                }
+            }
+        }
+
+        return $items;
+    }
+
+    /**
+     * Sestaví action item pro daňový termín, nebo null mimo okno −3..+7 dní.
+     *
+     * @return array<string,mixed>|null
+     */
+    private function buildDeadlineItem(string $type, string $title, string $deadline, string $link, \DateTimeImmutable $now): ?array
+    {
+        $days = (int) $now->diff(new \DateTimeImmutable($deadline))->format('%r%a');
+        if ($days < -3 || $days > 7) {
+            return null;
+        }
+        return [
+            'type'     => $type,
+            'severity' => $days < 0 ? 'high' : ($days <= 2 ? 'high' : 'medium'),
+            'title'    => $title,
+            'hint'     => $days < 0
+                ? sprintf('Termín byl %d dní zpět — podej co nejdříve!', abs($days))
+                : sprintf('Termín podání za %d %s (do %s)', $days,
+                    $days === 1 ? 'den' : ($days < 5 ? 'dny' : 'dní'),
+                    $deadline),
+            'link'     => $link,
+            'days'     => $days,
         ];
     }
 
@@ -998,7 +1436,8 @@ final class CrmAggregationService
      */
     public function dismissActionItem(int $supplierId, int $userId, string $itemType, string $mode): void
     {
-        $validTypes = ['overdue_invoices', 'recurring_due', 'overdue_payables', 'tax_deadline', 'churn_risk'];
+        $validTypes = ['overdue_invoices', 'bank_unmatched', 'recurring_due', 'overdue_payables',
+            'purchase_drafts', 'tax_deadline', 'kh_deadline', 'shv_deadline', 'churn_risk'];
         $validModes = ['day', 'week', 'forever', 'historical'];
         if (!in_array($itemType, $validTypes, true)) {
             throw new \InvalidArgumentException("Invalid item_type: {$itemType}");
@@ -1085,14 +1524,36 @@ final class CrmAggregationService
         $today = (new \DateTimeImmutable())->format('Y-m-d');
         switch ($itemType) {
             case 'overdue_invoices':
+                // Musí přesně zrcadlit dotaz v actionItems() (vč. nespárovaných proforem),
+                // jinak by se po „historická" dismiss vynořily proformy jako „nové".
                 $stmt = $pdo->prepare(
-                    "SELECT id FROM invoices
-                      WHERE supplier_id = ?
-                        AND status IN ('issued','sent','reminded')
-                        AND invoice_type != 'proforma'
-                        AND due_date < ?"
+                    "SELECT i.id FROM invoices i
+                      WHERE i.supplier_id = ?
+                        AND i.status IN ('issued','sent','reminded')
+                        AND i.due_date <= ?
+                        AND (i.invoice_type != 'proforma'
+                             OR NOT EXISTS (SELECT 1 FROM invoices ch
+                                             WHERE ch.parent_invoice_id = i.id AND ch.invoice_type = 'invoice'))
+                        AND (i.invoice_type NOT IN ('invoice','proforma','tax_document') OR i.amount_to_pay - i.paid_total > 0)"
                 );
                 $stmt->execute([$supplierId, $today]);
+                break;
+            case 'bank_unmatched':
+                $stmt = $pdo->prepare(
+                    "SELECT bt.id FROM bank_transactions bt
+                       JOIN bank_statements bs ON bs.id = bt.statement_id
+                      WHERE bt.match_status = 'unmatched'
+                        AND bt.amount > 0
+                        AND bt.posted_at >= DATE_SUB(?, INTERVAL 90 DAY)
+                        AND EXISTS (
+                            SELECT 1 FROM currencies cur
+                             WHERE cur.supplier_id = ?
+                               AND TRIM(LEADING '0' FROM REGEXP_REPLACE(IFNULL(cur.account_number, ''), '[^0-9]', ''))
+                                 = TRIM(LEADING '0' FROM REGEXP_REPLACE(IFNULL(bs.account_number, ''),  '[^0-9]', ''))
+                               AND (bs.bank_code IS NULL OR cur.bank_code IS NULL OR cur.bank_code = bs.bank_code)
+                        )"
+                );
+                $stmt->execute([$today, $supplierId]);
                 break;
             case 'recurring_due':
                 $stmt = $pdo->prepare(
@@ -1114,6 +1575,12 @@ final class CrmAggregationService
                 );
                 $stmt->execute([$supplierId, $today]);
                 break;
+            case 'purchase_drafts':
+                $stmt = $pdo->prepare(
+                    "SELECT id FROM purchase_invoices WHERE supplier_id = ? AND status = 'draft'"
+                );
+                $stmt->execute([$supplierId]);
+                break;
             case 'churn_risk':
                 $stmt = $pdo->prepare(
                     "WITH last_invoice AS (
@@ -1130,6 +1597,8 @@ final class CrmAggregationService
                 $stmt->execute([$supplierId, $today]);
                 break;
             case 'tax_deadline':
+            case 'kh_deadline':
+            case 'shv_deadline':
                 return []; // date-based, žádné ID
             default:
                 return [];
@@ -1168,14 +1637,17 @@ final class CrmAggregationService
                 $weekEnd = $weekStart->modify('+6 days');
             }
 
-            // In: nezaplacené vystavené faktury s due_date v tomto týdnu
+            // In: nezaplacené vystavené faktury s due_date v tomto týdnu — očekávané
+            // inkaso = zbývající částka (amount_to_pay - paid_total): částečné úhrady
+            // i odpočty záloh už dorazily, podruhé nepřitečou (#89).
             $stmt = $pdo->prepare(
-                "SELECT COALESCE(SUM(i.total_with_vat), 0) AS amt
+                "SELECT COALESCE(SUM(i.amount_to_pay - i.paid_total), 0) AS amt
                    FROM invoices i
               LEFT JOIN currencies c ON c.id = i.currency_id
                   WHERE i.supplier_id = ?
                     AND i.status IN ('issued', 'sent', 'reminded')
                     AND i.invoice_type != 'proforma'
+                    AND (i.invoice_type NOT IN ('invoice','tax_document') OR i.amount_to_pay - i.paid_total > 0)
                     AND i.due_date BETWEEN ? AND ?
                     AND COALESCE(c.code, 'CZK') = ?"
             );
@@ -1308,7 +1780,8 @@ final class CrmAggregationService
                FROM invoices i
               WHERE i.supplier_id = ?
                 AND i.status IN ('paid', 'sent', 'reminded')
-                AND i.invoice_type != 'proforma'
+                -- tax_document je auto-paid bez upomínek — do statistiky účinnosti nepatří
+                AND i.invoice_type NOT IN ('proforma', 'tax_document')
                 AND i.issue_date >= ?"
         );
         $stmt->execute([$supplierId, $start]);

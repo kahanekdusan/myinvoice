@@ -1,16 +1,38 @@
 import { api } from './client'
 
+// E-mailové kontakty odběratele dle účelu (#86)
+export type EmailContactUsageCode = 'communication' | 'documents' | 'reminders' | 'approvals'
+export type EmailContactRecipient = 'to' | 'cc' | 'bcc'
+export interface EmailContactUsage {
+  usage: EmailContactUsageCode
+  recipient: EmailContactRecipient
+}
+export interface ClientEmailContact {
+  id?: number
+  email: string
+  label?: string | null
+  contact_name?: string | null
+  is_active: boolean
+  sort_order?: number
+  usages: EmailContactUsage[]
+}
+
 export interface Client {
   id: number
   company_name: string
   first_name?: string | null
   last_name?: string | null
   ic?: string | null
+  /** DIČ / VAT ID s country prefixem (u SK klienta = IČ DPH). */
   dic?: string | null
+  /** Národní daňové číslo bez prefixu — SK DIČ, DE/AT Steuernummer, PL NIP, HU Adószám (#120). */
+  tax_number?: string | null
   street: string
   city: string
   zip: string
   country_iso2: string
+  /** Země klienta je členský stát EU — řídí auto-RC u identifikované osoby (#94). */
+  country_is_eu?: boolean
   main_email: string
   phone?: string | null
   language: 'cs' | 'en'
@@ -21,6 +43,8 @@ export interface Client {
   is_vat_payer?: boolean
   is_customer?: boolean
   is_vendor?: boolean
+  /** Dodavatel je benzínka — pro automatické rozpoznávání tankování v knize jízd. */
+  is_fuel_station?: boolean
   auto_send_reminders: boolean
   payment_due_default?: number | null
   payment_due_unit?: 'days' | 'month' | null
@@ -57,6 +81,7 @@ export interface Client {
   last_purchase_date?: string | null
   last_invoice_date?: string | null
   invoice_count?: number
+  email_contacts?: ClientEmailContact[]
   created_at?: string
   updated_at?: string
 }
@@ -133,12 +158,28 @@ export interface ViesLookupResult {
   vat_number?: string
 }
 
+/**
+ * Národní daňové číslo vedle VAT ID (#120) — země, kde existuje a píše se na doklady,
+ * s nativním labelem pole. SK: DIČ bez prefixu (má ho i neplátce; `dic` u SK = IČ DPH).
+ * Jinde národní číslo = VAT ID bez prefixu nebo se na faktury neuvádí → pole se nezobrazuje.
+ */
+export const TAX_NUMBER_LABELS: Record<string, string> = {
+  SK: 'DIČ',
+  DE: 'Steuernummer',
+  AT: 'Steuernummer',
+  PL: 'NIP',
+  HU: 'Adószám',
+}
+
 export interface ClientPayload {
   company_name: string
   first_name?: string | null
   last_name?: string | null
   ic?: string | null
+  /** DIČ / VAT ID s country prefixem (u SK = IČ DPH). */
   dic?: string | null
+  /** Národní daňové číslo bez prefixu (viz TAX_NUMBER_LABELS). */
+  tax_number?: string | null
   street: string
   city: string
   zip: string
@@ -151,6 +192,8 @@ export interface ClientPayload {
   is_vat_payer?: boolean
   is_customer?: boolean
   is_vendor?: boolean
+  /** Dodavatel je benzínka — pro automatické rozpoznávání tankování v knize jízd. */
+  is_fuel_station?: boolean
   auto_send_reminders: boolean
   payment_due_default?: number | null
   payment_due_unit?: 'days' | 'month' | null
@@ -162,6 +205,8 @@ export interface ClientPayload {
   proforma_number_format?: string | null
   credit_note_number_format?: string | null
   invoice_number_period?: 'year' | 'month' | 'none' | null
+  /** Replace-all (#86): pošli kompletní pole; vynech klíč, pokud kontakty neměníš. */
+  email_contacts?: ClientEmailContact[]
 }
 
 export interface ListResponse<T> {

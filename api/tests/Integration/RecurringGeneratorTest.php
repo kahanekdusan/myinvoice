@@ -44,6 +44,8 @@ final class RecurringGeneratorTest extends TestCase
     private array $createdTemplateIds = [];
     /** @var int[] faktury k vyčištění */
     private array $createdInvoiceIds = [];
+    /** Původní plátcovství supplier-a — test ho vynucuje na plátce (viz setUp). */
+    private ?array $origVatFlags = null;
 
     protected function setUp(): void
     {
@@ -104,10 +106,28 @@ final class RecurringGeneratorTest extends TestCase
         $this->userId = (int) $this->db->pdo()
             ->query("SELECT id FROM users ORDER BY id LIMIT 1")
             ->fetchColumn();
+
+        // Test předpokládá PLÁTCE (sazby 21 % na fakturách) — generátor neplátci/IO
+        // autoritativně přepíná položky na 0 % (applyNonVatPayerRate), takže reálné
+        // nastavení dodavatele v dev DB by test rozbilo. Vynutit a v tearDown vrátit.
+        $flags = $this->db->pdo()->query(
+            "SELECT is_vat_payer, is_identified FROM supplier WHERE id = {$this->supplierId}"
+        )->fetch(PDO::FETCH_ASSOC) ?: [];
+        $this->origVatFlags = $flags;
+        $this->db->pdo()->prepare('UPDATE supplier SET is_vat_payer = 1, is_identified = 0 WHERE id = ?')
+            ->execute([$this->supplierId]);
     }
 
     protected function tearDown(): void
     {
+        if (isset($this->db) && $this->origVatFlags !== null && $this->supplierId > 0) {
+            $this->db->pdo()->prepare('UPDATE supplier SET is_vat_payer = ?, is_identified = ? WHERE id = ?')
+                ->execute([
+                    (int) ($this->origVatFlags['is_vat_payer'] ?? 1),
+                    (int) ($this->origVatFlags['is_identified'] ?? 0),
+                    $this->supplierId,
+                ]);
+        }
         if (empty($this->createdInvoiceIds) && empty($this->createdTemplateIds)) {
             if (isset($this->db)) $this->db->close();
             return;
@@ -1303,5 +1323,103 @@ final class RecurringGeneratorTest extends TestCase
 
         $tpl = $this->templateRow($tplId);
         $this->assertSame('2026-07-15', $tpl['next_run_date'], 'Neběžící šablona: next_run = nové anchor_date');
+    }
+
+    // ======================================================================
+    //  Kategorie tržby na šabloně (#119): override vs. fallback
+    // ======================================================================
+
+    /**
+     * Pevná kategorie šablony (revenue_category_id) musí PŘEBÍT default klienta;
+     * šablona bez kategorie (NULL) musí fallbacknout na default klienta (stávající
+     * chování). Kategorie se na fakturu ukládá jako snapshot při generování.
+     */
+    public function testGeneratorRevenueCategoryOverrideBeatsClientDefault(): void
+    {
+        $today = (new \DateTimeImmutable('today'))->format('Y-m-d');
+        $pdo = $this->db->pdo();
+
+        // Dvě dočasné kategorie: A = pevná na šabloně, B = default klienta.
+        $catIds = [];
+        foreach (['phpunit-tpl-a', 'phpunit-cli-b'] as $code) {
+            $pdo->prepare(
+                'INSERT INTO revenue_categories (supplier_id, code, label, display_order)
+                 VALUES (?, ?, ?, 999)'
+            )->execute([$this->supplierId, $code, 'TEST ' . $code]);
+            $catIds[] = (int) $pdo->lastInsertId();
+        }
+        [$catTemplate, $catClient] = $catIds;
+
+        // Default klienta dočasně přepnout na B; v finally vrátit.
+        $origDefault = $pdo->query(
+            "SELECT default_revenue_category_id FROM clients WHERE id = {$this->clientId}"
+        )->fetchColumn();
+        $pdo->prepare('UPDATE clients SET default_revenue_category_id = ? WHERE id = ?')
+            ->execute([$catClient, $this->clientId]);
+
+        try {
+            $item = [
+                'description' => 'Hosting',
+                'quantity' => 1.0,
+                'unit' => 'měs',
+                'unit_price_without_vat' => 500.00,
+                'vat_rate_id' => $this->vatRateId,
+                'order_index' => 0,
+            ];
+            $base = [
+                'supplier_id'      => $this->supplierId,
+                'client_id'        => $this->clientId,
+                'frequency'        => 'monthly',
+                'end_of_month'     => false,
+                'anchor_date'      => $today,
+                'next_run_date'    => $today,
+                'invoice_type'     => 'invoice',
+                'currency_id'      => $this->currencyId,
+                'language'         => 'cs',
+                'payment_method'   => 'bank_transfer',
+                'payment_due_days' => 14,
+                'increment_month_in_descriptions' => false,
+                'auto_issue'       => false,
+                'auto_send_email'  => false,
+            ];
+
+            // 1) Šablona s pevnou kategorií A → faktura má A (ne klientovo B).
+            $tplOverride = $this->repo->create($base + [
+                'name' => 'TEST recurring kategorie override (PHPUnit)',
+                'revenue_category_id' => $catTemplate,
+            ], $this->userId);
+            $this->createdTemplateIds[] = $tplOverride;
+            $this->repo->replaceItems($tplOverride, [$item]);
+
+            $found = $this->repo->find($tplOverride);
+            $this->assertSame($catTemplate, $found['revenue_category_id'], 'find() vrací uloženou kategorii šablony');
+
+            $r1 = $this->generator->generate($tplOverride, $today, $this->userId, '127.0.0.1', 'phpunit');
+            $this->createdInvoiceIds[] = $r1['invoice_id'];
+            $inv1 = $pdo->query("SELECT revenue_category_id FROM invoices WHERE id = {$r1['invoice_id']}")->fetchColumn();
+            $this->assertSame($catTemplate, (int) $inv1, 'Pevná kategorie šablony přebíjí default klienta');
+
+            // 2) Šablona BEZ kategorie (NULL) → fallback na default klienta B.
+            $tplFallback = $this->repo->create($base + [
+                'name' => 'TEST recurring kategorie fallback (PHPUnit)',
+            ], $this->userId);
+            $this->createdTemplateIds[] = $tplFallback;
+            $this->repo->replaceItems($tplFallback, [$item]);
+
+            $r2 = $this->generator->generate($tplFallback, $today, $this->userId, '127.0.0.1', 'phpunit');
+            $this->createdInvoiceIds[] = $r2['invoice_id'];
+            $inv2 = $pdo->query("SELECT revenue_category_id FROM invoices WHERE id = {$r2['invoice_id']}")->fetchColumn();
+            $this->assertSame($catClient, (int) $inv2, 'Šablona bez kategorie fallbackne na default klienta');
+        } finally {
+            $pdo->prepare('UPDATE clients SET default_revenue_category_id = ? WHERE id = ?')
+                ->execute([$origDefault !== false && $origDefault !== null ? (int) $origDefault : null, $this->clientId]);
+            // Faktury/šablony uklízí tearDown; kategorie se musí odpojit od faktur dřív,
+            // než by je delete() odmítl — tearDown maže faktury, ale běží AŽ PO finally,
+            // proto kategorie odpojíme tady ručně a smažeme.
+            $in = implode(',', $catIds);
+            $pdo->exec("UPDATE invoices SET revenue_category_id = NULL WHERE revenue_category_id IN ($in)");
+            $pdo->exec("UPDATE recurring_invoice_templates SET revenue_category_id = NULL WHERE revenue_category_id IN ($in)");
+            $pdo->exec("DELETE FROM revenue_categories WHERE id IN ($in)");
+        }
     }
 }

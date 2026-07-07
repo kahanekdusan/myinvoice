@@ -1,5 +1,6 @@
 import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
+import { useSupplierStore } from '@/stores/supplier'
 
 const routes: RouteRecordRaw[] = [
   {
@@ -9,15 +10,15 @@ const routes: RouteRecordRaw[] = [
     children: [
       { path: '',                       name: 'home',           component: () => import('@/pages/Dashboard.vue') },
       { path: 'clients',                name: 'clients',        component: () => import('@/pages/clients/ClientList.vue') },
-      { path: 'clients/new',            name: 'client-new',     component: () => import('@/pages/clients/ClientForm.vue'), meta: { requiresWrite: true } },
+      { path: 'clients/new',            name: 'client-new',     component: () => import('@/pages/clients/ClientForm.vue'), meta: { requiresWrite: true, requiresSupplier: true } },
       { path: 'clients/:id(\\d+)',      name: 'client-detail',  component: () => import('@/pages/clients/ClientDetail.vue') },
-      { path: 'clients/:id(\\d+)/edit', name: 'client-edit',    component: () => import('@/pages/clients/ClientForm.vue'), meta: { requiresWrite: true } },
+      { path: 'clients/:id(\\d+)/edit', name: 'client-edit',    component: () => import('@/pages/clients/ClientForm.vue'), meta: { requiresWrite: true, requiresSupplier: true } },
       { path: 'projects',               name: 'projects',       component: () => import('@/pages/projects/ProjectList.vue') },
-      { path: 'projects/new',           name: 'project-new',    component: () => import('@/pages/projects/ProjectForm.vue'), meta: { requiresWrite: true } },
+      { path: 'projects/new',           name: 'project-new',    component: () => import('@/pages/projects/ProjectForm.vue'), meta: { requiresWrite: true, requiresSupplier: true } },
       { path: 'projects/:id(\\d+)',     name: 'project-detail', component: () => import('@/pages/projects/ProjectDetail.vue') },
-      { path: 'projects/:id(\\d+)/edit', name: 'project-edit',  component: () => import('@/pages/projects/ProjectForm.vue'), meta: { requiresWrite: true } },
+      { path: 'projects/:id(\\d+)/edit', name: 'project-edit',  component: () => import('@/pages/projects/ProjectForm.vue'), meta: { requiresWrite: true, requiresSupplier: true } },
       { path: 'invoices',               name: 'invoices',       component: () => import('@/pages/invoices/InvoiceList.vue') },
-      { path: 'invoices/new',           name: 'invoice-new',    component: () => import('@/pages/invoices/InvoiceEditor.vue'), meta: { requiresWrite: true } },
+      { path: 'invoices/new',           name: 'invoice-new',    component: () => import('@/pages/invoices/InvoiceEditor.vue'), meta: { requiresWrite: true, requiresSupplier: true } },
       { path: 'invoices/:id(\\d+)',     name: 'invoice-detail', component: () => import('@/pages/invoices/InvoiceDetail.vue') },
       { path: 'invoices/:id(\\d+)/edit', name: 'invoice-edit',  component: () => import('@/pages/invoices/InvoiceEditor.vue'), meta: { requiresWrite: true } },
       { path: 'price-quotes',               name: 'price-quotes',       component: () => import('@/pages/price-quotes/PriceQuoteList.vue') },
@@ -27,15 +28,19 @@ const routes: RouteRecordRaw[] = [
       // Přijaté faktury (fáze 1 integrace forku)
       { path: 'purchase-invoices',                 name: 'purchase-invoices',        component: () => import('@/pages/purchase-invoices/InvoiceList.vue') },
       { path: 'purchase-invoices/export',          name: 'purchase-invoices-export', component: () => import('@/pages/purchase-invoices/Export.vue') },
-      { path: 'purchase-invoices/new',             name: 'purchase-invoice-new',     component: () => import('@/pages/purchase-invoices/InvoiceEditor.vue'), meta: { requiresWrite: true } },
+      { path: 'purchase-invoices/payment-orders',  name: 'purchase-invoices-payment-orders', component: () => import('@/pages/purchase-invoices/PaymentOrders.vue') },
+      { path: 'purchase-invoices/new',             name: 'purchase-invoice-new',     component: () => import('@/pages/purchase-invoices/InvoiceEditor.vue'), meta: { requiresWrite: true, requiresSupplier: true } },
       { path: 'purchase-invoices/:id(\\d+)',       name: 'purchase-invoice-detail',  component: () => import('@/pages/purchase-invoices/InvoiceDetail.vue') },
-      { path: 'purchase-invoices/:id(\\d+)/edit',  name: 'purchase-invoice-edit',    component: () => import('@/pages/purchase-invoices/InvoiceEditor.vue'), meta: { requiresWrite: true } },
+      { path: 'purchase-invoices/:id(\\d+)/edit',  name: 'purchase-invoice-edit',    component: () => import('@/pages/purchase-invoices/InvoiceEditor.vue'), meta: { requiresWrite: true, requiresSupplier: true } },
       // Dokumenty (sekce Dokumenty — plán source/11)
       { path: 'documents',              name: 'documents',        component: () => import('@/pages/documents/DocumentsBrowser.vue') },
       { path: 'documents/:id(\\d+)',    name: 'document-detail',  component: () => import('@/pages/documents/DocumentDetail.vue') },
+      // Kniha jízd (logbook) — auta, jízdy, tankování
+      { path: 'logbook',                name: 'logbook',          component: () => import('@/pages/logbook/LogbookPage.vue') },
       { path: 'stats',                  name: 'stats',           component: () => import('@/pages/Stats.vue') },
       { path: 'purchase-stats',         name: 'purchase-stats',  component: () => import('@/pages/PurchaseStats.vue') },
-      { path: 'bank',                   name: 'bank-statements', component: () => import('@/pages/bank/StatementList.vue') },
+      // Sjednocená stránka „Bankovní účty" (Finance): výpisy + měny/účty + stavy + avíza.
+      { path: 'bank',                   name: 'bank-statements', component: () => import('@/pages/bank/BankPage.vue') },
       { path: 'bank/:id(\\d+)',         name: 'bank-detail',     component: () => import('@/pages/bank/StatementDetail.vue') },
       // Admin (M6)
       { path: 'admin/activity-log',     name: 'activity-log',   component: () => import('@/pages/admin/ActivityLog.vue'), meta: { adminOnly: true } },
@@ -43,8 +48,17 @@ const routes: RouteRecordRaw[] = [
       { path: 'admin/cron-jobs',        name: 'cron-jobs',      component: () => import('@/pages/admin/CronJobs.vue'),    meta: { adminOnly: true } },
       { path: 'admin/users',            name: 'admin-users',    component: () => import('@/pages/admin/Users.vue'),       meta: { adminOnly: true } },
       { path: 'admin/settings',         name: 'admin-settings', component: () => import('@/pages/admin/Settings.vue'),    meta: { adminOnly: true } },
-      { path: 'admin/bank-accounts',    name: 'admin-bank-accounts', component: () => import('@/pages/admin/BankAccounts.vue'), meta: { adminOnly: true } },
-      { path: 'admin/bank-email-notices', name: 'admin-bank-email-notices', redirect: '/admin/bank-accounts' },
+      // Bývalá stránka Systém → Bankovní účty je nyní součástí /bank (Finance) jako záložky.
+      // Redirect zachovává bookmarks vč. původního ?tab=.
+      {
+        path: 'admin/bank-accounts',
+        name: 'admin-bank-accounts',
+        redirect: to => ({
+          path: '/bank',
+          query: { tab: ['accounts', 'balances', 'email'].includes(String(to.query.tab)) ? String(to.query.tab) : 'accounts' },
+        }),
+      },
+      { path: 'admin/bank-email-notices', name: 'admin-bank-email-notices', redirect: '/bank?tab=email' },
       // /admin/suppliers byla samostatná stránka — Suppliers jsou nyní embedded jako první tab v Codebooks.
       // Redirect zachovává bookmarks / staré odkazy.
       { path: 'admin/suppliers',        name: 'admin-suppliers', redirect: '/admin/codebooks' },
@@ -67,9 +81,9 @@ const routes: RouteRecordRaw[] = [
       { path: 'admin/emails',           name: 'admin-emails',    component: () => import('@/pages/admin/Emails.vue'), meta: { adminOnly: true } },
       { path: 'admin/approvals',        name: 'admin-approvals', component: () => import('@/pages/admin/Approvals.vue'), meta: { adminOnly: true } },
       { path: 'recurring',              name: 'recurring',        component: () => import('@/pages/recurring/RecurringList.vue') },
-      { path: 'recurring/new',          name: 'recurring-new',    component: () => import('@/pages/recurring/RecurringForm.vue'), meta: { requiresWrite: true } },
+      { path: 'recurring/new',          name: 'recurring-new',    component: () => import('@/pages/recurring/RecurringForm.vue'), meta: { requiresWrite: true, requiresSupplier: true } },
       { path: 'recurring/:id(\\d+)',    name: 'recurring-detail', component: () => import('@/pages/recurring/RecurringDetail.vue') },
-      { path: 'recurring/:id(\\d+)/edit', name: 'recurring-edit', component: () => import('@/pages/recurring/RecurringForm.vue'), meta: { requiresWrite: true } },
+      { path: 'recurring/:id(\\d+)/edit', name: 'recurring-edit', component: () => import('@/pages/recurring/RecurringForm.vue'), meta: { requiresWrite: true, requiresSupplier: true } },
       { path: 'admin/update',           name: 'admin-update',    component: () => import('@/pages/admin/Update.vue'),    meta: { adminOnly: true } },
       // /profile/totp je zachován pro BC (staré bookmarks, force-TOTP middleware redirect),
       // ale UI ho merge-uje do /profile/password (tabs). Redirect zachovává query stringy.
@@ -150,6 +164,15 @@ router.beforeEach(async (to) => {
   // readonly smí jen číst/exportovat → na write routes ho přesměrujeme na dashboard.
   const requiresWrite = to.matched.some((r) => r.meta.requiresWrite)
   if (requiresWrite && !auth.canWrite) {
+    return { name: 'home' }
+  }
+
+  // Onboarding gate: pokud uživatel v úvodním nastavení přeskočil dodavatele, nemá v DB
+  // žádného supplier-a. Data (klienti, faktury, currencies) jsou supplier-scoped, takže
+  // zakládací formuláře by jinak spadly na matoucí „Validace selhala" (#151). Místo toho
+  // ho pošleme na dashboard, kde se zobrazí výzva k vytvoření prvního dodavatele.
+  const requiresSupplier = to.matched.some((r) => r.meta.requiresSupplier)
+  if (requiresSupplier && auth.isAuthenticated && !useSupplierStore().hasSupplier) {
     return { name: 'home' }
   }
 

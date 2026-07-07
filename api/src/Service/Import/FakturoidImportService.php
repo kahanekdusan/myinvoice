@@ -12,6 +12,7 @@ use MyInvoice\Repository\InvoiceRepository;
 use MyInvoice\Repository\PurchaseInvoiceRepository;
 use MyInvoice\Service\Invoice\InvoiceCalculator;
 use MyInvoice\Service\Invoice\PurchaseInvoiceCalculator;
+use MyInvoice\Service\Invoice\SnapshotBuilder;
 use Psr\Log\LoggerInterface;
 
 /**
@@ -30,6 +31,10 @@ use Psr\Log\LoggerInterface;
  *   - Invoice má `subject_id` (foreign key) + `lines` (items array)
  *   - Lines: { name, quantity, unit_name, unit_price, vat_rate }
  *   - Subject type: "customer" | "supplier" | "both" → role mapping
+ *
+ * Platební stav (#121): doklady se zakládají jako draft, ale `status` z Fakturoidu
+ * 'paid'/'cancelled' se promítne hned při importu (paid_at = `paid_on`) — viz
+ * ImportedPaymentStateMapper. Ostatní stavy zůstávají draft (review flow).
  */
 final class FakturoidImportService
 {
@@ -47,6 +52,7 @@ final class FakturoidImportService
         private readonly Config $config,
         private readonly LoggerInterface $logger,
         private readonly PurchaseInvoiceCnbApplier $cnbApplier,
+        private readonly SnapshotBuilder $snapshots,
     ) {}
 
     public function run(int $jobId): void
@@ -260,7 +266,77 @@ final class FakturoidImportService
             ];
         }
         if (!empty($items)) $this->invoices->replaceItems($invoiceId, $items);
+
+        // #121: promítni platební stav z Fakturoidu — zaplacené/stornované doklady
+        // nesmí zůstat viset jako nezaplacené pohledávky (a chytat upomínky).
+        $this->applyIssuedPaymentState(
+            $invoiceId,
+            $clientId,
+            (int) $payload['currency_id'],
+            $supplierId,
+            ImportedPaymentStateMapper::fromFakturoid($i),
+            (string) ($payload['tax_date'] ?? '') ?: (string) $payload['issue_date'],
+            (string) $payload['issue_date'],
+        );
         return $invoiceId;
+    }
+
+    /**
+     * Aplikuje namapovaný platební stav na čerstvě importovanou vydanou fakturu
+     * (issue #121). Jen pro doklady ve stavu 'draft' (guard v WHERE) — existující
+     * doklady, které už uživatel zpracoval, se nemění.
+     *
+     * Doklad opouští 'draft', proto dostává snapshoty (client/supplier/bank)
+     * stejně jako file import (InvoiceImportService) a IssueInvoiceAction —
+     * vystavené doklady musí mít zafixované údaje. sent_at = issue_date 12:00
+     * (stejná aproximace jako file import). Storno bez mirror `cancellation`
+     * záznamu — originál byl stornován už ve zdrojovém systému, interní storno
+     * doklad by tu byl jen šum.
+     *
+     * @param ?array{status:string, paid_at:?string} $state  null = ponechat draft
+     */
+    private function applyIssuedPaymentState(int $invoiceId, int $clientId, int $currencyId, int $supplierId, ?array $state, string $fallbackPaidAt, string $issueDate): void
+    {
+        if ($state === null) return;
+
+        $snapshots = $this->snapshots->build($clientId, $currencyId, $supplierId);
+
+        $snapshotSql = 'client_snapshot = ?, supplier_snapshot = ?, bank_snapshot = ?';
+        $snapshotParams = [
+            json_encode($snapshots['client'],   JSON_UNESCAPED_UNICODE),
+            json_encode($snapshots['supplier'], JSON_UNESCAPED_UNICODE),
+            $snapshots['bank'] !== null ? json_encode($snapshots['bank'], JSON_UNESCAPED_UNICODE) : null,
+        ];
+
+        if ($state['status'] === 'paid') {
+            $this->db->pdo()->prepare(
+                "UPDATE invoices SET status = 'paid', paid_at = ?, sent_at = ?, {$snapshotSql}
+                  WHERE id = ? AND status = 'draft'"
+            )->execute(array_merge(
+                [$state['paid_at'] ?? $fallbackPaidAt, $issueDate . ' 12:00:00'],
+                $snapshotParams,
+                [$invoiceId],
+            ));
+        } elseif ($state['status'] === 'cancelled') {
+            $this->db->pdo()->prepare(
+                "UPDATE invoices SET status = 'cancelled', cancelled_at = NOW(), {$snapshotSql}
+                  WHERE id = ? AND status = 'draft'"
+            )->execute(array_merge($snapshotParams, [$invoiceId]));
+        }
+    }
+
+    /**
+     * Aplikuje 'paid' na čerstvě importovanou přijatou fakturu (issue #121).
+     * Guard na status='draft' — createExpense může přes dedup guard vrátit
+     * existující (už zpracovaný) doklad, ten nepřepisujeme.
+     */
+    private function applyPurchasePaymentState(int $purchaseId, int $supplierId, ?array $state, string $fallbackPaidAt): void
+    {
+        if ($state === null || $state['status'] !== 'paid') return;
+        $this->db->pdo()->prepare(
+            "UPDATE purchase_invoices SET status = 'paid', paid_at = ?
+              WHERE id = ? AND supplier_id = ? AND status = 'draft'"
+        )->execute([$state['paid_at'] ?? $fallbackPaidAt, $purchaseId, $supplierId]);
     }
 
     private function importExpenses(int $jobId, int $supplierId, int $userId, bool $dryRun, ?string $bookmarkSince, bool $downloadAttachments = false): void
@@ -337,7 +413,13 @@ final class FakturoidImportService
 
         $payload = [
             'vendor_id'             => $vendorId,
-            'vendor_invoice_number' => $this->sanitizeVendorNumber((string) ($e['number'] ?? $e['original_number'] ?? '')),
+            // #113: original_number = číslo dokladu dodavatele; number je jen interní číslo
+            // přidělené Fakturoidem — to použij jen jako fallback, když original_number chybí.
+            'vendor_invoice_number' => $this->sanitizeVendorNumber(
+                trim((string) ($e['original_number'] ?? '')) !== ''
+                    ? (string) $e['original_number']
+                    : (string) ($e['number'] ?? '')
+            ),
             'document_kind'         => 'invoice',
             'issue_date'            => $issueDate,
             'tax_date'              => $taxDate,
@@ -370,6 +452,14 @@ final class FakturoidImportService
             (string) ($e['currency'] ?? 'CZK'),
             (string) ($payload['tax_date'] ?? $payload['issue_date'] ?? ''),
             $payload['exchange_rate'] ?? null,
+        );
+        // #121: Fakturoid eviduje výdaj jako zaplacený → promítni (jen na čerstvě
+        // vytvořený doklad; dedup-vrácený existující doklad výše se nemění).
+        $this->applyPurchasePaymentState(
+            $id,
+            $supplierId,
+            ImportedPaymentStateMapper::fromFakturoid($e),
+            $taxDate ?: $issueDate,
         );
         return $id;
     }
@@ -484,15 +574,12 @@ final class FakturoidImportService
             $archiveRoot = $uploads !== '' ? dirname($uploads) . '/invoices-imported'
                 : \MyInvoice\Infrastructure\Config\RuntimePaths::storage('invoices-imported');
         }
-        $tenantDir = $archiveRoot . DIRECTORY_SEPARATOR . 'supplier-' . $supplierId;
-        if (!is_dir($tenantDir)) @mkdir($tenantDir, 0755, true);
-
         $sha = hash('sha256', $pdf);
-        $disk = substr($sha, 0, 16) . '.pdf';
-        $diskPath = $tenantDir . DIRECTORY_SEPARATOR . $disk;
+        // Hash-shard layout (supplier-{id}/{2}/{16}.pdf) — sdílené s PurchaseInvoicePdfArchiver.
+        $diskPath = \MyInvoice\Service\Import\PurchaseInvoicePdfArchiver::ensureShardPath($archiveRoot, $supplierId, $sha);
         if (!is_file($diskPath)) @file_put_contents($diskPath, $pdf);
 
-        $relPath = 'supplier-' . $supplierId . '/' . $disk;
+        $relPath = \MyInvoice\Service\Import\PurchaseInvoicePdfArchiver::shardedRelPath($supplierId, $sha);
         $name = ((string) ($inv['number'] ?? 'invoice')) . '.pdf';
         $this->db->pdo()->prepare(
             'UPDATE invoices SET imported_pdf_path = ?, imported_pdf_hash = ?,
@@ -519,15 +606,12 @@ final class FakturoidImportService
             $archiveRoot = $uploads !== '' ? dirname($uploads) . '/purchase-invoices'
                 : \MyInvoice\Infrastructure\Config\RuntimePaths::storage('purchase-invoices');
         }
-        $tenantDir = $archiveRoot . DIRECTORY_SEPARATOR . 'supplier-' . $supplierId;
-        if (!is_dir($tenantDir)) @mkdir($tenantDir, 0755, true);
-
         $sha = hash('sha256', $pdf);
-        $disk = substr($sha, 0, 16) . '.pdf';
-        $diskPath = $tenantDir . DIRECTORY_SEPARATOR . $disk;
+        // Hash-shard layout (supplier-{id}/{2}/{16}.pdf) — sdílené s PurchaseInvoicePdfArchiver.
+        $diskPath = \MyInvoice\Service\Import\PurchaseInvoicePdfArchiver::ensureShardPath($archiveRoot, $supplierId, $sha);
         if (!is_file($diskPath)) @file_put_contents($diskPath, $pdf);
 
-        $relPath = 'supplier-' . $supplierId . '/' . $disk;
+        $relPath = \MyInvoice\Service\Import\PurchaseInvoicePdfArchiver::shardedRelPath($supplierId, $sha);
         $name = ((string) ($exp['number'] ?? 'expense')) . '.pdf';
         $this->purchaseRepo->setPdfMetadata($purchaseInvoiceId, $supplierId, $relPath, $sha, strlen($pdf), $name);
     }
