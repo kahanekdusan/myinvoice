@@ -28,7 +28,13 @@ final class PublicInvoiceGetAction
             return Json::error($response, 'token_invalid_or_expired', 'Odkaz na fakturu není platný nebo vypršel.', 404);
         }
 
-        $this->repo->touchViewed((int) $row['id']);
+        $userAgent = $request->getHeaderLine('User-Agent');
+        if ($userAgent === '') {
+            $userAgent = null;
+        }
+        $ip = $request->getServerParams()['REMOTE_ADDR'] ?? null;
+
+        $this->repo->touchViewed((int) $row['id'], $ip, $userAgent);
 
         return Json::ok($response, [
             'invoice' => [

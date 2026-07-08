@@ -5711,6 +5711,7 @@ components:
         reminder_count: { type: integer, description: "Počet odeslaných upomínek" }
         paid_at: { type: string, format: date, nullable: true }
         cancelled_at: { type: string, format: date-time, nullable: true }
+        public_invoice_first_viewed_at: { type: string, format: date-time, nullable: true, description: "Kdy si klient poprvé online/PDF zobrazil fakturu (z logu)" }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
 

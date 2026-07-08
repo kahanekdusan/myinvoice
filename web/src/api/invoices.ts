@@ -147,6 +147,7 @@ export interface Invoice {
   reminder_count: number
   paid_at: string | null
   cancelled_at: string | null
+  public_invoice_first_viewed_at?: string | null
   pdf_path: string | null
   /** Zdrojové PDF z importu (iDoklad/Fakturoid) — oddělené od našeho rendered `pdf_path`. */
   imported_pdf_path: string | null
@@ -236,6 +237,7 @@ export interface InvoiceListItem {
   reminder_count: number
   paid_at: string | null
   cancelled_at: string | null
+  public_invoice_first_viewed_at?: string | null
   client_company_name: string
   project_name: string | null
   project_requires_approval?: boolean

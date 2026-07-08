@@ -33,7 +33,13 @@ final class PublicInvoicePdfAction
         }
 
         $invoiceId = (int) $row['id'];
-        $this->repo->touchViewed($invoiceId);
+        $userAgent = $request->getHeaderLine('User-Agent');
+        if ($userAgent === '') {
+            $userAgent = null;
+        }
+        $ip = $request->getServerParams()['REMOTE_ADDR'] ?? null;
+
+        $this->repo->touchViewed($invoiceId, $ip, $userAgent);
 
         try {
             $pdfPath = $this->pdfRenderer->render($invoiceId, false, null);

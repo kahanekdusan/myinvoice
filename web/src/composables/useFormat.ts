@@ -38,6 +38,13 @@ export function formatDate(date: string | null | undefined): string {
   return new Intl.DateTimeFormat(activeLocale(), { day: '2-digit', month: '2-digit', year: 'numeric' }).format(d)
 }
 
+export function formatDateTime(date: string | null | undefined): string {
+  if (!date) return '—'
+  const d = new Date(date)
+  if (Number.isNaN(d.getTime())) return date
+  return new Intl.DateTimeFormat(activeLocale(), { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' }).format(d)
+}
+
 export function formatMonth(yyyymm: string): string {
   const [y, m] = yyyymm.split('-').map(Number)
   if (!y || !m) return yyyymm

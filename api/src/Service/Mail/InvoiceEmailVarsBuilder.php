@@ -122,6 +122,10 @@ final class InvoiceEmailVarsBuilder
 
     private function generateQr(array $invoice): ?string
     {
+        // QR kód v e-mailu již nechceme posílat, proto vždy vracíme null.
+        // Uživatel tak musí kliknout na "public link" pro zobrazení dokladu a úhradu.
+        return null;
+
         // QR na zbývající částku — po částečné úhradě (#89) se platí jen zbytek.
         $remaining = round((float) ($invoice['amount_to_pay'] ?? 0) - (float) ($invoice['paid_total'] ?? 0), 2);
         if (empty($invoice['varsymbol'])) return null;

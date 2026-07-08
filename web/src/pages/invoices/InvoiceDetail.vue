@@ -13,7 +13,7 @@ import {
 } from '@/api/settings'
 import { adminApi, type InvoiceSmtpLog } from '@/api/admin'
 import { apiErrorMessage } from '@/api/errors'
-import { formatMoney, formatDate, formatPercent, statusLabel, typeLabel, statusBadgeClass, displayStatus } from '@/composables/useFormat'
+import { formatMoney, formatDate, formatDateTime, formatPercent, statusLabel, typeLabel, statusBadgeClass, displayStatus } from '@/composables/useFormat'
 import { useAuthStore } from '@/stores/auth'
 import { useSupplierStore } from '@/stores/supplier'
 import { useHotkey } from '@/composables/useHotkey'
@@ -1223,6 +1223,10 @@ const invoiceActions = computed<ActionItem[]>(() => {
         <span v-else class="text-neutral-400 font-mono">{{ t('invoice.draft_id', { id: invoice.id }) }}</span>
         <span class="text-xs px-2 py-0.5 rounded font-normal" :class="statusBadgeClass(displayStatus(invoice.status, invoice.payment_status))">
           {{ statusLabel(displayStatus(invoice.status, invoice.payment_status)) }}
+        </span>
+        <span v-if="invoice.public_invoice_first_viewed_at" class="text-xs px-1.5 py-0.5 rounded font-normal bg-indigo-50 text-indigo-600 flex items-center gap-1"
+          :title="t('invoice.first_viewed_at', { date: formatDateTime(invoice.public_invoice_first_viewed_at) })">
+          <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" /><path stroke-linecap="round" stroke-linejoin="round" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" /></svg>
         </span>
         <span class="text-xs px-2 py-0.5 rounded font-normal bg-neutral-100 text-neutral-600">
           {{ typeLabel(invoice.invoice_type) }}
