@@ -27,8 +27,19 @@ final class LogoutAction
         $token = (string) $request->getAttribute(AuthMiddleware::ATTR_TOKEN, '');
         $user  = (array) $request->getAttribute(AuthMiddleware::ATTR_USER, []);
 
-        if ($token !== '') {
-            $this->sessions->destroy($token);
+        $sessionCookieNames = self::sessionCookieNames($this->config);
+
+        // Zneplatni vsechny session tokeny nalezene v requestu (vcetne duplicit
+        // stejneho cookie jmena na ruznych Path), aby nedoslo k okamzitemu reloginu.
+        foreach ($this->collectSessionTokensToDestroy($request, $token, $sessionCookieNames) as $tok) {
+            $this->sessions->destroy($tok);
+        }
+
+        // Fallback: pokud je uzivatel autentizovany, odhlas vsechny jeho session.
+        // V praxi to eliminuje edge-case, kdy browser posle jinou legacy cookie,
+        // nez kterou middleware vyhodnoti jako aktivni.
+        if (isset($user['id']) && (int) $user['id'] > 0) {
+            $this->sessions->destroyAllForUser((int) $user['id']);
         }
 
         $ip = $this->ipMatcher->clientIpFromRequest($request->getServerParams());
@@ -42,16 +53,96 @@ final class LogoutAction
             $request->getHeaderLine('User-Agent'),
         );
 
-        // Smaž cookie
-        $cookieName = (string) $this->config->get('session.cookie_name', '__Host-myinvoice_session');
+        $sameSite = self::normalizeSameSite((string) $this->config->get('session.cookie_samesite', 'Lax'));
         $cookieSecure = (bool) $this->config->get('session.cookie_secure', true);
-        $cookie = sprintf(
-            '%s=; HttpOnly; Path=/; Max-Age=0; SameSite=Lax%s',
-            $cookieName,
-            $cookieSecure ? '; Secure' : '',
-        );
+        $trustedCookieName = (string) $this->config->get('auth.email_otp.trusted_cookie_name', '__Host-myinvoice_td');
 
-        return Json::ok($response, ['ok' => true])
-            ->withHeader('Set-Cookie', $cookie);
+        $result = Json::ok($response, ['ok' => true]);
+
+        foreach ($sessionCookieNames as $cookieName) {
+            $result = $result->withAddedHeader('Set-Cookie', self::expiredCookie($cookieName, '/', $sameSite, $cookieSecure));
+            $result = $result->withAddedHeader('Set-Cookie', self::expiredCookie($cookieName, '/api', $sameSite, $cookieSecure));
+            // Legacy non-secure varianta po lokalnim HTTP behu.
+            if ($cookieSecure) {
+                $result = $result->withAddedHeader('Set-Cookie', self::expiredCookie($cookieName, '/', $sameSite, false));
+                $result = $result->withAddedHeader('Set-Cookie', self::expiredCookie($cookieName, '/api', $sameSite, false));
+            }
+        }
+
+        $result = $result->withAddedHeader('Set-Cookie', self::expiredCookie($trustedCookieName, '/', $sameSite, $cookieSecure));
+        if ($cookieSecure) {
+            $result = $result->withAddedHeader('Set-Cookie', self::expiredCookie($trustedCookieName, '/', $sameSite, false));
+        }
+
+        // Browser-level cleanup cookie jaru pro aktualni origin (Chrome/Edge).
+        return $result->withHeader('Clear-Site-Data', '"cookies"');
+    }
+
+    /**
+     * @return string[]
+     */
+    private static function sessionCookieNames(Config $config): array
+    {
+        return array_values(array_unique([
+            (string) $config->get('session.cookie_name', '__Host-myinvoice_session'),
+            '__Host-myinvoice_session',
+            'myinvoice_session',
+        ]));
+    }
+
+    /**
+     * @param string[] $sessionCookieNames
+     * @return string[]
+     */
+    private function collectSessionTokensToDestroy(Request $request, string $attrToken, array $sessionCookieNames): array
+    {
+        $tokens = [];
+
+        if ($attrToken !== '') {
+            $normalized = strtolower($attrToken);
+            if (preg_match('/^[a-f0-9]{64}$/', $normalized) === 1) {
+                $tokens[$normalized] = true;
+            }
+        }
+
+        $nameSet = array_fill_keys($sessionCookieNames, true);
+        $rawCookie = $request->getHeaderLine('Cookie');
+        if ($rawCookie !== '') {
+            foreach (explode(';', $rawCookie) as $part) {
+                $part = trim($part);
+                if ($part === '' || !str_contains($part, '=')) {
+                    continue;
+                }
+
+                [$name, $value] = array_map('trim', explode('=', $part, 2));
+                if (!isset($nameSet[$name])) {
+                    continue;
+                }
+
+                $value = strtolower(urldecode($value));
+                if (preg_match('/^[a-f0-9]{64}$/', $value) === 1) {
+                    $tokens[$value] = true;
+                }
+            }
+        }
+
+        return array_keys($tokens);
+    }
+
+    private static function normalizeSameSite(string $sameSite): string
+    {
+        $sameSite = ucfirst(strtolower(trim($sameSite)));
+        return in_array($sameSite, ['Lax', 'Strict', 'None'], true) ? $sameSite : 'Lax';
+    }
+
+    private static function expiredCookie(string $name, string $path, string $sameSite, bool $secure): string
+    {
+        return sprintf(
+            '%s=; HttpOnly; Path=%s; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; SameSite=%s%s',
+            $name,
+            $path,
+            $sameSite,
+            $secure ? '; Secure' : '',
+        );
     }
 }

@@ -50,12 +50,8 @@ final class Config
             throw new \RuntimeException("cfg.php nenalezen v {$rootDir}");
         }
 
-        $base  = require $basePath;
-        $local = is_file($localPath) ? require $localPath : [];
-
-        if (!is_array($base) || !is_array($local)) {
-            throw new \RuntimeException('cfg.php (a cfg.local.php) musí vracet pole');
-        }
+        $base  = self::requireConfigArray($basePath, 'cfg.php');
+        $local = is_file($localPath) ? self::requireConfigArray($localPath, 'cfg.local.php') : [];
 
         // Baseline defaults pro non-secret veřejné konstanty (ARES/VIES URLs,
         // timeouty, cache TTL, ...). Cíl: image-baked stub `<?php return [];`
@@ -72,10 +68,7 @@ final class Config
         if ($dataDir !== null) {
             $dataLocalPath = $dataDir . DIRECTORY_SEPARATOR . 'cfg.local.php';
             if (is_file($dataLocalPath)) {
-                $dataLocal = require $dataLocalPath;
-                if (!is_array($dataLocal)) {
-                    throw new \RuntimeException('cfg.local.php v MYINVOICE_DATA_DIR musí vracet pole');
-                }
+                $dataLocal = self::requireConfigArray($dataLocalPath, 'cfg.local.php v MYINVOICE_DATA_DIR');
                 $merged = array_replace_recursive($merged, $dataLocal);
             }
         }
@@ -232,6 +225,29 @@ final class Config
                 ],
             ],
         ];
+    }
+
+    /**
+     * Načte PHP config soubor a potlačí případný nechtěný výstup (typicky UTF-8 BOM).
+     * Tím se zabrání kontaminaci HTTP odpovědí při include cfg.php.
+     *
+     * @return array<string,mixed>
+     */
+    private static function requireConfigArray(string $path, string $label): array
+    {
+        ob_start();
+        try {
+            $data = require $path;
+        } finally {
+            // Výstup z config souboru (BOM/whitespace) ignorujeme záměrně.
+            ob_get_clean();
+        }
+
+        if (!is_array($data)) {
+            throw new \RuntimeException("{$label} musí vracet pole");
+        }
+
+        return $data;
     }
 
     private static function envOverrideMap(): array

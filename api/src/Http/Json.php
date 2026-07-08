@@ -15,6 +15,13 @@ final class Json
         $payload = json_encode($data, JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
         $response->getBody()->write($payload);
 
+        // FastCGI (nginx + php-fpm) muze v nekterych konfiguracich ignorovat
+        // status z emitteru. Explicitni http_response_code drzi HTTP status
+        // konzistentni (napr. 401/403 misto chybneho 200).
+        if (PHP_SAPI !== 'cli' && PHP_SAPI !== 'phpdbg') {
+            http_response_code($status);
+        }
+
         return $response
             ->withStatus($status)
             ->withHeader('Content-Type', 'application/json; charset=utf-8')
