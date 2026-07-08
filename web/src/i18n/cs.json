@@ -1115,6 +1115,7 @@
     "issue_first": "Vystavit první",
     "clear_date_filter": "✕ Zrušit datum",
     "sent_at": "Odesláno: {date}",
+    "first_viewed_at": "Poprvé zobrazeno: {date}",
     "no_data": "Žádné faktury.",
     "summary_count": "Celkem {n} faktur ({m} měsíců)",
     "draft_id_short": "koncept #{id}",

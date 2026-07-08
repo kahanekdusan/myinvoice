@@ -114,7 +114,7 @@ final class PublicInvoiceLinkRepository
         )->execute([$invoiceId]);
     }
 
-    public function touchViewed(int $invoiceId): void
+    public function touchViewed(int $invoiceId, ?string $ipAddress = null, ?string $userAgent = null): void
     {
         $this->db->pdo()->prepare(
             'UPDATE invoices
@@ -122,6 +122,16 @@ final class PublicInvoiceLinkRepository
                     public_invoice_view_count = public_invoice_view_count + 1
               WHERE id = ?'
         )->execute([$invoiceId]);
+
+        // Novì logujeme i do oddìlené tabulky prvních zobrazení
+        $this->db->pdo()->prepare(
+            'INSERT INTO invoice_views (invoice_id, ip_address, user_agent)
+             VALUES (?, ?, ?)'
+        )->execute([
+            $invoiceId,
+            $ipAddress !== null ? substr($ipAddress, 0, 45) : null,
+            $userAgent
+        ]);
     }
 
     public function touchHeartbeat(int $invoiceId): void

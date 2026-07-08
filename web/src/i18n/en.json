@@ -1115,6 +1115,7 @@
     "issue_first": "Issue first",
     "clear_date_filter": "✕ Clear dates",
     "sent_at": "Sent: {date}",
+    "first_viewed_at": "First viewed: {date}",
     "no_data": "No invoices.",
     "summary_count": "Total {n} invoices ({m} months)",
     "draft_id_short": "draft #{id}",
