@@ -40,6 +40,7 @@ se záměrně nevytvoří a úloha skončí chybou (vidět v **Systém → Plán
 | `docker-build.{sh,ps1}` | `docker compose build app` — postaví image (default **alpine/nginx** z `Dockerfile.alpine`; volitelné `--no-cache`, `--pull`) |
 | `docker-install.{sh,ps1}` | First-run setup: vygeneruje `.env` + `cfg.docker.php`, **preferuje GHCR pull** (lokální build jen s `--build` / `MYINVOICE_INSTALL_MODE=source`), `up -d`, počká na DB healthcheck, spustí migrace, vypíše URL setup wizardu |
 | `docker-ghcr.{sh,ps1}` | One-click install **z pre-built image na GHCR** (`ghcr.io/radekhulan/myinvoice:latest` = alpine/nginx) — žádný local build. Stejně jako install vygeneruje `.env` + `cfg.docker.php`, místo `build` udělá `pull`, pak `up -d` + migrace |
+| `docker-dual-local.ps1` | Windows bootstrap pro **2 lokální varianty z jednoho repa**: vývoj na `development` + čistý upstream baseline (`upstream/master`) v samostatném worktree (`../myinvoice-upstream`). Umí `-Action up|status|down` |
 | `docker-update.{sh,ps1}` | Update běžící instance — **detekuje režim z image běžícího kontejneru**: registry (`ghcr.io/...`) → `pull`, lokální build → `git pull` + rebuild; pak `up -d` + migrace + úklid dangling vrstev. Přebití `MYINVOICE_UPDATE_MODE=registry\|source`. (Existující Debian instalace se přechodem `:latest` na alpine zmigrují samy při příštím updatu — drop-in.) |
 | `docker-prune-images.{sh,ps1}` | Detekuje a maže **obsolete** myinvoice image (nepoužívané kontejnerem ani compose) + dangling vrstvy. `--dry-run` / `-DryRun` jen vypíše. Chrání běžící i compose-referencované image |
 | `docker-update-watcher.{sh,ps1}` | Host-side daemon (systemd unit / Scheduled Task) — sleduje flag soubor `storage/upgrade-requested.json` (zapisuje UI v **Systém → Aktualizace**) a spustí `docker-update`, výsledek do `upgrade-result.json` |
@@ -217,6 +218,33 @@ docker compose -f docker-compose.production.yml down          # stop (data persi
 
 Pro **update** běžícího GHCR deploye stačí `cmd/docker-update.sh`
 (auto-detekuje registry mode = `pull` + `up -d` + migrace) — viz výše.
+
+### Dvě lokální varianty (development + upstream baseline)
+
+Pro porovnání "moje verze vs. čistý upstream" na jednom PC použij:
+
+```powershell
+.\cmd\docker-dual-local.ps1
+```
+
+Skript udělá:
+
+1. Přepne hlavní worktree na `development` (pokud je čistý a jsi jinde).
+2. Připraví vedlejší worktree `../myinvoice-upstream` na `upstream/master`.
+3. Spustí tvůj development stack z `docker-compose.yml`.
+4. Spustí upstream baseline stack z `docker-compose.production.yml` (GHCR image).
+
+Výchozí URL po startu:
+
+- development: `http://localhost:8080`
+- upstream baseline: `http://localhost:8090`
+
+Další akce:
+
+```powershell
+.\cmd\docker-dual-local.ps1 -Action status
+.\cmd\docker-dual-local.ps1 -Action down
+```
 
 ### Konfigurace přes `.env`
 
