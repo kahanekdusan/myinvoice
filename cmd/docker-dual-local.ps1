@@ -67,6 +67,44 @@ function Get-IntOrDefault([hashtable]$Map, [string]$Key, [int]$Default) {
     return $Default
 }
 
+function Test-TcpPortInUse([int]$Port) {
+    $listeners = [System.Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties().GetActiveTcpListeners()
+    return [bool]($listeners | Where-Object { $_.Port -eq $Port })
+}
+
+function Get-NextFreeTcpPort([int]$StartPort, [int]$MaxSteps = 200) {
+    for ($p = $StartPort; $p -lt ($StartPort + $MaxSteps); $p++) {
+        if ($p -gt 65535) { break }
+        if (-not (Test-TcpPortInUse $p)) { return $p }
+    }
+    throw "No free TCP port found from $StartPort in next $MaxSteps candidates."
+}
+
+function Update-DevelopmentEnvPorts {
+    $envPath = Join-Path $ProjectRoot '.env'
+    if (-not (Test-Path $envPath)) { return }
+
+    # Keep stable ports when app is already running from this compose project.
+    $runningServices = @(& docker compose ps --services --filter status=running 2>$null)
+    if ($runningServices -contains 'app') { return }
+
+    $envMap = Read-EnvFile $envPath
+    $devAppPort = Get-IntOrDefault $envMap 'APP_PORT' 8080
+    if (Test-TcpPortInUse $devAppPort) {
+        $newAppPort = Get-NextFreeTcpPort ($devAppPort + 1)
+        Write-Warning "Development APP_PORT $devAppPort is in use; switching to $newAppPort in .env"
+        Set-EnvKey $envPath 'APP_PORT' "$newAppPort"
+    }
+
+    $envMap = Read-EnvFile $envPath
+    $devDbPort = Get-IntOrDefault $envMap 'DB_PORT' 3307
+    if (Test-TcpPortInUse $devDbPort) {
+        $newDbPort = Get-NextFreeTcpPort ($devDbPort + 1)
+        Write-Warning "Development DB_PORT $devDbPort is in use; switching to $newDbPort in .env"
+        Set-EnvKey $envPath 'DB_PORT' "$newDbPort"
+    }
+}
+
 function Test-WorktreeRegistered([string]$Path) {
     $target = [System.IO.Path]::GetFullPath($Path).TrimEnd('\\')
     $rows = & git worktree list --porcelain
@@ -256,6 +294,7 @@ switch ($Action) {
 
         Update-MasterMirror
         Set-DevelopmentBranch
+        Update-DevelopmentEnvPorts
         Update-UpstreamWorktree
 
         $devEnv = Read-EnvFile (Join-Path $ProjectRoot '.env')

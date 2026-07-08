@@ -246,6 +246,8 @@ Výchozí URL po startu:
 
 Pokud je `development` už nastavený na `8090`, skript při prvním bootstrapu
 automaticky posune upstream baseline na `8100`, aby nedošlo ke kolizi portů.
+Pokud je obsazený development `APP_PORT` nebo `DB_PORT`, skript při startu
+automaticky přepíše port v `.env` na nejbližší volný.
 
 Další akce:
 
