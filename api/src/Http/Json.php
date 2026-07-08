@@ -12,7 +12,13 @@ final class Json
 {
     public static function ok(Response $response, mixed $data, int $status = 200): Response
     {
-        $payload = json_encode($data, JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        $payload = json_encode(
+            $data,
+            JSON_THROW_ON_ERROR
+            | JSON_UNESCAPED_UNICODE
+            | JSON_UNESCAPED_SLASHES
+            | JSON_INVALID_UTF8_SUBSTITUTE,
+        );
         $response->getBody()->write($payload);
 
         // FastCGI (nginx + php-fpm) muze v nekterych konfiguracich ignorovat

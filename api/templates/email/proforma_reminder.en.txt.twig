@@ -16,9 +16,13 @@ Due date:           {{ invoice.due_date|date('M j, Y') }}
 Days overdue:       {{ days_overdue }}
 Advance amount due: {{ amount_to_pay|number_format(2, '.', ',') }} {{ invoice.currency }}
 
-The proforma invoice PDF is attached.
+{% if public_invoice_url %}Open proforma invoice: {{ public_invoice_url }}
 Once the payment is received, we will send the final tax invoice promptly.
 If payment was sent in the past few days, please disregard this reminder.
+{% else %}Proforma invoice link could not be generated.
+Once the payment is received, we will send the final tax invoice promptly.
+If payment was sent in the past few days, please disregard this reminder.
+{% endif %}
 
 Thank you.
 {% endblock %}

@@ -57,6 +57,7 @@ final class Mailer
         private readonly ?EmailSigningService $emailSigning = null,
         private readonly ?EmailProfileRepository $emailProfiles = null,
         private readonly ?SentMailAppenderInterface $sentMailImap = null,
+        private readonly ?\MyInvoice\Service\Import\MicrosoftSmtpOAuthService $graphOAuth = null,
     ) {}
 
     /**
@@ -202,6 +203,10 @@ final class Mailer
             ->html($html)
             ->text($text);
 
+        // Inline přílohy sbírané i pro Microsoft Graph (logo, QR). SMTP cesta
+        // používá `->embed()` na $email; Graph potřebuje bytes + contentId zvlášť.
+        $graphInline = [];
+
         // Per-supplier branding logo jako CID inline image — je-li `email_branding_enabled`
         // a logo soubor existuje. Twig používá `cid:supplier_logo` jako image src.
         if ($supplier !== null
@@ -215,12 +220,14 @@ final class Mailer
             $logoAbs = SafeLogoPath::resolve((string) $supplier['logo_path'], (int) $supplier['id']);
             if ($logoAbs !== null) {
                 $email->embedFromPath($logoAbs, 'supplier_logo', 'image/png');
+                $graphInline[] = ['path' => $logoAbs, 'name' => 'logo.png', 'contentType' => 'image/png', 'contentId' => 'supplier_logo'];
             }
         }
 
         // QR platba jako inline CID image (viz výše, issue #51).
         if ($qrEmbed !== null) {
             $email->embed($qrEmbed['bytes'], 'qr_payment', $qrEmbed['contentType']);
+            $graphInline[] = ['bytes' => $qrEmbed['bytes'], 'name' => 'qr_payment.png', 'contentType' => $qrEmbed['contentType'], 'contentId' => 'qr_payment'];
         }
 
         foreach ($to as $addr)  $email->addTo($addr);
@@ -252,6 +259,67 @@ final class Mailer
 
         foreach ($attachments as $att) {
             $email->attachFromPath($att['path'], $att['name'], $att['contentType']);
+        }
+
+        // ── Microsoft Graph transport ──────────────────────────────────────
+        // Když má dodavatel připojený Microsoft účet (OAuth v DB), odesíláme přes
+        // Graph API (Exchange Online), NE přes SMTP. Vlastní SMTP profil (transport_type
+        // smtp/sendmail) má přednost — ten uživatel nastavil vědomě.
+        $graphSupplierId = is_array($supplier) && !empty($supplier['id']) ? (int) $supplier['id'] : null;
+        if ($this->graphOAuth !== null
+            && !$this->usesProfileTransport($emailProfile)
+            && $graphSupplierId !== null
+            && $this->graphOAuth->isConnected($graphSupplierId)
+        ) {
+            $attachmentParts = [];
+            foreach ($attachments as $att) {
+                if (!is_file($att['path'])) continue;
+                $bytes = file_get_contents($att['path']);
+                if ($bytes === false) continue;
+                $attachmentParts[] = ['name' => $att['name'], 'contentType' => $att['contentType'], 'bytes' => $bytes];
+            }
+            $inlineParts = [];
+            foreach ($graphInline as $inl) {
+                if (isset($inl['bytes'])) {
+                    $bytes = (string) $inl['bytes'];
+                } elseif (isset($inl['path']) && is_file($inl['path'])) {
+                    $read = file_get_contents($inl['path']);
+                    if ($read === false) continue;
+                    $bytes = $read;
+                } else {
+                    continue;
+                }
+                $inlineParts[] = ['name' => $inl['name'], 'contentType' => $inl['contentType'], 'bytes' => $bytes, 'contentId' => $inl['contentId']];
+            }
+
+            $graphResponse = $this->graphOAuth->sendGraphMessage($graphSupplierId, [
+                'subject'     => (string) $vars['subject'],
+                'html'        => $html,
+                'text'        => $text,
+                'to'          => array_values($to),
+                'cc'          => array_values($cc),
+                'bcc'         => array_values($bcc),
+                'reply_email' => $replyEmail,
+                'reply_name'  => $replyName,
+                'attachments' => $attachmentParts,
+                'inline'      => $inlineParts,
+            ]);
+
+            $this->logger->info('mail.sent', [
+                'template'      => $code,
+                'locale'        => $locale,
+                'transport'     => 'microsoft_graph',
+                'to'            => $to,
+                'cc'            => $cc,
+                'bcc'           => $bcc,
+                'attachments'   => count($attachments),
+                'smtp_response' => $graphResponse,
+            ]);
+
+            return [
+                'smtp_response' => $graphResponse,
+                'imap_append' => ['status' => 'skipped', 'folder' => null, 'error' => null],
+            ];
         }
 
         // POZOR (Bcc + DKIM/S/MIME): obálku (MAIL FROM + RCPT TO) musíme zachytit

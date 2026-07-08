@@ -109,6 +109,30 @@ export interface AiExtractResult {
   error?: string
 }
 
+export interface MicrosoftOAuthStatus {
+  configured: boolean
+  connected: boolean
+  tenant_id: string
+  client_id: string | null
+  mailbox: string | null
+  connected_at: string | null
+  token_expires_at: string | null
+  redirect_uri: string
+  scopes: string[]
+}
+
+export interface MicrosoftOAuthStartInput {
+  tenant_id?: string
+  client_id?: string
+  client_secret?: string
+  mailbox?: string
+}
+
+export interface MicrosoftOAuthStartResult {
+  authorize_url: string
+  redirect_uri: string
+}
+
 export const integrationsApi = {
   // iDoklad credentials
   getIdokladCreds: () =>
@@ -154,6 +178,14 @@ export const integrationsApi = {
       timeout: 120000, // 2 min — AI inference může trvat
     }).then(r => r.data)
   },
+
+  // Microsoft SMTP OAuth (admin integration)
+  getMicrosoftOAuthStatus: () =>
+    api.get<MicrosoftOAuthStatus>('/admin/smtp/oauth/microsoft/status').then(r => r.data),
+  startMicrosoftOAuth: (input: MicrosoftOAuthStartInput) =>
+    api.post<MicrosoftOAuthStartResult>('/admin/smtp/oauth/microsoft/start', input).then(r => r.data),
+  disconnectMicrosoftOAuth: () =>
+    api.delete<{ ok: boolean }>('/admin/smtp/oauth/microsoft').then(r => r.data),
 
   // Shared job tracking
   getJob: (id: number) =>

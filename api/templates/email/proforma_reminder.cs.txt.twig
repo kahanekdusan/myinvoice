@@ -16,9 +16,13 @@ Splatnost:         {{ invoice.due_date|date('j.n.Y') }}
 Po splatnosti:     {{ days_overdue }} {% if days_overdue == 1 %}den{% elseif days_overdue < 5 %}dny{% else %}dní{% endif %}
 K úhradě zálohy:   {{ amount_to_pay|number_format(2, ',', ' ') }} {{ invoice.currency }}
 
-Zálohová faktura v PDF je v příloze tohoto emailu.
+{% if public_invoice_url %}Otevřít zálohovou fakturu: {{ public_invoice_url }}
 Po přijetí platby Vám obratem zašleme finální daňový doklad.
 Pokud byla platba odeslána v posledních dnech, považujte prosím tuto připomínku za bezpředmětnou.
+{% else %}Odkaz na zálohovou fakturu se nepodařilo vygenerovat.
+Po přijetí platby Vám obratem zašleme finální daňový doklad.
+Pokud byla platba odeslána v posledních dnech, považujte prosím tuto připomínku za bezpředmětnou.
+{% endif %}
 
 Děkujeme za vyřízení.
 {% endblock %}

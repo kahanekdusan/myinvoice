@@ -3,7 +3,8 @@ import { ref, onMounted, onUnmounted, computed, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { integrationsApi,
   type IdokladCredentialsStatus, type FakturoidCredentialsStatus,
-  type AnthropicCredentialsStatus, type AiExtractResult, type ImportJob } from '@/api/integrations'
+  type AnthropicCredentialsStatus, type AiExtractResult, type ImportJob,
+  type MicrosoftOAuthStatus, type MicrosoftOAuthStartInput } from '@/api/integrations'
 import { useRouter, useRoute } from 'vue-router'
 import { useToast } from '@/composables/useToast'
 import { apiErrorMessage } from '@/api/errors'
@@ -11,13 +12,13 @@ import { apiErrorMessage } from '@/api/errors'
 const { t } = useI18n()
 const toast = useToast()
 
-type Tab = 'idoklad' | 'fakturoid' | 'ai'
+type Tab = 'idoklad' | 'fakturoid' | 'microsoft' | 'ai'
 // Tab z ?tab=... query (default idoklad). Watch pro proklik mezi sidebar položkami
 // "Externí integrace" (no query) ↔ "AI import" (?tab=ai).
 const route = useRoute()
 function readTabFromQuery(): Tab {
   const q = String(route.query.tab ?? '')
-  return q === 'fakturoid' || q === 'ai' ? q as Tab : 'idoklad'
+  return q === 'fakturoid' || q === 'ai' || q === 'microsoft' ? q as Tab : 'idoklad'
 }
 const tab = ref<Tab>(readTabFromQuery())
 watch(() => route.query.tab, () => {
@@ -267,6 +268,90 @@ async function startFakImport() {
   }
 }
 
+// ── Microsoft SMTP OAuth ───────────────────────────────────────────────
+const msStatus = ref<MicrosoftOAuthStatus | null>(null)
+const msTenantId = ref('common')
+const msClientId = ref('')
+const msClientSecret = ref('')
+const msMailbox = ref('')
+const msShowSecret = ref(false)
+const msConnecting = ref(false)
+const msMsg = ref<{ ok: boolean; text: string } | null>(null)
+
+async function loadMicrosoftStatus() {
+  try {
+    msStatus.value = await integrationsApi.getMicrosoftOAuthStatus()
+    msTenantId.value = msStatus.value.tenant_id || 'common'
+    msClientId.value = msStatus.value.client_id || msClientId.value
+    msMailbox.value = msStatus.value.mailbox || ''
+  } catch (e) {
+    toast.error(apiErrorMessage(e))
+  }
+}
+
+async function startMicrosoftConnect() {
+  if (msConnecting.value) return
+  if (msMailbox.value && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(msMailbox.value)) {
+    toast.error(t('integrations.microsoft.mailbox_invalid'))
+    return
+  }
+
+  msConnecting.value = true
+  msMsg.value = null
+  try {
+    const input: MicrosoftOAuthStartInput = {}
+    const tenantId = msTenantId.value.trim()
+    const clientId = msClientId.value.trim()
+    const clientSecret = msClientSecret.value.trim()
+    const mailbox = msMailbox.value.trim()
+
+    if (tenantId !== '') input.tenant_id = tenantId
+    if (clientId !== '') input.client_id = clientId
+    if (clientSecret !== '') input.client_secret = clientSecret
+    if (mailbox !== '') input.mailbox = mailbox
+
+    const r = await integrationsApi.startMicrosoftOAuth(input)
+
+    msClientSecret.value = ''
+    const popup = window.open(r.authorize_url, 'myinvoice-microsoft-oauth', 'popup,width=640,height=760')
+    if (!popup) {
+      window.location.href = r.authorize_url
+      return
+    }
+    msMsg.value = { ok: true, text: t('integrations.microsoft.popup_hint') }
+  } catch (e) {
+    msMsg.value = { ok: false, text: apiErrorMessage(e) }
+  } finally {
+    msConnecting.value = false
+  }
+}
+
+async function disconnectMicrosoftConnect() {
+  if (!confirm(t('integrations.microsoft.disconnect_confirm'))) return
+  try {
+    await integrationsApi.disconnectMicrosoftOAuth()
+    msMsg.value = { ok: true, text: t('integrations.microsoft.disconnected') }
+    await loadMicrosoftStatus()
+  } catch (e) {
+    msMsg.value = { ok: false, text: apiErrorMessage(e) }
+  }
+}
+
+function onMicrosoftOAuthMessage(event: MessageEvent) {
+  if (event.origin !== window.location.origin) return
+  const data = event.data as { type?: string; ok?: boolean; message?: string } | null
+  if (!data || data.type !== 'myinvoice:microsoft-oauth') return
+
+  if (data.ok) {
+    msMsg.value = { ok: true, text: data.message || t('integrations.microsoft.connected') }
+    toast.success(t('integrations.microsoft.connected'))
+  } else {
+    msMsg.value = { ok: false, text: data.message || t('integrations.microsoft.connect_failed') }
+    toast.error(msMsg.value.text)
+  }
+  void loadMicrosoftStatus()
+}
+
 // ── Anthropic AI ─────────────────────────────────────────────────────
 const router = useRouter()
 const aiStatus = ref<AnthropicCredentialsStatus | null>(null)
@@ -443,11 +528,14 @@ function gotoInvoice(id: number) {
 onMounted(() => {
   loadIdokladStatus()
   loadFakStatus()
+  loadMicrosoftStatus()
   loadAiStatus()
+  window.addEventListener('message', onMicrosoftOAuthMessage)
 })
 
 onUnmounted(() => {
   if (pollTimer) clearInterval(pollTimer)
+  window.removeEventListener('message', onMicrosoftOAuthMessage)
 })
 </script>
 
@@ -458,10 +546,10 @@ onUnmounted(() => {
       <p class="text-sm text-neutral-500 mt-0.5">{{ t('integrations.subtitle') }}</p>
     </div>
 
-    <!-- Tabs: iDoklad / Fakturoid / AI -->
+    <!-- Tabs: iDoklad / Fakturoid / Microsoft / AI -->
     <div class="border-b border-neutral-200 mb-4 flex gap-1 overflow-x-auto">
       <button
-        v-for="tt in (['idoklad', 'fakturoid', 'ai'] as const)" :key="tt"
+        v-for="tt in (['idoklad', 'fakturoid', 'microsoft', 'ai'] as const)" :key="tt"
         @click="tab = tt"
         class="cursor-pointer px-4 py-2 text-sm border-b-2 transition whitespace-nowrap inline-flex items-center gap-1.5"
         :class="tab === tt
@@ -842,6 +930,86 @@ onUnmounted(() => {
             <pre class="mt-2 max-h-72 overflow-y-auto bg-neutral-900 text-neutral-100 p-3 rounded font-mono text-[11px] whitespace-pre-wrap">{{ currentJob.log_text }}</pre>
           </details>
         </div>
+      </div>
+    </div>
+
+    <!-- ════ Microsoft SMTP OAuth tab ════ -->
+    <div v-else-if="tab === 'microsoft'" class="space-y-4">
+      <div class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
+        <h2 class="text-sm font-medium text-neutral-700 mb-2">{{ t('integrations.microsoft.credentials_title') }}</h2>
+        <p class="text-xs text-neutral-500 mb-4">{{ t('integrations.microsoft.credentials_hint') }}</p>
+
+        <div v-if="msStatus?.connected" class="rounded-md bg-success-50 border border-success-500/40 px-3 py-2 text-sm text-success-600 mb-4">
+          <strong>✓ {{ t('integrations.microsoft.connected') }}</strong>
+          <span v-if="msStatus.mailbox" class="ml-2 font-mono text-xs">{{ msStatus.mailbox }}</span>
+          <div v-if="msStatus.token_expires_at" class="text-xs mt-1">{{ t('integrations.microsoft.token_expires') }}: {{ msStatus.token_expires_at }}</div>
+        </div>
+        <div v-else-if="msStatus?.configured" class="rounded-md bg-primary-50 border border-primary-200 px-3 py-2 text-sm text-primary-700 mb-4">
+          <strong>✓ {{ t('integrations.microsoft.configured') }}</strong>
+          <span class="ml-2 text-xs">{{ t('integrations.microsoft.not_connected_yet') }}</span>
+        </div>
+
+        <div class="space-y-3">
+          <div>
+            <label class="block text-sm text-neutral-700 mb-1">{{ t('integrations.microsoft.tenant_id') }}</label>
+            <input v-model="msTenantId" type="text" maxlength="120"
+                   class="w-full h-10 px-3 border border-neutral-300 rounded-md text-sm font-mono"
+                   placeholder="common" />
+          </div>
+          <div>
+            <label class="block text-sm text-neutral-700 mb-1">{{ t('integrations.microsoft.client_id') }}</label>
+            <input v-model="msClientId" type="text" maxlength="190"
+                   class="w-full h-10 px-3 border border-neutral-300 rounded-md text-sm font-mono"
+                   placeholder="00000000-0000-0000-0000-000000000000" />
+          </div>
+          <div>
+            <label class="block text-sm text-neutral-700 mb-1">{{ t('integrations.microsoft.client_secret') }}</label>
+            <div class="flex gap-2">
+              <input v-model="msClientSecret" :type="msShowSecret ? 'text' : 'password'" maxlength="512"
+                     class="flex-1 h-10 px-3 border border-neutral-300 rounded-md text-sm font-mono"
+                     :placeholder="msStatus?.configured ? t('integrations.microsoft.secret_placeholder_existing') : ''" />
+              <button type="button" @click="msShowSecret = !msShowSecret"
+                      class="cursor-pointer h-10 px-3 border border-neutral-300 rounded-md hover:bg-neutral-50 text-sm">
+                {{ msShowSecret ? '🙈' : '👁' }}
+              </button>
+            </div>
+          </div>
+          <div>
+            <label class="block text-sm text-neutral-700 mb-1">{{ t('integrations.microsoft.mailbox') }}</label>
+            <input v-model="msMailbox" type="email" maxlength="190"
+                   class="w-full h-10 px-3 border border-neutral-300 rounded-md text-sm"
+                   :placeholder="t('integrations.microsoft.mailbox_placeholder')" />
+          </div>
+          <div v-if="msStatus?.redirect_uri">
+            <label class="block text-sm text-neutral-700 mb-1">{{ t('integrations.microsoft.redirect_uri') }}</label>
+            <input :value="msStatus.redirect_uri" type="text" readonly
+                   class="w-full h-10 px-3 border border-neutral-300 rounded-md text-sm font-mono bg-neutral-50" />
+          </div>
+        </div>
+
+        <div v-if="msMsg" class="mt-3 rounded-md px-3 py-2 text-sm"
+             :class="msMsg.ok ? 'bg-success-50 text-success-600 border border-success-500/40' : 'bg-danger-50 text-danger-500 border border-danger-500/40'">
+          {{ msMsg.text }}
+        </div>
+
+        <div class="flex items-center justify-between gap-2 mt-4 pt-4 border-t border-neutral-100">
+          <button v-if="msStatus?.connected" type="button" @click="disconnectMicrosoftConnect"
+                  class="cursor-pointer h-10 px-4 text-sm border border-danger-500/50 text-danger-500 hover:bg-danger-50 rounded-md">
+            {{ t('integrations.microsoft.disconnect') }}
+          </button>
+          <span v-else></span>
+          <button type="button" @click="startMicrosoftConnect" :disabled="msConnecting"
+                  class="cursor-pointer h-10 px-5 text-sm bg-primary-600 hover:bg-primary-700 disabled:bg-neutral-300 text-white font-medium rounded-md">
+            {{ msConnecting ? '…' : t('integrations.microsoft.connect_button') }}
+          </button>
+        </div>
+
+        <details class="mt-4 text-xs text-neutral-500">
+          <summary class="cursor-pointer hover:text-neutral-700">{{ t('integrations.microsoft.scope_title') }}</summary>
+          <ul class="mt-2 list-disc list-inside space-y-1">
+            <li v-for="s in (msStatus?.scopes || [])" :key="s" class="font-mono">{{ s }}</li>
+          </ul>
+        </details>
       </div>
     </div>
 

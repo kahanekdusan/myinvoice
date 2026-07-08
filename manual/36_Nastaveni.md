@@ -179,7 +179,7 @@ Klient s.r.o.", …).
 
 ### 36.4.4 Placeholders
 
-Závisí na typu šablony. `invoice_new`:
+Závisí na typu šablony. `invoice_send`:
 
 | Placeholder | Význam |
 |---|---|
@@ -189,7 +189,7 @@ Závisí na typu šablony. `invoice_new`:
 | `{{ due_date }}` | Splatnost |
 | `{{ client_name }}` | Klient |
 | `{{ supplier_name }}` | Dodavatel |
-| `{{ pdf_url }}` | Odkaz pro stažení PDF (pokud máš public link) |
+| `{{ public_invoice_url }}` | Veřejný odkaz na fakturu (z něj lze otevřít nebo stáhnout PDF) |
 
 ## 36.5 Activity log
 

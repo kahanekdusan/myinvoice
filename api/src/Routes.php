@@ -33,6 +33,10 @@ use MyInvoice\Action\Admin\Import\IdokladCredentialsAction;
 use MyInvoice\Action\Admin\Import\FakturoidCredentialsAction;
 use MyInvoice\Action\Admin\Import\AnthropicCredentialsAction;
 use MyInvoice\Action\Admin\Import\AiExtractPdfAction;
+use MyInvoice\Action\Admin\Import\MicrosoftOAuthStatusAction;
+use MyInvoice\Action\Admin\Import\MicrosoftOAuthStartAction;
+use MyInvoice\Action\Admin\Import\MicrosoftOAuthCallbackAction;
+use MyInvoice\Action\Admin\Import\MicrosoftOAuthDisconnectAction;
 use MyInvoice\Action\Crm\CrmDashboardAction;
 use MyInvoice\Action\Report\DphPriznaniAction;
 use MyInvoice\Action\Report\KontrolniHlaseniAction;
@@ -120,6 +124,9 @@ use MyInvoice\Action\Invoice\SendReminderAction;
 use MyInvoice\Action\Invoice\BulkSendRemindersAction;
 use MyInvoice\Action\Invoice\SendTestEmailAction;
 use MyInvoice\Action\Invoice\SendTestReminderAction;
+use MyInvoice\Action\Invoice\PublicInvoiceGetAction;
+use MyInvoice\Action\Invoice\PublicInvoicePdfAction;
+use MyInvoice\Action\Invoice\PublicInvoiceHeartbeatAction;
 use MyInvoice\Action\Invoice\UpdateInvoiceAction;
 use MyInvoice\Action\WorkReport\GetWorkReportAction;
 use MyInvoice\Action\WorkReport\SaveWorkReportAction;
@@ -402,6 +409,11 @@ final class Routes
         $app->post   ('/api/public/work-report/{token:[a-f0-9]{32,128}}/request-code', PublicWorkReportRequestCodeAction::class);
         $app->post   ('/api/public/work-report/{token:[a-f0-9]{32,128}}/verify',       PublicWorkReportVerifyAction::class);
 
+        // Public odkaz na fakturu (bez auth; token-only view + PDF + heartbeat)
+        $app->get    ('/api/public/invoice/{token:[a-f0-9]{32,128}}',           PublicInvoiceGetAction::class);
+        $app->get    ('/api/public/invoice/{token:[a-f0-9]{32,128}}/pdf',       PublicInvoicePdfAction::class);
+        $app->post   ('/api/public/invoice/{token:[a-f0-9]{32,128}}/heartbeat', PublicInvoiceHeartbeatAction::class);
+
         // Dashboard
         $app->get ('/api/dashboard/summary',          SummaryAction::class);
         $app->get ('/api/dashboard/purchase-summary', PurchaseSummaryAction::class);
@@ -435,6 +447,18 @@ final class Routes
         $app->put    ('/api/admin/imports/anthropic/credentials', [AnthropicCredentialsAction::class, 'update']);
         $app->delete ('/api/admin/imports/anthropic/credentials', [AnthropicCredentialsAction::class, 'delete']);
         $app->post   ('/api/admin/imports/ai-extract-pdf',        AiExtractPdfAction::class);
+
+        // Microsoft SMTP OAuth (admin integrations)
+        $app->get    ('/api/admin/imports/microsoft-oauth/status',      MicrosoftOAuthStatusAction::class);
+        $app->post   ('/api/admin/imports/microsoft-oauth/start',       MicrosoftOAuthStartAction::class);
+        $app->get    ('/api/admin/imports/microsoft-oauth/callback',    MicrosoftOAuthCallbackAction::class);
+        $app->delete ('/api/admin/imports/microsoft-oauth/connection',  MicrosoftOAuthDisconnectAction::class);
+        // Backward-compatible aliasy (produkční flow /api/admin/smtp/oauth/microsoft/*)
+        $app->get    ('/api/admin/smtp/oauth/microsoft/status',          MicrosoftOAuthStatusAction::class);
+        $app->post   ('/api/admin/smtp/oauth/microsoft/start',           MicrosoftOAuthStartAction::class);
+        $app->get    ('/api/admin/smtp/oauth/microsoft/start',           MicrosoftOAuthStartAction::class);
+        $app->get    ('/api/admin/smtp/oauth/microsoft/callback',        MicrosoftOAuthCallbackAction::class);
+        $app->delete ('/api/admin/smtp/oauth/microsoft',                 MicrosoftOAuthDisconnectAction::class);
 
         // CRM dashboard (fáze 5)
         $app->get    ('/api/crm/overview',     [CrmDashboardAction::class, 'overview']);

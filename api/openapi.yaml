@@ -1272,9 +1272,11 @@ paths:
       tags: [InvoiceComms]
       summary: Pošle fakturu emailem klientovi
       description: |
-        Vyrenderuje aktuální PDF, archivuje ho a odešle přes SMTP. Faktura musí
-        být `issued` nebo navazující stav. Předmět + tělo z šablony `invoice_send`
-        (per locale, per supplier override v Email šablonách).
+        Vygeneruje/ověří veřejný odkaz na fakturu a odešle e-mail přes SMTP.
+        PDF příloha se standardně nepřikládá; klient si PDF otevře nebo stáhne
+        přes odkaz v e-mailu. Faktura musí být `issued` nebo navazující stav.
+        Předmět + tělo z šablony `invoice_send` (per locale, per supplier
+        override v Email šablonách).
 
         Body je volitelné — když chybí, příjemce vyřeší jednotný resolver (#86):
         kontakty klienta s účelem `documents` (vč. cc/bcc rolí); bez kontaktů
@@ -1344,7 +1346,8 @@ paths:
       summary: Pošle upomínku po splatnosti
       description: |
         Šablona `invoice_reminder` (per locale, per supplier override). Klient
-        nemá vliv na obsah — text je z nastavení.
+        nemá vliv na obsah — text je z nastavení. Upomínka obsahuje veřejný
+        odkaz na fakturu; PDF příloha se standardně nepřikládá.
       responses:
         '200':
           description: OK
@@ -1360,6 +1363,168 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+
+  /api/public/invoice/{token}:
+    get:
+      tags: [InvoiceComms]
+      summary: Veřejný detail faktury přes token
+      security: []
+      parameters:
+        - in: path
+          name: token
+          required: true
+          schema: { type: string, pattern: '^[a-f0-9]{32,128}$' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PublicInvoiceGetResponse' }
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/public/invoice/{token}/pdf:
+    get:
+      tags: [InvoiceComms]
+      summary: Veřejné PDF faktury přes token
+      security: []
+      parameters:
+        - in: path
+          name: token
+          required: true
+          schema: { type: string, pattern: '^[a-f0-9]{32,128}$' }
+      responses:
+        '200':
+          description: PDF stream
+          content:
+            application/pdf:
+              schema: { type: string, format: binary }
+        '400':
+          description: Neplatný token
+          content:
+            text/plain:
+              schema: { type: string }
+        '404':
+          description: Odkaz na fakturu nenalezen nebo expirován
+          content:
+            text/plain:
+              schema: { type: string }
+        '500':
+          description: PDF není dostupné
+          content:
+            text/plain:
+              schema: { type: string }
+
+  /api/public/invoice/{token}/heartbeat:
+    post:
+      tags: [InvoiceComms]
+      summary: Heartbeat veřejného náhledu faktury
+      security: []
+      parameters:
+        - in: path
+          name: token
+          required: true
+          schema: { type: string, pattern: '^[a-f0-9]{32,128}$' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PublicInvoiceHeartbeatResponse' }
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/admin/smtp/oauth/microsoft/status:
+    get:
+      tags: [Settings]
+      summary: Stav Microsoft Graph OAuth propojení
+      description: Vrátí stav konfigurace/propojení pro aktuálního dodavatele.
+      parameters:
+        - $ref: '#/components/parameters/SupplierIdHeader'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MicrosoftOAuthStatus' }
+        '403':
+          description: Pouze admin
+
+  /api/admin/smtp/oauth/microsoft/start:
+    post:
+      tags: [Settings]
+      summary: Zahájí Microsoft Graph OAuth autorizaci
+      description: |
+        Uloží OAuth konfiguraci a vrátí autorizační URL. URL otevři v popup okně;
+        po callbacku endpoint vrátí výsledek přes `postMessage` a popup zavře.
+      parameters:
+        - $ref: '#/components/parameters/SupplierIdHeader'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MicrosoftOAuthStartInput' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MicrosoftOAuthStartResult' }
+        '400':
+          $ref: '#/components/responses/ValidationFailed'
+        '403':
+          description: Pouze admin
+
+  /api/admin/smtp/oauth/microsoft/callback:
+    get:
+      tags: [Settings]
+      summary: Callback endpoint pro Microsoft Graph OAuth
+      description: |
+        Browser endpoint volaný Microsoftem po autorizaci.
+        Session cookie není vyžadována — validace probíhá přes podepsaný `state`.
+        Vrací HTML stránku, která pošle výsledek do opener okna přes
+        `window.postMessage` a následně popup zavře nebo přesměruje.
+      parameters:
+        - in: query
+          name: state
+          required: true
+          schema: { type: string }
+        - in: query
+          name: code
+          required: false
+          schema: { type: string }
+        - in: query
+          name: error
+          required: false
+          schema: { type: string }
+        - in: query
+          name: error_description
+          required: false
+          schema: { type: string }
+      responses:
+        '200':
+          description: HTML výsledek callbacku
+          content:
+            text/html:
+              schema: { type: string }
+
+  /api/admin/smtp/oauth/microsoft:
+    delete:
+      tags: [Settings]
+      summary: Odpojí Microsoft OAuth propojení
+      parameters:
+        - $ref: '#/components/parameters/SupplierIdHeader'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+        '403':
+          description: Pouze admin
 
   /api/v1/invoices/{id}/attachments:
     parameters:
@@ -5866,6 +6031,73 @@ components:
         mime_type: { type: string, example: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }
         size_bytes: { type: integer, example: 18452 }
         created_at: { type: string, format: date-time }
+
+    PublicInvoiceDetail:
+      type: object
+      properties:
+        id: { type: integer }
+        supplier_id: { type: integer }
+        invoice_type: { type: string }
+        status: { type: string }
+        varsymbol: { type: string, nullable: true }
+        issue_date: { type: string, format: date }
+        due_date: { type: string, format: date }
+        language: { type: string, enum: [cs, en] }
+        amount_to_pay: { type: number, format: float }
+        paid_total: { type: number, format: float }
+        total_with_vat: { type: number, format: float }
+        exchange_rate: { type: number, format: float, nullable: true }
+        currency: { type: string, example: CZK }
+        client_company_name: { type: string }
+        supplier_company_name: { type: string }
+        supplier_display_name: { type: string, nullable: true }
+        email_branding_enabled: { type: boolean }
+        email_accent_color: { type: string, example: "#3B2D83" }
+        token_expires_at: { type: string, format: date-time, nullable: true }
+        view_count: { type: integer }
+
+    PublicInvoiceGetResponse:
+      type: object
+      properties:
+        invoice: { $ref: '#/components/schemas/PublicInvoiceDetail' }
+
+    PublicInvoiceHeartbeatResponse:
+      type: object
+      properties:
+        ok: { type: boolean }
+        invoice_id: { type: integer }
+
+    MicrosoftOAuthStatus:
+      type: object
+      properties:
+        configured: { type: boolean }
+        connected: { type: boolean }
+        tenant_id: { type: string, default: common }
+        client_id: { type: string, nullable: true }
+        mailbox: { type: string, format: email, nullable: true }
+        connected_at: { type: string, format: date-time, nullable: true }
+        token_expires_at: { type: string, format: date-time, nullable: true }
+        redirect_uri: { type: string }
+        scopes:
+          type: array
+          items: { type: string }
+
+    MicrosoftOAuthStartInput:
+      type: object
+      description: |
+        Volitelné override hodnoty pro OAuth start.
+        Pokud nejsou poslané, backend použije uložené/cfg hodnoty.
+      properties:
+        tenant_id: { type: string, default: common, maxLength: 120 }
+        client_id: { type: string, maxLength: 190 }
+        client_secret: { type: string, maxLength: 512 }
+        mailbox: { type: string, format: email, maxLength: 190, nullable: true }
+
+    MicrosoftOAuthStartResult:
+      type: object
+      properties:
+        authorize_url: { type: string }
+        redirect_uri: { type: string }
 
     AresLookupResult:
       type: object

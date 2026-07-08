@@ -46,6 +46,10 @@ final class AuthMiddleware implements MiddlewareInterface
         '/api/auth/login',
         '/api/auth/forgot',
         '/api/auth/reset',
+        // OAuth callback musí fungovat i bez aktivní session cookie
+        // (např. popup blocked -> full-page redirect přes Microsoft).
+        '/api/admin/imports/microsoft-oauth/callback',
+        '/api/admin/smtp/oauth/microsoft/callback',
     ];
 
     public function __construct(
