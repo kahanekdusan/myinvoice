@@ -42,6 +42,7 @@ se záměrně nevytvoří a úloha skončí chybou (vidět v **Systém → Plán
 | `docker-ghcr.{sh,ps1}` | One-click install **z pre-built image na GHCR** (`ghcr.io/radekhulan/myinvoice:latest` = alpine/nginx) — žádný local build. Stejně jako install vygeneruje `.env` + `cfg.docker.php`, místo `build` udělá `pull`, pak `up -d` + migrace |
 | `docker-dual-local.ps1` | Windows bootstrap pro **2 lokální varianty z jednoho repa**: vývoj na `development` + čistý upstream baseline (`upstream/master`) v samostatném worktree (`../myinvoice-upstream`). Umí `-Action up|status|down` |
 | `docker-migrate-project-data.ps1` | Přenese data mezi Docker project volumes (db-data + app-data), např. ze starého `myinvoice_dev` do nového `myinvoice`; umí i backup cílových volumes před přepisem a režim `-ListProjects` pro výpis dostupných prefixů |
+| `docker-db-sync.ps1` | Export/import SQL dumpu mezi dvěma PC (`-Action export|import|list-projects`), detekce DB kontejneru podle compose labelů, volitelně `-StartDb` a restart app po importu |
 | `docker-update.{sh,ps1}` | Update běžící instance — **detekuje režim z image běžícího kontejneru**: registry (`ghcr.io/...`) → `pull`, lokální build → `git pull` + rebuild; pak `up -d` + migrace + úklid dangling vrstev. Přebití `MYINVOICE_UPDATE_MODE=registry\|source`. (Existující Debian instalace se přechodem `:latest` na alpine zmigrují samy při příštím updatu — drop-in.) |
 | `docker-prune-images.{sh,ps1}` | Detekuje a maže **obsolete** myinvoice image (nepoužívané kontejnerem ani compose) + dangling vrstvy. `--dry-run` / `-DryRun` jen vypíše. Chrání běžící i compose-referencované image |
 | `docker-update-watcher.{sh,ps1}` | Host-side daemon (systemd unit / Scheduled Task) — sleduje flag soubor `storage/upgrade-requested.json` (zapisuje UI v **Systém → Aktualizace**) a spustí `docker-update`, výsledek do `upgrade-result.json` |
@@ -256,6 +257,28 @@ Další akce:
 .\cmd\docker-dual-local.ps1 -Action status
 .\cmd\docker-dual-local.ps1 -Action down
 ```
+
+### Export/import DB mezi dvěma PC (SQL dump)
+
+Nejprve si zjisti dostupné compose prefixy:
+
+```powershell
+.\cmd\docker-db-sync.ps1 -Action list-projects
+```
+
+Export na zdrojovém PC:
+
+```powershell
+.\cmd\docker-db-sync.ps1 -Action export -ProjectName myinvoice_dev -SqlPath .\myinvoice-dev.sql -StartDb
+```
+
+Import na cílovém PC:
+
+```powershell
+.\cmd\docker-db-sync.ps1 -Action import -ProjectName myinvoice -SqlPath .\myinvoice-dev.sql -StartDb
+```
+
+Skript po importu standardně restartuje app kontejner cílového projektu.
 
 ### Konfigurace přes `.env`
 
