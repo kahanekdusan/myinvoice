@@ -128,8 +128,8 @@ if ($mode -eq 'registry') {
 }
 
 if ($mode -eq 'source') {
-    & docker image inspect myinvoice:latest 2>$null | Out-Null
-    if ($LASTEXITCODE -ne 0) {
+    $localImageId = (& docker image ls -q myinvoice:latest 2>$null | Select-Object -First 1)
+    if (-not $localImageId) {
         Write-Host "==> Building image..."
         & docker compose @composeArgs build app
         if ($LASTEXITCODE -ne 0) { Write-Error "docker compose build failed" }
