@@ -190,6 +190,13 @@ function Start-DevelopmentStack {
         return
     }
 
+    $localImageId = (& docker image ls -q myinvoice:latest 2>$null | Select-Object -First 1)
+    if (-not $localImageId) {
+        Write-Host "==> Local image myinvoice:latest missing; building development app image"
+        & docker compose build app
+        if ($LASTEXITCODE -ne 0) { throw "docker compose build failed for development stack" }
+    }
+
     & docker compose up -d db app
     if ($LASTEXITCODE -ne 0) { throw "docker compose up failed for development stack" }
 }

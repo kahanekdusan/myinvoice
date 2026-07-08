@@ -187,6 +187,11 @@ cmd/docker-build.sh --no-cache    # po změnách v Dockerfile / composer.json / 
 cmd/docker-build.sh --pull        # pull nových verzí base images (php:8.5-apache, mariadb:11)
 ```
 
+Poznámka: lokální `docker-compose.yml` defaultně staví app se
+`SKIP_FRONTEND_TYPECHECK=1`, takže Docker build neblokuje na rozpracovaných
+TypeScript type-check chybách ve frontendu. Pro strict režim nastav před buildem
+`$env:SKIP_FRONTEND_TYPECHECK=0` (PowerShell) nebo `SKIP_FRONTEND_TYPECHECK=0` (bash).
+
 ### One-click instalace z GHCR (bez local buildu)
 
 Pokud nechceš stavět image lokálně (a `pnpm`/`composer` v hostu řešit

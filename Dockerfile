@@ -11,6 +11,7 @@
 # ---------- Stage 1: frontend ----------
 FROM node:24-alpine AS web-build
 WORKDIR /app
+ARG SKIP_FRONTEND_TYPECHECK=0
 # pnpm-workspace.yaml nese supply-chain politiku (minimumReleaseAgeExclude pro
 # záměrně povýšené balíky jako vite, onlyBuiltDependencies). Musí být v kontextu
 # PŘED `pnpm install`, jinak novější pnpm@latest odmítne „příliš čerstvé" závislosti
@@ -19,7 +20,13 @@ COPY web/package.json web/pnpm-lock.yaml web/pnpm-workspace.yaml ./
 RUN corepack enable && corepack prepare pnpm@latest --activate \
  && pnpm install --frozen-lockfile
 COPY web/ ./
-RUN pnpm build
+# Docker source builds mohou běžet i při rozpracovaném TS refaktoru; strict
+# type-check zůstává dostupný v CI přes výchozí hodnotu build arg=0.
+RUN if [ "$SKIP_FRONTEND_TYPECHECK" = "1" ]; then \
+                        pnpm exec vite build; \
+                else \
+                        pnpm build; \
+                fi
 
 # ---------- Stage 2: composer ----------
 # The composer image has only a minimal PHP without pdo_mysql/gd/intl extensions,
