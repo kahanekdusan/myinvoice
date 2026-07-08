@@ -11,6 +11,7 @@ use MyInvoice\Middleware\AuthMiddleware;
 use MyInvoice\Repository\InvoiceAttachmentRepository;
 use MyInvoice\Repository\InvoiceRepository;
 use MyInvoice\Service\ActivityLogger;
+use MyInvoice\Service\Invoice\PublicInvoiceLinkService;
 use MyInvoice\Service\IpMatcher;
 use MyInvoice\Service\Mail\InvoiceEmailVarsBuilder;
 use MyInvoice\Service\Mail\Mailer;
@@ -28,6 +29,7 @@ final class SendEmailAction
         private readonly InvoicePdfRenderer $renderer,
         private readonly Mailer $mailer,
         private readonly InvoiceEmailVarsBuilder $varsBuilder,
+        private readonly PublicInvoiceLinkService $publicLink,
         private readonly ActivityLogger $logger,
         private readonly IpMatcher $ipMatcher,
         private readonly PdfArchiveService $pdfArchive,
@@ -101,22 +103,21 @@ final class SendEmailAction
         $userId = isset($user['id']) ? (int) $user['id'] : null;
 
         try {
-            $pdfPath = $this->renderer->render($id, false, $userId);
+            $publicInvoiceUrl = $this->publicLink->ensurePublicUrl($id);
         } catch (\Throwable $e) {
-            return Json::error($response, 'pdf_failed', 'Nepodařilo se vygenerovat PDF: ' . $e->getMessage(), 500);
+            return Json::error($response, 'public_link_failed', 'Nepodařilo se připravit veřejný odkaz na fakturu: ' . $e->getMessage(), 500);
         }
 
         $locale = (string) ($invoice['language'] ?? 'cs');
         $vars = $this->varsBuilder->build($invoice, false, $locale);
         $vars['note_lines'] = $noteLines;
         $vars['note_text']  = $noteRaw;
+        $vars['public_invoice_url'] = $publicInvoiceUrl;
 
-        // Hlavní PDF + volitelné uživatelské přílohy (jen invoice/proforma/credit_note,
-        // ne upomínky — tento send flow se použije jen tady).
+        // Link-only doručení: PDF se neposílá jako příloha. Volitelné uživatelské
+        // přílohy (např. dodací dokumentace) zůstávají zachované.
         $supplierId = (int) ($invoice['supplier_id'] ?? 0);
-        $emailAttachments = [
-            ['path' => $pdfPath, 'name' => basename($pdfPath), 'contentType' => 'application/pdf'],
-        ];
+        $emailAttachments = [];
         $extraAttachments = $this->attachments->listForInvoice($id);
         $sentAttachmentIds = [];
         foreach ($extraAttachments as $att) {
@@ -156,17 +157,29 @@ final class SendEmailAction
         $newStatus = $invoice['status'] === 'issued' ? 'sent' : $invoice['status'];
         $this->db->pdo()->prepare('UPDATE invoices SET status = ?, sent_at = NOW() WHERE id = ?')
             ->execute([$newStatus, $id]);
+        $this->publicLink->markSent($id);
 
-        // Archivuj kopii PDF jako 'sent' verzi — důkaz toho, co klient skutečně dostal
-        // (zachová se i kdyby se faktura později editovala). Aktivní cache zůstává nedotčená.
-        $sentToAll = array_values(array_unique(array_merge($to, $cc, $bcc)));
-        $archiveId = $this->pdfArchive->archiveCopy($id, $pdfPath, 'sent', wasSent: true, sentTo: $sentToAll);
+        // Archivace odeslané verze PDF je best-effort. Selhání archivu nesmí zastavit
+        // doručení odkazu klientovi.
+        $archiveId = null;
+        $pdfBasename = null;
+        try {
+            $pdfPath = $this->renderer->render($id, false, $userId);
+            $pdfBasename = basename($pdfPath);
+            $sentToAll = array_values(array_unique(array_merge($to, $cc, $bcc)));
+            $archiveId = $this->pdfArchive->archiveCopy($id, $pdfPath, 'sent', wasSent: true, sentTo: $sentToAll);
+        } catch (\Throwable $e) {
+            $this->logger->log('invoice.sent_archive_failed', $user['id'] ?? null, 'invoice', $id, [
+                'error' => mb_substr($e->getMessage(), 0, 500),
+            ], $this->ipMatcher->clientIpFromRequest($request->getServerParams()), $request->getHeaderLine('User-Agent'));
+        }
 
         $ip = $this->ipMatcher->clientIpFromRequest($request->getServerParams());
         $this->logger->log('invoice.sent', $user['id'] ?? null, 'invoice', $id, [
             'to' => $to, 'cc' => $cc, 'bcc' => $bcc,
             'resolved_recipients' => $resolvedRecipients,
-            'pdf_path' => basename($pdfPath),
+            'public_link_token_suffix' => substr((string) parse_url($publicInvoiceUrl, PHP_URL_PATH), -8),
+            'pdf_path' => $pdfBasename,
             'pdf_archive_id' => $archiveId,
             'attachment_ids' => $sentAttachmentIds,
             'smtp_response'  => $smtpResponse,

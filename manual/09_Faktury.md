@@ -43,7 +43,7 @@ V každé skupině jsou faktury seřazené podle data vystavení (nejnovější 
 |---|---|---|
 | 📝 **Koncept** (`draft`) | Rozpracovaná, neviditelná pro klienta | Editovat, smazat, vystavit |
 | ✅ **Vystaveno** (`issued`) | Číslo přiděleno, immutable PDF, ale klientovi nešla | Odeslat e-mailem, zaplatit, upomínka, dobropis, storno |
-| 📧 **Odesláno** (`sent`) | E-mail s PDF odešel klientovi | Zaplatit, upomínka |
+| 📧 **Odesláno** (`sent`) | E-mail s bezpečným odkazem na fakturu odešel klientovi (PDF stáhne z odkazu) | Zaplatit, upomínka |
 | ⏰ **Upomínka** (`reminded`) | Upomínkový e-mail odešel | Zaplatit, další upomínka (s cooldownem), dobropis |
 | 💰 **Zaplaceno** (`paid`) | Platba přišla a byla spárována | (terminální) |
 | 🟠 **Částečně uhrazeno** | Přišla jen část peněz (evidence plateb) — zbytek je dál pohledávka | Doplatit, částečná úhrada, upomínka |
@@ -62,7 +62,7 @@ Zaškrtni více faktur (checkbox). Nahoře se objeví lišta s akcemi:
 | Akce | Funkce | Aplikuje se na |
 |---|---|---|
 | **Vystavit znovu (N)** | Vytvoří klony jako nové koncepty s auto-inkrementem měsíce v popiscích položek (`3/2026 → 4/2026`) | Faktury libovolného stavu |
-| **Odeslat klientovi (N)** | Hromadně odešle e-mail s PDF přílohou | Vystavené, neodeslané (`issued`) |
+| **Odeslat klientovi (N)** | Hromadně odešle e-mail s bezpečným odkazem na fakturu (PDF je dostupné přes odkaz) | Vystavené, neodeslané (`issued`) |
 | **Označit zaplacené (N)** | Manuálně označí jako zaplacené dnešním datem | Vystavené / odeslané / upomínkované |
 | **Upomínka (N)** | Pošle upomínkový e-mail | Po splatnosti, ne zaplacené, cooldown 14 dní mezi upomínkami |
 | **Stáhnout PDF ZIP** | ZIP archiv všech vybraných PDF | Vystavené (status ≥ `issued`) |

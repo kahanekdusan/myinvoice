@@ -39,13 +39,25 @@ final class ActivityLogger
                 (supplier_id, user_id, action, entity_type, entity_id, payload, ip, user_agent)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)';
         $stmt = $this->db->pdo()->prepare($sql);
+
+        $encodedPayload = null;
+        if ($payload !== null) {
+            $encodedPayload = json_encode(
+                $this->redact($payload),
+                JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE,
+            );
+            if ($encodedPayload === false) {
+                $encodedPayload = '{"_serialization_error":"payload_encode_failed"}';
+            }
+        }
+
         $stmt->execute([
             $supplierId,
             $userId,
             $action,
             $entityType,
             $entityId,
-            $payload === null ? null : json_encode($this->redact($payload), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+            $encodedPayload,
             $ip !== null ? (@inet_pton($ip) ?: null) : null,
             $userAgent !== null ? substr($userAgent, 0, 255) : null,
         ]);

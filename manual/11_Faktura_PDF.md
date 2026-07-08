@@ -178,7 +178,10 @@ Tlačítko **Odeslat e-mailem** (na detailu faktury). E-mail jde na:
 - `klient.hlavni_email`
 - `+ zakazka.fakturacni_emaily[]` (až 3 dodatečné adresy)
 
-Předmět + tělo e-mailu se vezme ze šablony `invoice_new` (CZ / EN podle jazyka
+Faktura se klientovi posílá jako **bezpečný webový odkaz**. PDF příloha se
+standardně nepřikládá; příjemce si PDF otevře nebo stáhne přímo z odkazu.
+
+Předmět + tělo e-mailu se vezme ze šablony `invoice_send` (CZ / EN podle jazyka
 klienta) — viz [36. Nastavení](36_Nastaveni.md).
 
 Po odeslání:
@@ -204,7 +207,7 @@ Nastavuje se v **Systém → Dodavatelé → [tvůj dodavatel] → Editovat**.
 ### 11.4.4 Volitelné přílohy emailu
 
 V detailu faktury (i u **konceptu**) je sekce **Přílohy emailu**, kam lze
-nahrát další soubory, které se přibalí k PDF faktury při odeslání klientovi.
+nahrát další soubory, které se přibalí k e-mailu s odkazem na fakturu.
 Typické použití: smlouva, cenová nabídka, fotodokumentace, předávací protokol.
 
 - **Přidání** — drag-and-drop nebo tlačítko **Přidat přílohu** (multi-select).

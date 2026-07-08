@@ -12,10 +12,10 @@ use MyInvoice\Middleware\AuthMiddleware;
 use MyInvoice\Repository\InvoiceAttachmentRepository;
 use MyInvoice\Repository\InvoiceRepository;
 use MyInvoice\Service\ActivityLogger;
+use MyInvoice\Service\Invoice\PublicInvoiceLinkService;
 use MyInvoice\Service\IpMatcher;
 use MyInvoice\Service\Mail\InvoiceEmailVarsBuilder;
 use MyInvoice\Service\Mail\Mailer;
-use MyInvoice\Service\Pdf\InvoicePdfRenderer;
 use Psr\Http\Message\ResponseInterface as Response;
 use Psr\Http\Message\ServerRequestInterface as Request;
 
@@ -30,9 +30,9 @@ final class SendTestEmailAction
 {
     public function __construct(
         private readonly InvoiceRepository $repo,
-        private readonly InvoicePdfRenderer $renderer,
         private readonly Mailer $mailer,
         private readonly InvoiceEmailVarsBuilder $varsBuilder,
+        private readonly PublicInvoiceLinkService $publicLink,
         private readonly Config $config,
         private readonly ActivityLogger $logger,
         private readonly IpMatcher $ipMatcher,
@@ -66,19 +66,18 @@ final class SendTestEmailAction
         $userId = isset($user['id']) ? (int) $user['id'] : null;
 
         try {
-            $pdfPath = $this->renderer->render($id, false, $userId);
+            $publicInvoiceUrl = $this->publicLink->ensurePublicUrl($id);
         } catch (\Throwable $e) {
-            return Json::error($response, 'pdf_failed', 'Nepodařilo se vygenerovat PDF: ' . $e->getMessage(), 500);
+            return Json::error($response, 'public_link_failed', 'Nepodařilo se připravit veřejný odkaz na fakturu: ' . $e->getMessage(), 500);
         }
 
         $locale = (string) ($invoice['language'] ?? 'cs');
         $vars = $this->varsBuilder->build($invoice, true, $locale);
+        $vars['public_invoice_url'] = $publicInvoiceUrl;
 
-        // Test send — přibalíme i uživatelské přílohy, ať uživatel vidí, co reálně odejde.
+        // Test send — PDF už není příloha, ale volitelné uživatelské přílohy zachováváme.
         $supplierId = (int) ($invoice['supplier_id'] ?? 0);
-        $emailAttachments = [
-            ['path' => $pdfPath, 'name' => basename($pdfPath), 'contentType' => 'application/pdf'],
-        ];
+        $emailAttachments = [];
         foreach ($this->attachments->listForInvoice($id) as $att) {
             $path = $this->attachments->pathFor($supplierId, $id, (string) $att['filename']);
             if (!is_file($path)) continue;
@@ -115,7 +114,7 @@ final class SendTestEmailAction
         $ip = $this->ipMatcher->clientIpFromRequest($request->getServerParams());
         $this->logger->log('email.sent_test', $user['id'] ?? null, 'invoice', $id, [
             'to'            => $testRecipient,
-            'pdf_path'      => basename($pdfPath),
+            'public_link_token_suffix' => substr((string) parse_url($publicInvoiceUrl, PHP_URL_PATH), -8),
             'smtp_response' => $smtpResponse,
         ], $ip, $request->getHeaderLine('User-Agent'));
 

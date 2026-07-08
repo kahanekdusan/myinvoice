@@ -59,6 +59,7 @@ final class InvoiceEmailVarsBuilder
             'is_test'        => false,
             'is_paid'        => ($invoice['status'] ?? '') === 'paid',
             'payment_method' => (string) ($invoice['payment_method'] ?? 'bank_transfer'),
+            'public_invoice_url' => null,
         ];
     }
 
@@ -89,12 +90,12 @@ final class InvoiceEmailVarsBuilder
         // ho nepoužívají.
         if ($locale === 'en') {
             $greeting = 'Hello,';
-            $intro_prefix = "we're sending you {$typeLabel}";
-            $intro_plain = "we're sending you {$typeLabel} No. {$varsymbol}.";
+            $intro_prefix = "we're sending you a link to {$typeLabel}";
+            $intro_plain = "we're sending you a link to {$typeLabel} No. {$varsymbol}.";
         } else {
             $greeting = 'Dobrý den,';
-            $intro_prefix = "v příloze posíláme {$typeLabel}";
-            $intro_plain = "v příloze posíláme {$typeLabel} č. {$varsymbol}.";
+            $intro_prefix = "posíláme odkaz na {$typeLabel}";
+            $intro_plain = "posíláme odkaz na {$typeLabel} č. {$varsymbol}.";
         }
         // Legacy `intro` value — autoescape-safe (žádné raw <strong>); custom email
         // template overrides v DB mohou používat `{{ intro }}` (bez |raw) a dostanou
@@ -115,6 +116,7 @@ final class InvoiceEmailVarsBuilder
             'supplier'       => $this->loadSupplierFooter($invoice),
             'is_paid'        => ($invoice['status'] ?? '') === 'paid',
             'payment_method' => (string) ($invoice['payment_method'] ?? 'bank_transfer'),
+            'public_invoice_url' => null,
         ];
     }
 

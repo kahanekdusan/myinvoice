@@ -10,7 +10,6 @@ use MyInvoice\Service\ActivityLogger;
 use MyInvoice\Service\Mail\InvoiceEmailVarsBuilder;
 use MyInvoice\Service\Mail\Mailer;
 use MyInvoice\Service\Mail\RecipientResolver;
-use MyInvoice\Service\Pdf\InvoicePdfRenderer;
 use MyInvoice\Service\Validation\InvoiceAmountPolicy;
 
 /**
@@ -27,9 +26,9 @@ final class ReminderService
     public function __construct(
         private readonly InvoiceRepository $repo,
         private readonly Connection $db,
-        private readonly InvoicePdfRenderer $renderer,
         private readonly Mailer $mailer,
         private readonly InvoiceEmailVarsBuilder $varsBuilder,
+        private readonly PublicInvoiceLinkService $publicLink,
         private readonly ActivityLogger $logger,
         private readonly RecipientResolver $recipients,
     ) {}
@@ -84,13 +83,14 @@ final class ReminderService
 
         $locale = (string) ($invoice['language'] ?? 'cs');
 
-        // Reálné selhání (PDF/SMTP) zalogujeme jako `invoice.reminder_failed`, ať je
+        // Reálné selhání (public-link/SMTP) zalogujeme jako `invoice.reminder_failed`, ať je
         // v přehledu odeslaných e-mailů vidět „nebylo odesláno". Validační DomainException
         // výše se sem nedostanou (házejí dřív). Po zalogování chybu propustíme dál —
         // caller (manual/bulk/cron) si ji ošetří jako dosud.
         try {
-            $pdfPath = $this->renderer->render($invoiceId, false, $userId);
+            $publicInvoiceUrl = $this->publicLink->ensurePublicUrl($invoiceId);
             $vars = $this->varsBuilder->buildReminder($invoice, $daysOverdue, $locale);
+            $vars['public_invoice_url'] = $publicInvoiceUrl;
             $templateCode = $invoice['invoice_type'] === 'proforma' ? 'proforma_reminder' : 'invoice_reminder';
             $this->mailer->sendTemplate(
                 $templateCode,
@@ -100,9 +100,10 @@ final class ReminderService
                 null,
                 $cc,
                 $bcc,
-                [['path' => $pdfPath, 'name' => basename($pdfPath), 'contentType' => 'application/pdf']],
+                [],
                 $userId,
             );
+            $this->publicLink->markSent($invoiceId);
         } catch (\Throwable $e) {
             $this->logger->log('invoice.reminder_failed', $userId, 'invoice', $invoiceId, [
                 'to'           => $to,

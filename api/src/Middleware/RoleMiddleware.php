@@ -50,6 +50,9 @@ final class RoleMiddleware implements MiddlewareInterface
         '/api/auth/totp/status',
         '/api/auth/totp/setup',
         '/api/auth/totp/enable',
+        // OAuth callback běží přes podepsaný state (bez session / role guardu).
+        '/api/admin/imports/microsoft-oauth/callback',
+        '/api/admin/smtp/oauth/microsoft/callback',
         '/api/csrf-token',
     ];
 

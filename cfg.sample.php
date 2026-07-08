@@ -98,9 +98,22 @@ return [
         // OAuth2 (jen pokud auth_type='XOAUTH2', např. Gmail/M365 moderní auth)
         'oauth' => [
             'provider'      => null,                 // 'google' | 'microsoft' | null
+            'tenant_id'     => '',
             'client_id'     => '',
             'client_secret' => '',
             'refresh_token' => '',
+            // Volitelné explicitní callback URI; když je prázdné, použije se
+            // app.url + /api/admin/smtp/oauth/microsoft/callback
+            'redirect_uri'  => '',
+            // Preferovaná konfigurace pro Microsoft Graph flow.
+            // Pokud je vyplněna, má prioritu před kořenovými oauth klíči výše.
+            'microsoft' => [
+                'tenant_id'     => '',
+                'client_id'     => '',
+                'client_secret' => '',
+                'mailbox'       => '',
+                'redirect_uri'  => '',
+            ],
         ],
 
         // Sender identity

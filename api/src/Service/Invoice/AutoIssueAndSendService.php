@@ -37,6 +37,7 @@ final class AutoIssueAndSendService
         private readonly InvoicePdfRenderer $renderer,
         private readonly Mailer $mailer,
         private readonly InvoiceEmailVarsBuilder $varsBuilder,
+        private readonly PublicInvoiceLinkService $publicLink,
         private readonly ActivityLogger $logger,
         private readonly StatsRecomputer $stats,
         private readonly PdfArchiveService $pdfArchive,
@@ -105,6 +106,7 @@ final class AutoIssueAndSendService
 
         $locale = (string) ($invoice['language'] ?? 'cs');
         $vars = $this->varsBuilder->build($invoice, false, $locale);
+        $vars['public_invoice_url'] = $this->publicLink->ensurePublicUrl($invoiceId);
 
         try {
             $this->mailer->sendTemplate(
@@ -115,9 +117,10 @@ final class AutoIssueAndSendService
                 null,
                 $cc,
                 $bcc,
-                [['path' => $pdfPath, 'name' => basename($pdfPath), 'contentType' => 'application/pdf']],
+                [],
                 $userId,
             );
+            $this->publicLink->markSent($invoiceId);
         } catch (\Throwable $e) {
             // Auto-send po schválení výkazu — selhání zalogujeme do přehledu e-mailů
             // a propustíme dál (caller v approval flow si ho ošetří).
@@ -140,6 +143,7 @@ final class AutoIssueAndSendService
         $this->logger->log('invoice.sent', $userId, 'invoice', $invoiceId, [
             'to' => $to, 'cc' => $cc, 'bcc' => $bcc,
             'resolved_recipients' => $r['resolved'],
+            'public_link_token_suffix' => substr((string) parse_url((string) ($vars['public_invoice_url'] ?? ''), PHP_URL_PATH), -8),
             'pdf_path' => basename($pdfPath),
             'pdf_archive_id' => $archiveId,
             'auto_reason' => 'work_report_approved',
