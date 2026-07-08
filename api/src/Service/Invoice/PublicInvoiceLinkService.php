@@ -31,7 +31,10 @@ final class PublicInvoiceLinkService
         }
         $base = rtrim($base, '/');
 
-        return $base . '/public/invoice/' . $token;
+        // Odkaz v e-mailu míøí rovnou na PDF endpoint — pøíjemce tak vidí fakturu
+        // bez mezikroku (žádná landing stránka s tlaèítkem). Otevøení se stále
+        // loguje pøes PublicInvoicePdfAction::touchViewed.
+        return $base . '/api/public/invoice/' . $token . '/pdf';
     }
 
     public function markSent(int $invoiceId): void
