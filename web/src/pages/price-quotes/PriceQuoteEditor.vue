@@ -497,7 +497,7 @@ async function submit() {
   form.value.items.forEach((it, i) => (it.order_index = i))
 
   if (hasNonPositiveAmountToPay.value) {
-    error.value = t('invoice.amount_positive_required')
+    error.value = t('invoice.quote_ui.amount_positive_required')
     return
   }
 
@@ -568,7 +568,7 @@ async function submit() {
 
 async function deleteDraft() {
   if (!invoiceId.value) return
-  if (!confirm(t('invoice.delete_draft_confirm'))) return
+  if (!confirm(t('invoice.quote_ui.delete_draft_confirm'))) return
   try {
     await invoicesApi.delete(invoiceId.value)
     router.push(listBasePath)
@@ -721,9 +721,9 @@ async function deleteDraft() {
                 :placeholder="varsymbolAutoPreview || t('invoice.varsymbol_placeholder')"
                 class="w-full h-10 px-3 border border-neutral-300 rounded-md font-mono" />
               <p v-if="!form.varsymbol && !varsymbolAutoHasTemplate" class="text-xs text-warning-600 mt-1">
-                {{ t('invoice.varsymbol_no_template') }}
+                {{ t('invoice.quote_ui.varsymbol_no_template') }}
               </p>
-              <p v-else class="text-xs text-neutral-500 mt-1">{{ t('invoice.varsymbol_hint') }}</p>
+              <p v-else class="text-xs text-neutral-500 mt-1">{{ t('invoice.quote_ui.varsymbol_hint') }}</p>
             </div>
             <div v-else-if="editedVarsymbol" class="rounded-md bg-neutral-50 border border-neutral-200 p-3 text-sm">
               <span class="text-neutral-500">{{ quoteNumberLabel }}:</span>
@@ -916,7 +916,7 @@ async function deleteDraft() {
         <div class="bg-white border border-neutral-200 rounded-lg p-5 shadow-sm">
           <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-500 mb-3">{{ t('invoice.summary') }}</h3>
           <div class="flex items-center justify-between gap-3 mb-3 pb-3 border-b border-neutral-100">
-            <label for="discount_percent" class="text-sm text-neutral-700">{{ t('invoice.discount.label') }}</label>
+            <label for="discount_percent" class="text-sm text-neutral-700">{{ t('invoice.quote_ui.discount_label') }}</label>
             <div class="relative w-28">
               <input id="discount_percent" v-model.number="form.discount_percent" type="number" min="0" max="100" step="0.01"
                 class="w-full h-9 pl-2 pr-7 border border-neutral-200 rounded text-right font-mono text-sm focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 outline-none" />
@@ -959,7 +959,7 @@ async function deleteDraft() {
               <dd class="font-mono">{{ formatMoney(computed_totals.amount_to_pay, form.currency) }}</dd>
             </div>
             <div v-if="hasNonPositiveAmountToPay" class="rounded-md bg-warning-50 border border-warning-200 px-3 py-2 text-xs text-warning-700 mt-3">
-              {{ t('invoice.amount_positive_required') }}
+              {{ t('invoice.quote_ui.amount_positive_required') }}
             </div>
             <div v-if="loadedRate" class="text-xs text-neutral-500 pt-3 border-t border-neutral-200 mt-2">
               {{ t('invoice.czk_recap.rate_info', {

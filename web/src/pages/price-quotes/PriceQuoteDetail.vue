@@ -213,7 +213,7 @@ async function deleteInvoice() {
   const isCN = invoice.value.invoice_type === 'credit_note'
   let confirmKey: string
   switch (status) {
-    case 'draft':     confirmKey = isCN ? 'invoice.delete_draft_confirm_cn'     : 'invoice.delete_draft_confirm';     break
+    case 'draft':     confirmKey = isCN ? 'invoice.delete_draft_confirm_cn'     : 'invoice.quote_ui.delete_draft_confirm';     break
     case 'cancelled': confirmKey = isCN ? 'invoice.delete_cancelled_confirm_cn' : 'invoice.delete_cancelled_confirm'; break
     case 'paid':      confirmKey = 'invoice.delete_paid_confirm';                                                     break
     case 'sent':      confirmKey = isCN ? 'invoice.delete_sent_confirm_cn'      : 'invoice.delete_sent_confirm';      break
@@ -264,11 +264,11 @@ async function deleteCancellationParent() {
 async function issue() {
   if (!invoice.value || invoice.value.status !== 'draft') return
   if (invoice.value.items.length === 0) {
-    toast.error( t('invoice.issue_no_items'))
+    toast.error(t('invoice.quote_ui.issue_no_items'))
     return
   }
   if (!canIssueDraft.value) {
-    toast.error(t('invoice.amount_positive_required'))
+    toast.error(t('invoice.quote_ui.amount_positive_required'))
     return
   }
   if (!confirm(t('invoice.issue_confirm_quote'))) return
@@ -598,7 +598,7 @@ async function updateApprovalStatus() {
     invoice.value = r.invoice
     approvalStatusOpen.value = false
     if (r.auto_send_error) {
-      toast.error(t('invoice.approval.auto_send_failed', { error: r.auto_send_error }))
+      toast.error(t('invoice.quote_ui.approval_auto_send_failed', { error: r.auto_send_error }))
     } else if (r.auto_send && r.auto_send.sent_to.length > 0) {
       toast.success(t('invoice.approval.approved_and_sent', { recipients: r.auto_send.sent_to.join(', ') }))
     } else {
@@ -660,7 +660,7 @@ async function updateApprovalStatus() {
         </button>
         <button v-if="isDraft && canIssueDraft && auth.canWrite" @click="issue"
           :disabled="busy !== null || (requiresApproval && approvalStatus !== 'approved')"
-          :title="requiresApproval && approvalStatus !== 'approved' ? t('invoice.approval.issue_blocked') : ''"
+          :title="requiresApproval && approvalStatus !== 'approved' ? t('invoice.quote_ui.approval_issue_blocked') : ''"
           class="cursor-pointer px-3 h-9 text-sm bg-primary-600 hover:bg-primary-700 disabled:bg-neutral-300 disabled:cursor-not-allowed text-white font-medium rounded-md inline-flex items-center gap-1.5">
           <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
           {{ busy === 'issue' ? '…' : t('invoice.issue') }}
@@ -704,7 +704,7 @@ async function updateApprovalStatus() {
         <div class="text-lg font-semibold text-neutral-900">
           <RouterLink :to="`${listBasePath}?client_id=${invoice.client_id}`"
             class="text-primary-700 hover:text-primary-800 hover:underline"
-            :title="t('invoice.show_invoices_for_client')">
+            :title="t('invoice.quote_ui.show_for_client')">
             {{ invoice.client_company_name }}
           </RouterLink>
         </div>
@@ -786,9 +786,9 @@ async function updateApprovalStatus() {
         <p class="text-xs text-neutral-500 mb-4">{{ t('invoice.modals.send_default_hint') }}</p>
         <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('invoice.modals.send_note_label') }}</label>
         <textarea v-model="sendNote" rows="4" maxlength="5000"
-          :placeholder="t('invoice.modals.send_note_placeholder')"
+          :placeholder="t('invoice.quote_ui.send_note_placeholder')"
           class="w-full px-3 py-2 border border-neutral-300 rounded-md mb-2 text-sm font-sans resize-y"></textarea>
-        <p class="text-xs text-neutral-500 mb-4">{{ t('invoice.modals.send_note_hint') }}</p>
+        <p class="text-xs text-neutral-500 mb-4">{{ t('invoice.quote_ui.send_note_hint') }}</p>
         <div class="flex justify-end gap-2">
           <button @click="sendOpen = false" class="cursor-pointer px-3 h-9 text-sm border border-neutral-300 rounded-md text-neutral-700 hover:bg-neutral-50">{{ t('common.cancel') }}</button>
           <button @click="send" :disabled="busy !== null"
@@ -1165,7 +1165,7 @@ async function updateApprovalStatus() {
           <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-500">
             {{ t('invoice.attachments.title') }}
           </h3>
-          <p class="text-xs text-neutral-500 mt-0.5">{{ t('invoice.attachments.hint') }}</p>
+          <p class="text-xs text-neutral-500 mt-0.5">{{ t('invoice.quote_ui.attachments_hint') }}</p>
         </div>
         <span class="text-xs text-neutral-400">{{ attachments.length }}</span>
       </header>

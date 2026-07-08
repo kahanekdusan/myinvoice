@@ -74,7 +74,7 @@ function toggleSelected(id: number) {
 
 async function bulkReissue() {
   if (selectedIds.value.length === 0) return
-  if (!confirm(t('invoice.bulk_clone_confirm', { n: selectedIds.value.length }))) return
+  if (!confirm(t('invoice.quote_ui.bulk_clone_confirm', { n: selectedIds.value.length }))) return
   bulkBusy.value = true
   try {
     const r = await invoicesApi.bulkReissue(selectedIds.value, { increment_month_in_descriptions: true })
@@ -82,7 +82,7 @@ async function bulkReissue() {
     if (r.errors.length) {
       toast.warning(t('invoice.bulk_reissue_partial', { ok: r.created.length, err: r.errors.length }))
     } else {
-      toast.success(t('invoice.bulk_send_success', { n: r.created.length }))
+      toast.success(t('invoice.quote_ui.bulk_reissue_success', { n: r.created.length }))
     }
     await load()
   } catch (e: any) {
@@ -180,10 +180,10 @@ async function bulkSendReminders() {
 async function bulkMarkPaid() {
   const list = markPayableSelected.value
   if (list.length === 0) {
-    toast.warning(t('invoice.bulk_mark_paid_no_eligible'))
+    toast.warning(t('invoice.quote_ui.bulk_mark_paid_no_eligible'))
     return
   }
-  if (!confirm(t('invoice.bulk_mark_paid_confirm', { n: list.length }))) return
+  if (!confirm(t('invoice.quote_ui.bulk_mark_paid_confirm', { n: list.length }))) return
   const today = new Date().toISOString().slice(0, 10)
   bulkBusy.value = true
   let okCount = 0
@@ -201,7 +201,7 @@ async function bulkMarkPaid() {
     if (errors.length) {
       toast.warning(t('invoice.bulk_mark_paid_partial', { ok: okCount, err: errors.length }) + '\n' + errors.join('\n'))
     } else {
-      toast.success(t('invoice.bulk_mark_paid_success', { n: okCount }))
+      toast.success(t('invoice.quote_ui.bulk_mark_paid_success', { n: okCount }))
     }
     await load()
   } finally {
@@ -212,7 +212,7 @@ async function bulkMarkPaid() {
 async function bulkIssue() {
   const list = issuableSelected.value
   if (list.length === 0) {
-    toast.warning(t('invoice.bulk_issue_no_eligible'))
+    toast.warning(t('invoice.quote_ui.bulk_issue_no_eligible'))
     return
   }
   if (!confirm(t('invoice.bulk_issue_confirm_quote', { n: list.length }))) return
@@ -232,7 +232,7 @@ async function bulkIssue() {
     if (errors.length) {
       toast.warning(t('invoice.bulk_issue_partial', { ok: okCount, err: errors.length }) + '\n' + errors.join('\n'))
     } else {
-      toast.success(t('invoice.bulk_issue_success', { n: okCount }))
+      toast.success(t('invoice.quote_ui.bulk_issue_success', { n: okCount }))
     }
     await load()
   } finally {
@@ -243,10 +243,10 @@ async function bulkIssue() {
 async function bulkSend() {
   const list = sendableSelected.value
   if (list.length === 0) {
-    toast.warning(t('invoice.bulk_send_no_eligible'))
+    toast.warning(t('invoice.quote_ui.bulk_send_no_eligible'))
     return
   }
-  if (!confirm(t('invoice.bulk_send_confirm', { n: list.length }))) return
+  if (!confirm(t('invoice.quote_ui.bulk_send_confirm', { n: list.length }))) return
   bulkBusy.value = true
   let okCount = 0
   const errors: string[] = []
@@ -263,7 +263,7 @@ async function bulkSend() {
     if (errors.length) {
       toast.warning(t('invoice.bulk_send_partial', { ok: okCount, err: errors.length }) + '\n' + errors.join('\n'))
     } else {
-      toast.success(t('invoice.bulk_send_success', { n: okCount }))
+      toast.success(t('invoice.quote_ui.bulk_send_success', { n: okCount }))
     }
     await load()
   } finally {
@@ -327,7 +327,7 @@ async function exportCsv() {
     const url = URL.createObjectURL(r.data as unknown as Blob)
     const a = document.createElement('a')
     a.href = url
-    a.download = `invoices-${new Date().toISOString().slice(0, 10)}.csv`
+    a.download = `price-quotes-${new Date().toISOString().slice(0, 10)}.csv`
     document.body.appendChild(a); a.click(); a.remove()
     URL.revokeObjectURL(url)
   } catch (e: any) {
@@ -646,12 +646,12 @@ const monthOptions = computed(() => (tm('common.months_short') as unknown as str
     </div>
 
     <div v-else-if="!groups.length" class="bg-white border border-neutral-200 rounded-lg shadow-sm">
-      <EmptyState :title="t('invoice.no_data')" :cta="quoteMode ? '+ Vytvořit první cenovou nabídku' : t('invoice.issue_first')" :to="newDocPath" />
+      <EmptyState :title="t('invoice.quote_ui.no_data')" :cta="quoteMode ? '+ Vytvořit první cenovou nabídku' : t('invoice.issue_first')" :to="newDocPath" />
     </div>
 
     <div v-else>
       <div class="text-xs text-neutral-500 mb-3 flex items-center justify-between">
-        <span>{{ t('invoice.summary_count', { n: total, m: groups.length }) }}</span>
+        <span>{{ t('invoice.quote_ui.summary_count', { n: total, m: groups.length }) }}</span>
         <span v-if="total > loadedCount">{{ t('common.loaded_count', { loaded: loadedCount, total }) }}</span>
       </div>
 
