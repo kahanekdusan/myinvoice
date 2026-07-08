@@ -239,6 +239,9 @@ Výchozí URL po startu:
 - development: `http://localhost:8080`
 - upstream baseline: `http://localhost:8090`
 
+Pokud je `development` už nastavený na `8090`, skript při prvním bootstrapu
+automaticky posune upstream baseline na `8100`, aby nedošlo ke kolizi portů.
+
 Další akce:
 
 ```powershell

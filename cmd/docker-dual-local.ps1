@@ -120,17 +120,17 @@ function Set-DevelopmentBranch {
     if ($LASTEXITCODE -ne 0) { throw "Unable to checkout development branch" }
 }
 
-function Set-UpstreamEnv {
+function Set-UpstreamEnv([int]$PreferredAppPort, [int]$PreferredDbPort) {
     $envPath = Join-Path $UpstreamWorktreePath '.env'
 
     if (-not (Test-Path $envPath)) {
         Write-Host "==> Creating upstream .env"
         @"
 # MyInvoice upstream baseline env (gitignored)
-APP_PORT=$DefaultUpstreamAppPort
-APP_PORT_PROD=$DefaultUpstreamAppPort
-DB_PORT=$DefaultUpstreamDbPort
-DB_PORT_PROD=$DefaultUpstreamDbPort
+APP_PORT=$PreferredAppPort
+APP_PORT_PROD=$PreferredAppPort
+DB_PORT=$PreferredDbPort
+DB_PORT_PROD=$PreferredDbPort
 DB_NAME=myinvoice
 DB_USER=myinvoice
 DB_ROOT_PASSWORD=$(New-RandomToken 24)
@@ -140,16 +140,16 @@ DB_PASSWORD=$(New-RandomToken 24)
 
     $envMap = Read-EnvFile $envPath
     if (-not $envMap.ContainsKey('APP_PORT')) {
-        Set-EnvKey $envPath 'APP_PORT' "$DefaultUpstreamAppPort"
-        $envMap['APP_PORT'] = "$DefaultUpstreamAppPort"
+        Set-EnvKey $envPath 'APP_PORT' "$PreferredAppPort"
+        $envMap['APP_PORT'] = "$PreferredAppPort"
     }
     if (-not $envMap.ContainsKey('APP_PORT_PROD')) {
         Set-EnvKey $envPath 'APP_PORT_PROD' "$($envMap['APP_PORT'])"
         $envMap['APP_PORT_PROD'] = "$($envMap['APP_PORT'])"
     }
     if (-not $envMap.ContainsKey('DB_PORT')) {
-        Set-EnvKey $envPath 'DB_PORT' "$DefaultUpstreamDbPort"
-        $envMap['DB_PORT'] = "$DefaultUpstreamDbPort"
+        Set-EnvKey $envPath 'DB_PORT' "$PreferredDbPort"
+        $envMap['DB_PORT'] = "$PreferredDbPort"
     }
     if (-not $envMap.ContainsKey('DB_PORT_PROD')) {
         Set-EnvKey $envPath 'DB_PORT_PROD' "$($envMap['DB_PORT'])"
@@ -250,11 +250,14 @@ switch ($Action) {
         Update-MasterMirror
         Set-DevelopmentBranch
         Update-UpstreamWorktree
-        Set-UpstreamEnv
 
         $devEnv = Read-EnvFile (Join-Path $ProjectRoot '.env')
         $devAppPort = Get-IntOrDefault $devEnv 'APP_PORT' 8080
         $devDbPort = Get-IntOrDefault $devEnv 'DB_PORT' 3307
+
+        $preferredUpAppPort = if ($devAppPort -eq $DefaultUpstreamAppPort) { $DefaultUpstreamAppPort + 10 } else { $DefaultUpstreamAppPort }
+        $preferredUpDbPort = if ($devDbPort -eq $DefaultUpstreamDbPort) { $DefaultUpstreamDbPort + 10 } else { $DefaultUpstreamDbPort }
+        Set-UpstreamEnv -PreferredAppPort $preferredUpAppPort -PreferredDbPort $preferredUpDbPort
 
         $upEnv = Read-EnvFile (Join-Path $UpstreamWorktreePath '.env')
         $upAppPort = Get-IntOrDefault $upEnv 'APP_PORT_PROD' (Get-IntOrDefault $upEnv 'APP_PORT' $DefaultUpstreamAppPort)
