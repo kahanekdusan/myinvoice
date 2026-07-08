@@ -26,7 +26,7 @@ if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
 }
 & docker compose version > $null 2>&1
 if ($LASTEXITCODE -ne 0) {
-    Write-Error "'docker compose' (v2) plugin required — install Docker Desktop"
+    Write-Error "'docker compose' (v2) plugin required - install Docker Desktop"
 }
 
 function New-RandomToken([int]$Bytes = 24) {
@@ -37,7 +37,7 @@ function New-RandomToken([int]$Bytes = 24) {
 
 # --- 1. .env --------------------------------------------------------------
 if (-not (Test-Path .env)) {
-    Write-Host "==> Generating .env with random DB passwords…"
+    Write-Host "==> Generating .env with random DB passwords..."
     $rootPass = New-RandomToken 24
     $userPass = New-RandomToken 24
     @"
@@ -65,7 +65,7 @@ Get-Content .env | ForEach-Object {
 # and the Docker stack without one clobbering the other. compose mounts this
 # file as /var/www/html/cfg.php inside the container.
 if (-not (Test-Path cfg.docker.php)) {
-    Write-Host "==> Generating cfg.docker.php from cfg.sample.php with Docker defaults…"
+    Write-Host "==> Generating cfg.docker.php from cfg.sample.php with Docker defaults..."
     $pepper = [Convert]::ToBase64String((1..32 | ForEach-Object { Get-Random -Maximum 256 }))
     $encKey = [Convert]::ToBase64String((1..32 | ForEach-Object { Get-Random -Maximum 256 }))
     $cfg = Get-Content cfg.sample.php -Raw
@@ -115,7 +115,7 @@ Write-Host "==> Rezim instalace: $mode$composeHint"
 Write-Host "    (registry = GHCR pull; prebij pres -Build nebo MYINVOICE_INSTALL_MODE=registry|source)"
 
 if ($mode -eq 'registry') {
-    Write-Host "==> Pulling image from GHCR…"
+    Write-Host "==> Pulling image from GHCR..."
     & docker compose @composeArgs pull app
     if ($LASTEXITCODE -ne 0) {
         if (Test-Path Dockerfile) {
@@ -130,19 +130,19 @@ if ($mode -eq 'registry') {
 if ($mode -eq 'source') {
     & docker image inspect myinvoice:latest 2>$null | Out-Null
     if ($LASTEXITCODE -ne 0) {
-        Write-Host "==> Building image…"
+        Write-Host "==> Building image..."
         & docker compose @composeArgs build app
         if ($LASTEXITCODE -ne 0) { Write-Error "docker compose build failed" }
     }
 }
 
 # --- 4. up -----------------------------------------------------------------
-Write-Host "==> Starting stack…"
+Write-Host "==> Starting stack..."
 & docker compose @composeArgs up -d db app
 if ($LASTEXITCODE -ne 0) { Write-Error "docker compose up failed" }
 
 # --- 5. wait for DB + migrate ---------------------------------------------
-Write-Host "==> Waiting for database to become healthy…"
+Write-Host "==> Waiting for database to become healthy..."
 $ready = $false
 for ($i = 1; $i -le 30; $i++) {
     $json = & docker compose @composeArgs ps --format json db 2>$null
@@ -155,16 +155,18 @@ if (-not $ready) {
 
 # Migrace se spousti automaticky z docker-entrypoint.sh pred apache2-foreground.
 # Misto druheho explicitniho migrate (= race condition s entrypointem na nekterych
-# migracich, napr. 0015 FK rename — errno 121 duplicate key) jen cekame, az app
+# migracich, napr. 0015 FK rename - errno 121 duplicate key) jen cekame, az app
 # odpovi na HTTP. /api/health je v ALLOWED_PATHS pro FirstRunLockMiddleware,
 # takze vraci 200 i ve fresh-install state.
-$curl = (Get-Command curl.exe -ErrorAction SilentlyContinue)?.Source
+$curlCmd = Get-Command curl.exe -ErrorAction SilentlyContinue
+$curl = $null
+if ($curlCmd) { $curl = $curlCmd.Source }
 if (-not $curl) { $curl = 'C:\Windows\System32\curl.exe' }
 if (-not (Test-Path $curl)) {
     Write-Error "curl.exe nenalezen (potreba na Win 10/11+). Updatuj OS nebo doinstaluj curl."
 }
 
-Write-Host "==> Waiting for app to become available (entrypoint runs migrations)…"
+Write-Host "==> Waiting for app to become available (entrypoint runs migrations)..."
 $appReady = $false
 $lastErr = ''
 for ($i = 1; $i -le 60; $i++) {

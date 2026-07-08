@@ -9,9 +9,9 @@
 #      (GHCR pull, dale pouziva `-f docker-compose.production.yml`).
 #   2. Pokud bezi stack z `docker-compose.yml` a je `.git/` + `build:` blok
 #      -> source mode (git pull + local build).
-#   3. Fallback bez bezicího stacku - podle existujicich souboru.
+#   3. Fallback bez beziciho stacku - podle existujicich souboru.
 #
-# Idempotent — safe to re-run. Volumes (DB data) persist; backup is your responsibility.
+# Idempotent - safe to re-run. Volumes (DB data) persist; backup is your responsibility.
 [CmdletBinding()]
 param()
 
@@ -160,7 +160,9 @@ if (-not $ready) {
 # Migrace bezi automaticky z docker-entrypoint.sh pred apache2-foreground.
 # Misto druheho explicitniho migrate (= race condition s entrypointem) cekame,
 # az app odpovi na /api/health (v ALLOWED_PATHS pro FirstRunLockMiddleware).
-$curl = (Get-Command curl.exe -ErrorAction SilentlyContinue)?.Source
+$curlCmd = Get-Command curl.exe -ErrorAction SilentlyContinue
+$curl = $null
+if ($curlCmd) { $curl = $curlCmd.Source }
 if (-not $curl) { $curl = 'C:\Windows\System32\curl.exe' }
 if (-not (Test-Path $curl)) {
     Write-Error "curl.exe nenalezen (potreba na Win 10/11+). Updatuj OS nebo doinstaluj curl."

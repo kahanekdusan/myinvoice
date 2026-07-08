@@ -17,7 +17,7 @@ $ErrorActionPreference = 'Stop'
 # pollovacim loopu dramaticky zpomaluje kazde volani (i nekolik sekund navic).
 $ProgressPreference = 'SilentlyContinue'
 
-# Detekce PROJECT_ROOT — skript se pouszti dvema zpusoby (stejne jako .sh):
+# Detekce PROJECT_ROOT - skript se pouszti dvema zpusoby (stejne jako .sh):
 #   a) standalone install (curl 3 souboru do jedne slozky): script vedle compose file
 #   b) z klonu repa: script v `cmd/`, compose file o uroven vys
 if (Test-Path (Join-Path $PSScriptRoot 'docker-compose.production.yml')) {
@@ -139,8 +139,10 @@ if (-not $ready) {
 # Pouzivame curl.exe (shipped s Windows 10/11 v C:\Windows\System32\curl.exe),
 # protoze Invoke-WebRequest se na Windows v polling loopu chova nepredvidatelne
 # (pomale, error handling jine nez curl, navic catch{} skryval diagnostiku).
-# Zarovnano s docker-ghcr.sh — stejna sematika `curl -fsS` (200 = ok, jinak fail).
-$curl = (Get-Command curl.exe -ErrorAction SilentlyContinue)?.Source
+# Zarovnano s docker-ghcr.sh - stejna sematika `curl -fsS` (200 = ok, jinak fail).
+$curlCmd = Get-Command curl.exe -ErrorAction SilentlyContinue
+$curl = $null
+if ($curlCmd) { $curl = $curlCmd.Source }
 if (-not $curl) { $curl = 'C:\Windows\System32\curl.exe' }
 if (-not (Test-Path $curl)) {
     Write-Error "curl.exe nenalezen (potreba na Win 10/11+). Updatuj OS nebo doinstaluj curl."
