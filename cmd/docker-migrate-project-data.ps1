@@ -14,14 +14,13 @@
 # - Target volume content is replaced.
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory = $true)]
     [string]$SourceProject,
 
-    [Parameter(Mandatory = $true)]
     [string]$TargetProject,
 
     [switch]$NoBackup,
-    [switch]$NoStartTarget
+    [switch]$NoStartTarget,
+    [switch]$ListProjects
 )
 
 $ErrorActionPreference = 'Stop'
@@ -40,8 +39,36 @@ function Assert-Docker {
 }
 
 function Test-VolumeExists([string]$Name) {
-    & docker volume inspect $Name *>$null
-    return ($LASTEXITCODE -eq 0)
+    $rows = @(& docker volume ls --filter "name=^${Name}$" --format '{{.Name}}' 2>$null)
+    foreach ($row in $rows) {
+        if ($row -eq $Name) { return $true }
+    }
+    return $false
+}
+
+function Get-MigrationProjectCandidates {
+    $names = @(& docker volume ls --format '{{.Name}}' 2>$null)
+    $dbProjects = @{}
+    $appProjects = @{}
+
+    foreach ($name in $names) {
+        if ($name -match '^(.*)_db-data$') {
+            $dbProjects[$Matches[1]] = $true
+            continue
+        }
+        if ($name -match '^(.*)_app-data$') {
+            $appProjects[$Matches[1]] = $true
+        }
+    }
+
+    $result = @()
+    foreach ($key in $dbProjects.Keys) {
+        if ($appProjects.ContainsKey($key)) {
+            $result += $key
+        }
+    }
+
+    return @($result | Sort-Object -Unique)
 }
 
 function Ensure-VolumeExists([string]$Name) {
@@ -82,6 +109,21 @@ function Backup-TargetVolume([string]$TargetVolume, [string]$BackupVolume) {
 
 Assert-Docker
 
+if ($ListProjects) {
+    $candidates = Get-MigrationProjectCandidates
+    if ($candidates.Count -eq 0) {
+        Write-Host "No project candidates found (expected *_db-data and *_app-data pairs)."
+    } else {
+        Write-Host "Available migration project prefixes:"
+        foreach ($c in $candidates) { Write-Host "  - $c" }
+    }
+    exit 0
+}
+
+if ([string]::IsNullOrWhiteSpace($SourceProject) -or [string]::IsNullOrWhiteSpace($TargetProject)) {
+    throw "Both -SourceProject and -TargetProject are required (or use -ListProjects)."
+}
+
 $sourceDb = "${SourceProject}_db-data"
 $sourceApp = "${SourceProject}_app-data"
 $targetDb = "${TargetProject}_db-data"
@@ -93,8 +135,15 @@ Write-Host "    Source volumes: $sourceDb, $sourceApp"
 Write-Host "    Target volumes: $targetDb, $targetApp"
 Write-Host ""
 
-if (-not (Test-VolumeExists $sourceDb)) { throw "Source volume not found: $sourceDb" }
-if (-not (Test-VolumeExists $sourceApp)) { throw "Source volume not found: $sourceApp" }
+if ((-not (Test-VolumeExists $sourceDb)) -or (-not (Test-VolumeExists $sourceApp))) {
+    $candidates = Get-MigrationProjectCandidates
+    $msg = "Source project '$SourceProject' not found. Expected volumes: $sourceDb and $sourceApp."
+    if ($candidates.Count -gt 0) {
+        $msg += " Available project prefixes: " + ($candidates -join ', ') + "."
+    }
+    $msg += " Tip: run .\\cmd\\docker-migrate-project-data.ps1 -ListProjects"
+    throw $msg
+}
 
 Ensure-VolumeExists $targetDb
 Ensure-VolumeExists $targetApp
