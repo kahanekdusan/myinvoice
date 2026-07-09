@@ -670,6 +670,27 @@ async function removeLogo() {
               <p v-else class="text-xs text-neutral-400 mt-1">{{ t('settings.numbering_preview') }}: {{ t('settings.numbering_preview_fallback') }}</p>
               <p class="text-xs text-neutral-400 mt-1">{{ t('settings.purchase_invoice_number_format_hint') }}</p>
             </div>
+            <div>
+              <label class="block text-xs font-medium text-neutral-700 mb-1">{{ t('settings.quote_number_format') }}</label>
+              <input v-model="supplier.quote_number_format" type="text"
+                placeholder="CN{YYYY}{CCCC}" maxlength="60"
+                class="w-full h-9 px-3 border border-neutral-300 rounded-md text-sm font-mono" />
+              <p class="text-xs text-neutral-400 mt-1">{{ t('settings.quote_number_format_hint') }}</p>
+            </div>
+            <div>
+              <label class="block text-xs font-medium text-neutral-700 mb-1">{{ t('settings.quote_number_period') }}</label>
+              <select v-model="supplier.quote_number_period" class="w-full h-9 px-3 border border-neutral-300 rounded-md text-sm">
+                <option value="year">{{ t('settings.numbering_period_year') }}</option>
+                <option value="month">{{ t('settings.numbering_period_month') }}</option>
+                <option value="none">{{ t('settings.numbering_period_none') }}</option>
+              </select>
+            </div>
+            <div>
+              <label class="block text-xs font-medium text-neutral-700 mb-1">{{ t('settings.quote_validity_days') }}</label>
+              <input v-model.number="supplier.quote_validity_days" type="number" min="1" max="365"
+                class="w-full h-9 px-3 border border-neutral-300 rounded-md text-sm" />
+              <p class="text-xs text-neutral-400 mt-1">{{ t('settings.quote_validity_days_hint') }}</p>
+            </div>
           </div>
         </div>
 

@@ -1,0 +1,125 @@
+{% set cs = locale != 'en' %}
+
+<table class="head">
+  <tr>
+    <td class="brand">
+      <div class="company">{{ supplier.display_name|default(supplier.company_name|default('')) }}</div>
+      {% if supplier.company_name and supplier.display_name and supplier.company_name != supplier.display_name %}
+        <div class="muted">{{ supplier.company_name }}</div>
+      {% endif %}
+    </td>
+    <td class="doc-meta">
+      <div class="doc-type">{{ cs ? 'Cenová nabídka' : 'Quote' }}</div>
+      <div class="doc-number">{{ quote.quote_number ?: ('#' ~ quote.id) }}</div>
+      <div class="doc-status">{{ cs ? 'Stav' : 'Status' }}: {{ quote.status }}</div>
+    </td>
+  </tr>
+</table>
+
+<table class="parties">
+  <tr>
+    <td>
+      <h3>{{ cs ? 'Dodavatel' : 'Supplier' }}</h3>
+      <div class="line strong">{{ supplier.company_name|default('') }}</div>
+      {% if supplier.street %}<div class="line">{{ supplier.street }}</div>{% endif %}
+      {% if supplier.zip or supplier.city %}<div class="line">{{ supplier.zip|default('') }} {{ supplier.city|default('') }}</div>{% endif %}
+      {% if cs and supplier.country_name_cs %}<div class="line">{{ supplier.country_name_cs }}</div>{% endif %}
+      {% if not cs and supplier.country_name_en %}<div class="line">{{ supplier.country_name_en }}</div>{% endif %}
+      {% if supplier.ic %}<div class="line">{{ cs ? 'IČO' : 'Reg. No.' }}: {{ supplier.ic }}</div>{% endif %}
+      {% if supplier.dic %}<div class="line">{{ cs ? 'DIČ' : 'VAT ID' }}: {{ supplier.dic }}</div>{% endif %}
+    </td>
+    <td>
+      <h3>{{ cs ? 'Odběratel' : 'Customer' }}</h3>
+      <div class="line strong">{{ client.company_name|default(quote.client_company_name|default('')) }}</div>
+      {% if client.street %}<div class="line">{{ client.street }}</div>{% endif %}
+      {% if client.zip or client.city %}<div class="line">{{ client.zip|default('') }} {{ client.city|default('') }}</div>{% endif %}
+      {% if cs and client.country_name_cs %}<div class="line">{{ client.country_name_cs }}</div>{% endif %}
+      {% if not cs and client.country_name_en %}<div class="line">{{ client.country_name_en }}</div>{% endif %}
+      {% if client.ic %}<div class="line">{{ cs ? 'IČO' : 'Reg. No.' }}: {{ client.ic }}</div>{% endif %}
+      {% if client.dic %}<div class="line">{{ cs ? 'DIČ' : 'VAT ID' }}: {{ client.dic }}</div>{% endif %}
+    </td>
+  </tr>
+</table>
+
+<table class="meta-grid">
+  <tr>
+    <td class="label">{{ cs ? 'Datum vystavení' : 'Issue date' }}</td>
+    <td class="value">{{ quote.issue_date|date(date_format) }}</td>
+    <td class="label">{{ cs ? 'Platnost do' : 'Valid until' }}</td>
+    <td class="value">{{ quote.valid_until ? quote.valid_until|date(date_format) : '—' }}</td>
+  </tr>
+  <tr>
+    <td class="label">{{ cs ? 'Měna' : 'Currency' }}</td>
+    <td class="value">{{ quote.currency }}</td>
+    <td class="label">{{ cs ? 'Kurz' : 'Exchange rate' }}</td>
+    <td class="value">{{ quote.exchange_rate is not null ? quote.exchange_rate|number_format(6, decimal_sep, thousand_sep) : '—' }}</td>
+  </tr>
+  <tr>
+    <td class="label">{{ cs ? 'Číslo objednávky' : 'Order number' }}</td>
+    <td class="value">{{ quote.order_number ?: '—' }}</td>
+    <td class="label">{{ cs ? 'Popis' : 'Description' }}</td>
+    <td class="value">{{ quote.description ?: '—' }}</td>
+  </tr>
+</table>
+
+{% if quote.note_above_items %}
+  <div class="note">{{ quote.note_above_items|nl2br }}</div>
+{% endif %}
+
+<table class="items">
+  <thead>
+    <tr>
+      <th style="width:34%">{{ cs ? 'Popis položky' : 'Description' }}</th>
+      <th class="num" style="width:10%">{{ cs ? 'Množ.' : 'Qty' }}</th>
+      <th style="width:8%">{{ cs ? 'Jedn.' : 'Unit' }}</th>
+      <th class="num" style="width:14%">{{ cs ? 'Cena/j.' : 'Unit price' }}</th>
+      <th class="num" style="width:8%">{{ cs ? 'DPH %' : 'VAT %' }}</th>
+      <th class="num" style="width:13%">{{ cs ? 'Bez DPH' : 'Without VAT' }}</th>
+      <th class="num" style="width:13%">{{ cs ? 'S DPH' : 'With VAT' }}</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for item in quote.items %}
+      <tr{% if item.item_kind == 'discount' %} class="discount-row"{% endif %}>
+        <td>{{ item.description|nl2br }}</td>
+        <td class="num">{{ item.quantity|number_format(item.quantity == item.quantity|round(0) ? 0 : 2, decimal_sep, thousand_sep) }}</td>
+        <td>{{ item.unit }}</td>
+        <td class="num">{{ item.unit_price_without_vat|number_format(2, decimal_sep, thousand_sep) }}</td>
+        <td class="num">{{ item.vat_rate_snapshot|number_format(item.vat_rate_snapshot == item.vat_rate_snapshot|round(0) ? 0 : 2, decimal_sep, thousand_sep) }}</td>
+        <td class="num">{{ item.total_without_vat|number_format(2, decimal_sep, thousand_sep) }}</td>
+        <td class="num">{{ item.total_with_vat|number_format(2, decimal_sep, thousand_sep) }}</td>
+      </tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+{% if quote.note_below_items %}
+  <div class="note">{{ quote.note_below_items|nl2br }}</div>
+{% endif %}
+
+<table class="totals">
+  <tr>
+    <td>{{ cs ? 'Celkem bez DPH' : 'Total without VAT' }}</td>
+    <td class="num">{{ quote.total_without_vat|number_format(2, decimal_sep, thousand_sep) }} {{ quote.currency }}</td>
+  </tr>
+  <tr>
+    <td>{{ cs ? 'DPH' : 'VAT' }}</td>
+    <td class="num">{{ quote.total_vat|number_format(2, decimal_sep, thousand_sep) }} {{ quote.currency }}</td>
+  </tr>
+  <tr class="grand">
+    <td>{{ cs ? 'Celkem s DPH' : 'Total with VAT' }}</td>
+    <td class="num">{{ quote.total_with_vat|number_format(2, decimal_sep, thousand_sep) }} {{ quote.currency }}</td>
+  </tr>
+</table>
+
+{% if payment_method == 'bank_transfer' and bank %}
+  <div class="bank">
+    <div class="bank-title">{{ cs ? 'Bankovní spojení' : 'Bank details' }}</div>
+    {% if bank.account_number and bank.bank_code %}
+      <div>{{ cs ? 'Účet' : 'Account' }}: {{ bank.account_number }}/{{ bank.bank_code }}</div>
+    {% endif %}
+    {% if bank.iban %}<div>IBAN: {{ bank.iban }}</div>{% endif %}
+    {% if bank.bic %}<div>BIC: {{ bank.bic }}</div>{% endif %}
+    {% if bank.bank_name %}<div>{{ cs ? 'Banka' : 'Bank' }}: {{ bank.bank_name }}</div>{% endif %}
+  </div>
+{% endif %}

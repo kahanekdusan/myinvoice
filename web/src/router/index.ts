@@ -21,6 +21,11 @@ const routes: RouteRecordRaw[] = [
       { path: 'invoices/new',           name: 'invoice-new',    component: () => import('@/pages/invoices/InvoiceEditor.vue'), meta: { requiresWrite: true, requiresSupplier: true } },
       { path: 'invoices/:id(\\d+)',     name: 'invoice-detail', component: () => import('@/pages/invoices/InvoiceDetail.vue') },
       { path: 'invoices/:id(\\d+)/edit', name: 'invoice-edit',  component: () => import('@/pages/invoices/InvoiceEditor.vue'), meta: { requiresWrite: true, requiresSupplier: true } },
+      // Cenové nabídky (quotes) — samostatný typ dokladu
+      { path: 'quotes',                 name: 'quotes',         component: () => import('@/pages/quotes/QuoteList.vue') },
+      { path: 'quotes/new',             name: 'quote-new',      component: () => import('@/pages/quotes/QuoteEditor.vue'), meta: { requiresWrite: true, requiresSupplier: true } },
+      { path: 'quotes/:id(\\d+)',       name: 'quote-detail',   component: () => import('@/pages/quotes/QuoteDetail.vue') },
+      { path: 'quotes/:id(\\d+)/edit',  name: 'quote-edit',     component: () => import('@/pages/quotes/QuoteEditor.vue'), meta: { requiresWrite: true, requiresSupplier: true } },
       // Přijaté faktury (fáze 1 integrace forku)
       { path: 'purchase-invoices',                 name: 'purchase-invoices',        component: () => import('@/pages/purchase-invoices/InvoiceList.vue') },
       { path: 'purchase-invoices/export',          name: 'purchase-invoices-export', component: () => import('@/pages/purchase-invoices/Export.vue') },
