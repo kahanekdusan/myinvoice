@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
 import { useRouter, useRoute, RouterLink } from 'vue-router'
-import { quotesApi, type Quote, type QuoteStatus } from '@/api/quotes'
+import { quotesApi, type Quote, type QuotePayload, type QuoteStatus } from '@/api/quotes'
 import { formatMoney, formatDate } from '@/composables/useFormat'
 import { useToast } from '@/composables/useToast'
 import { useI18n } from 'vue-i18n'
@@ -16,6 +16,7 @@ const auth = useAuthStore()
 const quote = ref<Quote | null>(null)
 const loading = ref(true)
 const busy = ref(false)
+const statusBusyTarget = ref<QuoteStatus | null>(null)
 const sendOpen = ref(false)
 const sendTo = ref('')
 const sendCc = ref('')
@@ -32,6 +33,92 @@ function statusBadgeClass(status: QuoteStatus): string {
     case 'invoiced': return 'bg-success-100 text-success-700 dark:bg-success-900/40 dark:text-success-300'
     case 'rejected': return 'bg-danger-100 text-danger-700 dark:bg-danger-900/40 dark:text-danger-300'
     default:         return 'bg-neutral-100 text-neutral-700'
+  }
+}
+
+function statusActionClass(status: QuoteStatus): string {
+  switch (status) {
+    case 'sent':
+      return 'border-primary-500/40 text-primary-700 hover:bg-primary-50 dark:text-primary-300 dark:border-primary-500/40 dark:hover:bg-primary-900/20'
+    case 'ordered':
+      return 'border-warning-500/40 text-warning-700 hover:bg-warning-50 dark:text-warning-300 dark:border-warning-500/40 dark:hover:bg-warning-900/20'
+    case 'invoiced':
+      return 'border-success-500/40 text-success-700 hover:bg-success-50 dark:text-success-300 dark:border-success-500/40 dark:hover:bg-success-900/20'
+    case 'rejected':
+      return 'border-danger-500/40 text-danger-700 hover:bg-danger-50 dark:text-danger-300 dark:border-danger-500/40 dark:hover:bg-danger-900/20'
+    case 'draft':
+      return 'border-neutral-300 text-neutral-700 hover:bg-neutral-50 dark:text-neutral-300 dark:border-neutral-700 dark:hover:bg-neutral-800'
+    default:
+      return 'border-neutral-300 text-neutral-700 hover:bg-neutral-50 dark:text-neutral-300 dark:border-neutral-700 dark:hover:bg-neutral-800'
+  }
+}
+
+function statusTargets(status: QuoteStatus): QuoteStatus[] {
+  switch (status) {
+    case 'draft':
+      return ['sent', 'ordered', 'rejected']
+    case 'sent':
+      return ['ordered', 'invoiced', 'rejected']
+    case 'ordered':
+      return ['invoiced', 'rejected', 'sent']
+    case 'rejected':
+      return ['draft', 'sent']
+    case 'invoiced':
+    default:
+      return []
+  }
+}
+
+function toUpdatePayload(q: Quote, status: QuoteStatus): QuotePayload {
+  return {
+    client_id: q.client_id,
+    project_id: q.project_id,
+    status,
+    issue_date: q.issue_date,
+    valid_until: q.valid_until,
+    currency_id: q.currency_id,
+    exchange_rate: q.exchange_rate,
+    reverse_charge: q.reverse_charge,
+    prices_include_vat: q.prices_include_vat,
+    language: q.language,
+    payment_method: q.payment_method,
+    order_number: q.order_number,
+    description: q.description,
+    note: q.note,
+    note_above_items: q.note_above_items,
+    note_below_items: q.note_below_items,
+    discount_percent: Number(q.discount_percent || 0),
+    items: q.items
+      .filter(it => it.item_kind !== 'discount')
+      .map((it, idx) => ({
+        description: it.description,
+        quantity: Number(it.quantity) || 0,
+        unit: it.unit || 'ks',
+        unit_price_without_vat: Number(it.unit_price_without_vat) || 0,
+        vat_rate_id: it.vat_rate_id,
+        order_index: Number.isFinite(it.order_index) ? Number(it.order_index) : idx,
+      })),
+  }
+}
+
+async function changeStatus(target: QuoteStatus) {
+  if (!quote.value) return
+  if (!auth.canWrite) return
+  if (quote.value.status === target) return
+  if (target === 'invoiced' && !confirm(t('quote.status_invoiced_confirm'))) return
+
+  busy.value = true
+  statusBusyTarget.value = target
+  try {
+    const payload = toUpdatePayload(quote.value, target)
+    await quotesApi.update(quote.value.id, payload)
+    toast.success(t('quote.save_success'))
+    await load()
+  } catch (e: any) {
+    toast.error(e?.response?.data?.error?.message || t('quote.save_failed'))
+  } finally {
+    statusBusyTarget.value = null
+    busy.value = false
   }
 }
 
@@ -157,20 +244,48 @@ async function sendQuote() {
 </script>
 
 <template>
-  <div class="max-w-4xl mx-auto">
+  <div class="max-w-5xl space-y-4">
     <div v-if="loading" class="text-neutral-500">{{ t('common.loading') }}</div>
 
     <template v-else-if="quote">
       <div class="flex items-center justify-between mb-4 gap-3 flex-wrap">
-        <div class="flex items-center gap-3">
-          <button @click="router.push('/quotes')" class="text-neutral-500 hover:text-neutral-700 cursor-pointer">?</button>
-          <h1 class="text-2xl font-semibold">{{ quote.quote_number || t('quote.new_title') }}</h1>
-          <span :class="['inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium', statusBadgeClass(quote.status)]">
-            {{ t('quote.status_' + quote.status) }}
-          </span>
-          <span v-if="quote.is_expired" class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-danger-100 text-danger-700">
-            {{ t('quote.expired') }}
-          </span>
+        <div class="flex items-start gap-3">
+          <button
+            @click="router.push('/quotes')"
+            :title="t('common.back')"
+            :aria-label="t('common.back')"
+            class="h-9 w-9 inline-flex items-center justify-center rounded-md border border-neutral-300 text-neutral-500 hover:text-neutral-700 hover:bg-neutral-50 dark:border-neutral-700 dark:hover:bg-neutral-800 cursor-pointer"
+          >
+            <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M15 19l-7-7 7-7" />
+            </svg>
+          </button>
+          <div class="flex flex-col gap-1.5">
+            <div class="flex items-center gap-3 flex-wrap">
+              <h1 class="text-2xl font-semibold">{{ quote.quote_number || t('quote.new_title') }}</h1>
+              <span :class="['inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium', statusBadgeClass(quote.status)]">
+                {{ t('quote.status_' + quote.status) }}
+              </span>
+              <span v-if="quote.is_expired" class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-danger-100 text-danger-700">
+                {{ t('quote.expired') }}
+              </span>
+            </div>
+            <div v-if="auth.canWrite && statusTargets(quote.status).length > 0" class="flex flex-wrap gap-1">
+              <button
+                v-for="target in statusTargets(quote.status)"
+                :key="`detail-status-${quote.id}-${target}`"
+                @click="changeStatus(target)"
+                :disabled="busy"
+                :title="`${t('quote.status')}: ${t('quote.status_' + target)}`"
+                :class="[
+                  'cursor-pointer inline-flex items-center h-6 px-2 rounded text-[11px] border transition disabled:opacity-50',
+                  statusActionClass(target),
+                ]"
+              >
+                {{ busy && statusBusyTarget === target ? '...' : t('quote.status_' + target) }}
+              </button>
+            </div>
+          </div>
         </div>
         <div v-if="auth.canWrite" class="flex items-center gap-2 flex-wrap">
           <RouterLink :to="`/quotes/${quote.id}/edit`"
@@ -306,7 +421,7 @@ async function sendQuote() {
             </button>
             <button @click="sendQuote" :disabled="busy"
               class="cursor-pointer px-4 h-9 text-sm bg-primary-600 hover:bg-primary-700 disabled:bg-neutral-300 text-white font-medium rounded-md">
-              {{ busy ? '…' : t('common.confirm') }}
+              {{ busy ? '...' : t('common.confirm') }}
             </button>
           </div>
         </div>

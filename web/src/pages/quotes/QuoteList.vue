@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, watch } from 'vue'
 import { useRouter, useRoute, RouterLink } from 'vue-router'
-import { quotesApi, type QuoteListItem, type QuoteTab, type QuoteTabCounts, type QuoteStatus } from '@/api/quotes'
+import { quotesApi, type Quote, type QuoteListItem, type QuotePayload, type QuoteTab, type QuoteTabCounts, type QuoteStatus } from '@/api/quotes'
 import { formatMoney, formatDate } from '@/composables/useFormat'
 import { useToast } from '@/composables/useToast'
 import { useRowLink } from '@/composables/useRowLink'
@@ -25,6 +25,8 @@ const page = ref(1)
 const pages = ref(1)
 const loading = ref(false)
 const busyId = ref(0)
+const statusBusyId = ref(0)
+const statusBusyTarget = ref<QuoteStatus | null>(null)
 
 const tab = ref<QuoteTab>('all')
 const search = ref('')
@@ -59,6 +61,92 @@ function statusBadgeClass(status: QuoteStatus): string {
     case 'invoiced': return 'bg-success-100 text-success-700 dark:bg-success-900/40 dark:text-success-300'
     case 'rejected': return 'bg-danger-100 text-danger-700 dark:bg-danger-900/40 dark:text-danger-300'
     default:         return 'bg-neutral-100 text-neutral-700'
+  }
+}
+
+function statusActionClass(status: QuoteStatus): string {
+  switch (status) {
+    case 'sent':
+      return 'border-primary-500/40 text-primary-700 hover:bg-primary-50 dark:text-primary-300 dark:border-primary-500/40 dark:hover:bg-primary-900/20'
+    case 'ordered':
+      return 'border-warning-500/40 text-warning-700 hover:bg-warning-50 dark:text-warning-300 dark:border-warning-500/40 dark:hover:bg-warning-900/20'
+    case 'invoiced':
+      return 'border-success-500/40 text-success-700 hover:bg-success-50 dark:text-success-300 dark:border-success-500/40 dark:hover:bg-success-900/20'
+    case 'rejected':
+      return 'border-danger-500/40 text-danger-700 hover:bg-danger-50 dark:text-danger-300 dark:border-danger-500/40 dark:hover:bg-danger-900/20'
+    case 'draft':
+      return 'border-neutral-300 text-neutral-700 hover:bg-neutral-50 dark:text-neutral-300 dark:border-neutral-700 dark:hover:bg-neutral-800'
+    default:
+      return 'border-neutral-300 text-neutral-700 hover:bg-neutral-50 dark:text-neutral-300 dark:border-neutral-700 dark:hover:bg-neutral-800'
+  }
+}
+
+function statusTargets(status: QuoteStatus): QuoteStatus[] {
+  switch (status) {
+    case 'draft':
+      return ['sent', 'ordered', 'rejected']
+    case 'sent':
+      return ['ordered', 'invoiced', 'rejected']
+    case 'ordered':
+      return ['invoiced', 'rejected', 'sent']
+    case 'rejected':
+      return ['draft', 'sent']
+    case 'invoiced':
+    default:
+      return []
+  }
+}
+
+function toUpdatePayload(q: Quote, status: QuoteStatus): QuotePayload {
+  return {
+    client_id: q.client_id,
+    project_id: q.project_id,
+    status,
+    issue_date: q.issue_date,
+    valid_until: q.valid_until,
+    currency_id: q.currency_id,
+    exchange_rate: q.exchange_rate,
+    reverse_charge: q.reverse_charge,
+    prices_include_vat: q.prices_include_vat,
+    language: q.language,
+    payment_method: q.payment_method,
+    order_number: q.order_number,
+    description: q.description,
+    note: q.note,
+    note_above_items: q.note_above_items,
+    note_below_items: q.note_below_items,
+    discount_percent: Number(q.discount_percent || 0),
+    items: q.items
+      .filter(it => it.item_kind !== 'discount')
+      .map((it, idx) => ({
+        description: it.description,
+        quantity: Number(it.quantity) || 0,
+        unit: it.unit || 'ks',
+        unit_price_without_vat: Number(it.unit_price_without_vat) || 0,
+        vat_rate_id: it.vat_rate_id,
+        order_index: Number.isFinite(it.order_index) ? Number(it.order_index) : idx,
+      })),
+  }
+}
+
+async function changeStatus(row: QuoteListItem, target: QuoteStatus) {
+  if (!auth.canWrite) return
+  if (row.status === target) return
+  if (target === 'invoiced' && !confirm(t('quote.status_invoiced_confirm'))) return
+
+  statusBusyId.value = row.id
+  statusBusyTarget.value = target
+  try {
+    const detail = await quotesApi.get(row.id)
+    const payload = toUpdatePayload(detail, target)
+    await quotesApi.update(row.id, payload)
+    toast.success(t('quote.save_success'))
+    await load()
+  } catch (e: any) {
+    toast.error(e?.response?.data?.error?.message || t('quote.save_failed'))
+  } finally {
+    statusBusyId.value = 0
+    statusBusyTarget.value = null
   }
 }
 
@@ -279,9 +367,26 @@ function changePage(delta: number) {
               </td>
               <td class="px-4 py-2 text-right whitespace-nowrap">{{ formatMoney(q.total_with_vat, q.currency) }}</td>
               <td class="px-4 py-2">
-                <span :class="['inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium', statusBadgeClass(q.status)]">
-                  {{ t('quote.status_' + q.status) }}
-                </span>
+                <div class="flex flex-col items-start gap-1.5" @click.stop>
+                  <span :class="['inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium', statusBadgeClass(q.status)]">
+                    {{ t('quote.status_' + q.status) }}
+                  </span>
+                  <div v-if="auth.canWrite && statusTargets(q.status).length > 0" class="flex flex-wrap gap-1">
+                    <button
+                      v-for="target in statusTargets(q.status)"
+                      :key="`status-${q.id}-${target}`"
+                      @click.stop="changeStatus(q, target)"
+                      :disabled="statusBusyId === q.id"
+                      :title="`${t('quote.status')}: ${t('quote.status_' + target)}`"
+                      :class="[
+                        'cursor-pointer inline-flex items-center h-6 px-2 rounded text-[11px] border transition disabled:opacity-50',
+                        statusActionClass(target),
+                      ]"
+                    >
+                      {{ statusBusyId === q.id && statusBusyTarget === target ? '...' : t('quote.status_' + target) }}
+                    </button>
+                  </div>
+                </div>
               </td>
               <td class="px-4 py-2 text-right whitespace-nowrap" @click.stop>
                 <RouterLink v-if="auth.canWrite" :to="`/quotes/${q.id}/edit`"
@@ -315,6 +420,20 @@ function changePage(delta: number) {
             {{ t('quote.col_issued') }}: {{ formatDate(q.issue_date) }} · {{ t('quote.col_valid_until') }}: {{ formatDate(q.valid_until) }}
           </div>
           <div class="text-base font-medium mt-1">{{ formatMoney(q.total_with_vat, q.currency) }}</div>
+          <div v-if="auth.canWrite && statusTargets(q.status).length > 0" class="flex flex-wrap gap-1 mt-2" @click.stop>
+            <button
+              v-for="target in statusTargets(q.status)"
+              :key="`m-status-${q.id}-${target}`"
+              @click.stop="changeStatus(q, target)"
+              :disabled="statusBusyId === q.id"
+              :class="[
+                'cursor-pointer inline-flex items-center h-6 px-2 rounded text-[11px] border transition disabled:opacity-50',
+                statusActionClass(target),
+              ]"
+            >
+              {{ statusBusyId === q.id && statusBusyTarget === target ? '...' : t('quote.status_' + target) }}
+            </button>
+          </div>
           <div class="flex gap-3 mt-2" @click.stop>
             <RouterLink v-if="auth.canWrite" :to="`/quotes/${q.id}/edit`" class="text-primary-600 text-sm">{{ t('common.edit') }}</RouterLink>
             <button v-if="auth.canWrite" @click="cloneQuote(q.id)" class="text-neutral-500 text-sm cursor-pointer">{{ t('quote.clone') }}</button>

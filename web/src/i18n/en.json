@@ -1637,6 +1637,7 @@
     "status_sent": "Sent",
     "status_ordered": "Ordered",
     "status_invoiced": "Invoiced",
+    "status_invoiced_confirm": "Do you really want to set the quote status to \"Invoiced\"?",
     "status_rejected": "Rejected",
     "issued_from": "Issued from",
     "issued_to": "Issued to",

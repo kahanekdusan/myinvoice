@@ -152,6 +152,18 @@ function removeItem(idx: number) {
   form.value.items.splice(idx, 1)
   form.value.items.forEach((it, i) => { it.order_index = i })
 }
+function moveUp(idx: number) {
+  if (idx <= 0) return
+  const [m] = form.value.items.splice(idx, 1)
+  form.value.items.splice(idx - 1, 0, m)
+  form.value.items.forEach((it, i) => { it.order_index = i })
+}
+function moveDown(idx: number) {
+  if (idx >= form.value.items.length - 1) return
+  const [m] = form.value.items.splice(idx, 1)
+  form.value.items.splice(idx + 1, 0, m)
+  form.value.items.forEach((it, i) => { it.order_index = i })
+}
 
 // ?? Client-side totals (zrcadlí InvoiceMath) ??????????????????????????
 function round2(v: number): number { return Math.round(v * 100) / 100 }
@@ -334,9 +346,12 @@ async function save(after: 'detail' | 'list' = 'detail') {
 </script>
 
 <template>
-  <div class="max-w-4xl mx-auto">
+  <div class="max-w-5xl">
     <div class="flex items-center justify-between mb-4">
-      <h1 class="text-2xl font-semibold">{{ isEdit ? t('quote.edit_title') : t('quote.new_title') }}</h1>
+      <div>
+        <RouterLink to="/quotes" class="text-sm text-neutral-600 hover:text-neutral-900">{{ t('invoice.back_to_list') }}</RouterLink>
+        <h1 class="text-2xl font-semibold mt-1">{{ isEdit ? t('quote.edit_title') : t('quote.new_title') }}</h1>
+      </div>
       <button type="button" @click="router.push('/quotes')"
         class="text-sm text-neutral-500 hover:text-neutral-700 cursor-pointer">{{ t('common.cancel') }}</button>
     </div>
@@ -414,7 +429,9 @@ async function save(after: 'detail' | 'list' = 'detail') {
         <button type="button" @click="showDetails = !showDetails"
           class="w-full flex items-center justify-between px-4 py-3 text-sm font-medium cursor-pointer">
           <span>{{ t('quote.details') }}</span>
-          <span>{{ showDetails ? '?' : '?' }}</span>
+          <svg class="w-4 h-4 transition-transform" :class="showDetails ? 'rotate-180' : ''" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7" />
+          </svg>
         </button>
         <div v-if="showDetails" class="px-4 pb-4 space-y-4 border-t border-neutral-100 dark:border-neutral-800 pt-4">
           <div v-if="isForeignCurrency">
@@ -450,40 +467,132 @@ async function save(after: 'detail' | 'list' = 'detail') {
       </div>
 
       <!-- Položky -->
-      <div class="bg-surface border border-neutral-200 dark:border-neutral-700 rounded-lg p-4">
-        <div class="flex items-center justify-between mb-3">
-          <h2 class="text-lg font-medium">{{ t('quote.items') }}</h2>
+      <div class="bg-surface border border-neutral-200 dark:border-neutral-700 rounded-lg shadow-sm overflow-hidden">
+        <div class="px-5 py-3 border-b border-neutral-200 dark:border-neutral-700 flex items-center justify-between">
+          <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-500">{{ t('quote.items') }}</h3>
           <button type="button" @click="addItem"
-            class="h-8 px-3 bg-primary-600 hover:bg-primary-700 text-white text-sm rounded-md cursor-pointer">+ {{ t('quote.add_item') }}</button>
+            class="px-3 h-8 text-sm bg-primary-600 hover:bg-primary-700 text-white rounded-md cursor-pointer">
+            {{ t('quote.add_item') }}
+          </button>
         </div>
 
-        <div class="space-y-2">
-          <div v-for="(it, idx) in form.items" :key="idx"
-            class="grid grid-cols-12 gap-2 items-start">
-            <input v-model="it.description" type="text" :placeholder="t('quote.item_description')"
-              class="col-span-12 md:col-span-4 h-9 px-3 border border-neutral-300 rounded-md bg-surface text-sm" />
-            <input v-model.number="it.quantity" type="number" step="0.001" :placeholder="t('quote.item_qty')"
-              class="col-span-4 md:col-span-1 h-9 px-2 border border-neutral-300 rounded-md bg-surface text-sm" />
-            <input v-model="it.unit" type="text" :placeholder="t('quote.item_unit')"
-              class="col-span-4 md:col-span-1 h-9 px-2 border border-neutral-300 rounded-md bg-surface text-sm" />
-            <input v-model.number="it.unit_price_without_vat" type="number" step="0.01" :placeholder="t('quote.item_price')"
-              class="col-span-4 md:col-span-2 h-9 px-2 border border-neutral-300 rounded-md bg-surface text-sm" />
-            <select v-model.number="it.vat_rate_id"
-              class="col-span-8 md:col-span-2 h-9 px-2 border border-neutral-300 rounded-md bg-surface text-sm">
-              <option v-for="r in selectableVatRates" :key="r.id" :value="r.id">
-                {{ Number(r.rate_percent) }} %
-              </option>
-            </select>
-            <div class="col-span-3 md:col-span-1 h-9 flex items-center justify-end text-sm whitespace-nowrap">
-              {{ formatMoney(round2((Number(it.quantity) || 0) * (Number(it.unit_price_without_vat) || 0)), currencyCode) }}
+        <!-- Desktop: tabulka -->
+        <div class="hidden md:block overflow-x-auto">
+          <table class="w-full text-sm table-sticky-first">
+            <thead class="bg-neutral-50 text-xs text-neutral-500 uppercase tracking-wide">
+              <tr>
+                <th class="px-2 py-2 w-12"></th>
+                <th class="px-3 py-2 text-left font-medium">{{ t('quote.item_description') }}</th>
+                <th class="px-3 py-2 text-right font-medium w-24">{{ t('quote.item_qty') }}</th>
+                <th class="px-3 py-2 text-left font-medium w-20">{{ t('quote.item_unit') }}</th>
+                <th class="px-3 py-2 text-right font-medium w-36">{{ t('quote.item_price') }}</th>
+                <th class="px-3 py-2 text-center font-medium w-24">DPH</th>
+                <th class="px-3 py-2 text-right font-medium w-32">{{ t('quote.col_total') }}</th>
+                <th class="px-2 py-2 w-12"></th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-neutral-200">
+              <tr v-for="(it, idx) in form.items" :key="idx">
+                <td class="px-2 py-2 text-center text-xs text-neutral-400">
+                  <button type="button" @click="moveUp(idx)" :disabled="idx === 0" class="block w-5 h-4 hover:text-neutral-700 disabled:opacity-30">▲</button>
+                  <button type="button" @click="moveDown(idx)" :disabled="idx === form.items.length - 1" class="block w-5 h-4 hover:text-neutral-700 disabled:opacity-30">▼</button>
+                </td>
+                <td class="px-3 py-2">
+                  <textarea v-model="it.description" rows="1" data-row-input="quote-item" :placeholder="t('quote.item_description')"
+                    class="w-full px-2 py-1.5 border border-neutral-300 rounded text-sm resize-y min-h-[36px] focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 outline-none"></textarea>
+                </td>
+                <td class="px-3 py-2">
+                  <input v-model.number="it.quantity" type="number" step="0.001" :placeholder="t('quote.item_qty')"
+                    class="w-full h-9 px-2 border border-neutral-300 rounded text-right font-mono text-sm" />
+                </td>
+                <td class="px-3 py-2">
+                  <input v-model="it.unit" type="text" :placeholder="t('quote.item_unit')"
+                    class="w-full h-9 px-2 border border-neutral-300 rounded text-sm" />
+                </td>
+                <td class="px-3 py-2">
+                  <input v-model.number="it.unit_price_without_vat" type="number" step="0.01" :placeholder="t('quote.item_price')"
+                    class="w-full h-9 px-2 border border-neutral-300 rounded text-right font-mono text-sm" />
+                </td>
+                <td class="px-3 py-2">
+                  <select v-model.number="it.vat_rate_id"
+                    class="w-full h-9 px-2 border border-neutral-300 rounded bg-surface text-sm">
+                    <option v-for="r in selectableVatRates" :key="r.id" :value="r.id">
+                      {{ Number(r.rate_percent) }} %
+                    </option>
+                  </select>
+                </td>
+                <td class="px-3 py-2 text-right font-mono">
+                  {{ formatMoney(round2((Number(it.quantity) || 0) * (Number(it.unit_price_without_vat) || 0)), currencyCode) }}
+                </td>
+                <td class="px-2 py-2 text-center">
+                  <button type="button" @click="removeItem(idx)"
+                    :title="t('common.delete')"
+                    :aria-label="t('common.delete')"
+                    class="text-danger-500 hover:text-danger-600 text-lg leading-none cursor-pointer">×</button>
+                </td>
+              </tr>
+              <tr v-if="form.items.length === 0">
+                <td colspan="8" class="px-4 py-6 text-center text-neutral-400 text-sm">
+                  {{ t('quote.err_items_required') }}
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <!-- Mobile: stack karet -->
+        <div class="md:hidden divide-y divide-neutral-200">
+          <div v-if="form.items.length === 0" class="px-4 py-6 text-center text-neutral-400 text-sm">
+            {{ t('quote.err_items_required') }}
+          </div>
+          <div v-for="(it, idx) in form.items" :key="`m-${idx}`" class="p-3 space-y-2">
+            <div class="flex items-center justify-between text-xs text-neutral-500">
+              <span class="font-mono">#{{ idx + 1 }}</span>
+              <div class="flex items-center gap-2">
+                <button type="button" @click="moveUp(idx)" :disabled="idx === 0" class="cursor-pointer w-8 h-8 inline-flex items-center justify-center border border-neutral-300 rounded hover:bg-neutral-50 disabled:opacity-30 disabled:cursor-not-allowed">▲</button>
+                <button type="button" @click="moveDown(idx)" :disabled="idx === form.items.length - 1" class="cursor-pointer w-8 h-8 inline-flex items-center justify-center border border-neutral-300 rounded hover:bg-neutral-50 disabled:opacity-30 disabled:cursor-not-allowed">▼</button>
+                <button type="button" @click="removeItem(idx)" class="cursor-pointer w-8 h-8 inline-flex items-center justify-center border border-danger-500/40 text-danger-500 hover:bg-danger-50 rounded text-lg leading-none">×</button>
+              </div>
             </div>
-            <button type="button" @click="removeItem(idx)"
-              class="col-span-1 h-9 text-danger-600 hover:text-danger-700 cursor-pointer">?</button>
+            <div>
+              <label class="block text-xs font-medium text-neutral-600 mb-1">{{ t('quote.item_description') }}</label>
+              <textarea v-model="it.description" rows="2" data-row-input="quote-item" :placeholder="t('quote.item_description')"
+                class="w-full px-3 py-2 border border-neutral-300 rounded text-sm resize-y min-h-[44px] focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 outline-none"></textarea>
+            </div>
+            <div class="grid grid-cols-2 gap-2">
+              <div>
+                <label class="block text-xs font-medium text-neutral-600 mb-1">{{ t('quote.item_qty') }}</label>
+                <input v-model.number="it.quantity" type="number" step="0.001"
+                  class="w-full h-10 px-3 border border-neutral-300 rounded text-right font-mono text-sm" />
+              </div>
+              <div>
+                <label class="block text-xs font-medium text-neutral-600 mb-1">{{ t('quote.item_unit') }}</label>
+                <input v-model="it.unit" type="text"
+                  class="w-full h-10 px-3 border border-neutral-300 rounded text-sm" />
+              </div>
+            </div>
+            <div class="grid grid-cols-2 gap-2">
+              <div>
+                <label class="block text-xs font-medium text-neutral-600 mb-1">{{ t('quote.item_price') }}</label>
+                <input v-model.number="it.unit_price_without_vat" type="number" step="0.01"
+                  class="w-full h-10 px-3 border border-neutral-300 rounded text-right font-mono text-sm" />
+              </div>
+              <div>
+                <label class="block text-xs font-medium text-neutral-600 mb-1">DPH</label>
+                <select v-model.number="it.vat_rate_id" class="w-full h-10 px-2 border border-neutral-300 rounded text-sm bg-surface">
+                  <option v-for="r in selectableVatRates" :key="r.id" :value="r.id">{{ Number(r.rate_percent) }} %</option>
+                </select>
+              </div>
+            </div>
+            <div class="flex items-baseline justify-between pt-1 border-t border-neutral-200">
+              <span class="text-xs font-medium text-neutral-500 uppercase tracking-wide">{{ t('quote.col_total') }}</span>
+              <span class="font-mono text-sm font-semibold">{{ formatMoney(round2((Number(it.quantity) || 0) * (Number(it.unit_price_without_vat) || 0)), currencyCode) }}</span>
+            </div>
           </div>
         </div>
 
         <!-- Sleva + totals -->
-        <div class="mt-4 pt-4 border-t border-neutral-100 dark:border-neutral-800 flex flex-col md:flex-row md:items-end md:justify-between gap-4">
+        <div class="p-4 mt-0 border-t border-neutral-100 dark:border-neutral-800 flex flex-col md:flex-row md:items-end md:justify-between gap-4">
           <div>
             <label class="block text-sm font-medium mb-1">{{ t('quote.discount_percent') }}</label>
             <input v-model.number="form.discount_percent" type="number" step="0.01" min="0" max="100"
@@ -514,7 +623,7 @@ async function save(after: 'detail' | 'list' = 'detail') {
         </button>
         <button type="submit" :disabled="saving"
           class="h-9 px-4 bg-primary-600 hover:bg-primary-700 text-white rounded-md text-sm font-medium cursor-pointer disabled:opacity-50">
-          {{ saving ? '…' : t('common.save') }}
+          {{ saving ? '...' : t('common.save') }}
         </button>
       </div>
     </form>

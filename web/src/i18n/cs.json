@@ -1637,6 +1637,7 @@
     "status_sent": "Odeslána",
     "status_ordered": "Objednána",
     "status_invoiced": "Vyfakturována",
+    "status_invoiced_confirm": "Opravdu změnit stav nabídky na \"Vyfakturována\"?",
     "status_rejected": "Zamítnuta",
     "issued_from": "Vystaveno od",
     "issued_to": "Vystaveno do",
