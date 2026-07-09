@@ -1702,7 +1702,18 @@
     "to_proforma_failed": "Vygenerování zálohy selhalo.",
     "related_documents": "Související doklady",
     "related_invoice": "Faktura vydaná",
-    "related_proforma": "Zálohová faktura"
+    "related_proforma": "Zálohová faktura",
+    "download_pdf": "PDF",
+    "send_to_client": "Odeslat klientovi",
+    "send_modal_title": "Odeslat cenovou nabídku",
+    "send_recipients": "Příjemci (čárkou oddělené)",
+    "send_cc_label": "Kopie (CC)",
+    "send_bcc_label": "Skrytá kopie (BCC)",
+    "send_note": "Poznámka do e-mailu (volitelné)",
+    "send_note_placeholder": "Text se přidá do e-mailu nad shrnutí nabídky.",
+    "recipients_required": "Vyplňte alespoň jednoho příjemce.",
+    "send_success": "Nabídka byla odeslána: {recipients}",
+    "send_failed": "Odeslání nabídky selhalo."
   },
   "payment_method": {
     "label": "Způsob úhrady",

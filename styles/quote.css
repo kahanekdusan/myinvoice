@@ -1,0 +1,173 @@
+@page {
+  margin: 14mm 12mm;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  font-family: DejaVu Sans, Arial, sans-serif;
+  font-size: 11px;
+  color: #1f2937;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.head {
+  margin-bottom: 10mm;
+}
+
+.head .brand {
+  width: 60%;
+  vertical-align: top;
+}
+
+.head .company {
+  font-size: 20px;
+  font-weight: 700;
+  color: #111827;
+}
+
+.head .muted {
+  color: #6b7280;
+  margin-top: 2px;
+}
+
+.head .doc-meta {
+  width: 40%;
+  text-align: right;
+  vertical-align: top;
+}
+
+.head .doc-type {
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: #4b5563;
+  font-size: 10px;
+}
+
+.head .doc-number {
+  font-size: 18px;
+  font-weight: 700;
+  margin-top: 3px;
+}
+
+.head .doc-status {
+  margin-top: 3px;
+  color: #6b7280;
+}
+
+.parties {
+  margin-bottom: 8mm;
+}
+
+.parties td {
+  width: 50%;
+  vertical-align: top;
+  border: 1px solid #e5e7eb;
+  padding: 8px 10px;
+}
+
+.parties h3 {
+  margin: 0 0 5px;
+  font-size: 11px;
+  text-transform: uppercase;
+  color: #6b7280;
+}
+
+.parties .line {
+  margin: 2px 0;
+}
+
+.parties .strong {
+  font-weight: 700;
+}
+
+.meta-grid {
+  margin-bottom: 7mm;
+  border: 1px solid #e5e7eb;
+}
+
+.meta-grid td {
+  padding: 6px 8px;
+  border: 1px solid #e5e7eb;
+}
+
+.meta-grid .label {
+  width: 20%;
+  color: #6b7280;
+  font-size: 10px;
+}
+
+.meta-grid .value {
+  width: 30%;
+}
+
+.note {
+  margin: 6mm 0;
+  padding: 6px 8px;
+  border-left: 2px solid #cbd5e1;
+  background: #f8fafc;
+  color: #334155;
+}
+
+.items {
+  margin-top: 4mm;
+}
+
+.items th,
+.items td {
+  border: 1px solid #e5e7eb;
+  padding: 6px 7px;
+  vertical-align: top;
+}
+
+.items th {
+  background: #f9fafb;
+  font-size: 10px;
+  color: #4b5563;
+  text-transform: uppercase;
+}
+
+.num {
+  text-align: right;
+  white-space: nowrap;
+}
+
+.discount-row td {
+  color: #166534;
+}
+
+.totals {
+  margin-top: 6mm;
+  margin-left: auto;
+  width: 45%;
+}
+
+.totals td {
+  border: 1px solid #e5e7eb;
+  padding: 6px 8px;
+}
+
+.totals .grand td {
+  font-weight: 700;
+  font-size: 12px;
+}
+
+.bank {
+  margin-top: 6mm;
+  padding: 7px 9px;
+  border: 1px solid #e5e7eb;
+  background: #f8fafc;
+}
+
+.bank .bank-title {
+  font-size: 10px;
+  text-transform: uppercase;
+  color: #6b7280;
+  margin-bottom: 4px;
+}

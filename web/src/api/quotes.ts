@@ -217,6 +217,21 @@ export const quotesApi = {
   clone: (id: number): Promise<Quote> =>
     api.post<Quote>(`/quotes/${id}/clone`, {}).then(r => r.data),
 
+  pdfUrl: (id: number, download: boolean = false) => {
+    const sid = localStorage.getItem('myinvoice.current_supplier_id')
+    const params = new URLSearchParams()
+    if (download) params.set('download', '1')
+    if (sid && /^\d+$/.test(sid)) params.set('supplier_id', sid)
+    const qs = params.toString()
+    return `/api/quotes/${id}/pdf${qs ? '?' + qs : ''}`
+  },
+
+  send: (id: number, payload?: { to?: string[]; cc?: string[]; bcc?: string[]; subject_override?: string | null; note?: string }) =>
+    api.post<{ sent_to: string[]; cc: string[]; bcc: string[]; sent_at: string; is_test: false }>(
+      `/quotes/${id}/send`,
+      payload || {},
+    ).then(r => r.data),
+
   toInvoice: (id: number): Promise<{ invoice_id: number }> =>
     api.post<{ invoice_id: number }>(`/quotes/${id}/to-invoice`, {}).then(r => r.data),
 

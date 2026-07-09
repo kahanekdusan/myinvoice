@@ -1,0 +1,22 @@
+{% extends '_layout.txt.twig' %}
+
+{% block content %}
+{% if is_test %}[TEST] {% endif %}{{ greeting }}
+------------
+
+{{ intro_plain }}
+{% if note_text is defined and note_text|length %}
+
+{{ note_text }}
+{% endif %}
+
+Quote number: {{ quote.quote_number ?: ('#' ~ quote.id) }}
+Issue date:   {{ quote.issue_date|date('M j, Y') }}
+Valid until:  {{ quote.valid_until ? quote.valid_until|date('M j, Y') : '—' }}
+Total amount: {{ quote.total_with_vat|number_format(2, '.', ',') }} {{ quote.currency }}
+
+The PDF quote is attached to this email.
+
+{% if not is_test %}Thank you for your cooperation.
+{% else %}=== TEST EMAIL — it was not sent to the client. ==={% endif %}
+{% endblock %}

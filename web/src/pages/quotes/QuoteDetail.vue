@@ -16,6 +16,11 @@ const auth = useAuthStore()
 const quote = ref<Quote | null>(null)
 const loading = ref(true)
 const busy = ref(false)
+const sendOpen = ref(false)
+const sendTo = ref('')
+const sendCc = ref('')
+const sendBcc = ref('')
+const sendNote = ref('')
 
 const quoteId = computed(() => Number(route.params.id))
 
@@ -31,6 +36,7 @@ function statusBadgeClass(status: QuoteStatus): string {
 }
 
 const canConvert = computed(() => quote.value !== null && !['invoiced', 'rejected'].includes(quote.value.status))
+const canSend = computed(() => quote.value !== null && !['invoiced', 'rejected'].includes(quote.value.status))
 const currencyCode = computed(() => quote.value?.currency ?? 'CZK')
 const visibleItems = computed(() => quote.value?.items ?? [])
 
@@ -106,6 +112,48 @@ async function convertToProforma() {
     busy.value = false
   }
 }
+
+function downloadPdf() {
+  if (!quote.value) return
+  window.open(quotesApi.pdfUrl(quote.value.id), '_blank')
+}
+
+function openSendModal() {
+  if (!quote.value) return
+  sendTo.value = quote.value.client_main_email || ''
+  sendCc.value = ''
+  sendBcc.value = ''
+  sendNote.value = ''
+  sendOpen.value = true
+}
+
+async function sendQuote() {
+  if (!quote.value) return
+  const recipients = sendTo.value.split(',').map(e => e.trim()).filter(Boolean)
+  const cc = sendCc.value.split(',').map(e => e.trim()).filter(Boolean)
+  const bcc = sendBcc.value.split(',').map(e => e.trim()).filter(Boolean)
+  if (!recipients.length) {
+    toast.error(t('quote.recipients_required'))
+    return
+  }
+  busy.value = true
+  try {
+    const note = sendNote.value.trim()
+    const r = await quotesApi.send(quote.value.id, {
+      to: recipients,
+      ...(cc.length ? { cc } : {}),
+      ...(bcc.length ? { bcc } : {}),
+      ...(note ? { note } : {}),
+    })
+    sendOpen.value = false
+    toast.success(t('quote.send_success', { recipients: r.sent_to.join(', ') }))
+    await load()
+  } catch (e: any) {
+    toast.error(e?.response?.data?.error?.message || t('quote.send_failed'))
+  } finally {
+    busy.value = false
+  }
+}
 </script>
 
 <template>
@@ -129,6 +177,14 @@ async function convertToProforma() {
             class="h-9 px-3 inline-flex items-center border border-neutral-300 rounded-md text-sm hover:bg-neutral-50 dark:hover:bg-neutral-800">
             {{ t('common.edit') }}
           </RouterLink>
+          <button @click="downloadPdf" :disabled="busy"
+            class="h-9 px-3 border border-neutral-300 rounded-md text-sm hover:bg-neutral-50 dark:hover:bg-neutral-800 cursor-pointer disabled:opacity-50">
+            {{ t('quote.download_pdf') }}
+          </button>
+          <button v-if="canSend" @click="openSendModal" :disabled="busy"
+            class="h-9 px-3 bg-primary-600 hover:bg-primary-700 text-white rounded-md text-sm cursor-pointer disabled:opacity-50">
+            {{ t('quote.send_to_client') }}
+          </button>
           <button v-if="canConvert" @click="convertToInvoice" :disabled="busy"
             class="h-9 px-3 bg-success-600 hover:bg-success-700 text-white rounded-md text-sm cursor-pointer disabled:opacity-50">
             {{ t('quote.to_invoice') }}
@@ -223,6 +279,37 @@ async function convertToProforma() {
             <span class="text-neutral-500">— {{ formatMoney(inv.total_with_vat, inv.currency) }}</span>
           </li>
         </ul>
+      </div>
+
+      <!-- Send modal -->
+      <div v-if="sendOpen" class="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+        <div class="bg-surface rounded-xl shadow-lg max-w-md w-full p-5">
+          <h3 class="text-lg font-semibold mb-3">{{ t('quote.send_modal_title') }}</h3>
+
+          <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('quote.send_recipients') }}</label>
+          <input v-model="sendTo" type="text" class="w-full h-10 px-3 border border-neutral-300 rounded-md mb-3 text-sm" />
+
+          <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('quote.send_cc_label') }}</label>
+          <input v-model="sendCc" type="text" class="w-full h-10 px-3 border border-neutral-300 rounded-md mb-3 text-sm" />
+
+          <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('quote.send_bcc_label') }}</label>
+          <input v-model="sendBcc" type="text" class="w-full h-10 px-3 border border-neutral-300 rounded-md mb-3 text-sm" />
+
+          <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('quote.send_note') }}</label>
+          <textarea v-model="sendNote" rows="3"
+            class="w-full px-3 py-2 border border-neutral-300 rounded-md text-sm mb-4"
+            :placeholder="t('quote.send_note_placeholder')"></textarea>
+
+          <div class="flex justify-end gap-2">
+            <button @click="sendOpen = false" class="cursor-pointer px-3 h-9 text-sm border border-neutral-300 rounded-md text-neutral-700 hover:bg-neutral-50">
+              {{ t('common.cancel') }}
+            </button>
+            <button @click="sendQuote" :disabled="busy"
+              class="cursor-pointer px-4 h-9 text-sm bg-primary-600 hover:bg-primary-700 disabled:bg-neutral-300 text-white font-medium rounded-md">
+              {{ busy ? '…' : t('common.confirm') }}
+            </button>
+          </div>
+        </div>
       </div>
     </template>
   </div>

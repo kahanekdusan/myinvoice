@@ -1,0 +1,22 @@
+{% extends '_layout.txt.twig' %}
+
+{% block content %}
+{% if is_test %}[TEST] {% endif %}{{ greeting }}
+------------
+
+{{ intro_plain }}
+{% if note_text is defined and note_text|length %}
+
+{{ note_text }}
+{% endif %}
+
+Číslo nabídky:   {{ quote.quote_number ?: ('#' ~ quote.id) }}
+Datum vystavení: {{ quote.issue_date|date('j.n.Y') }}
+Platnost do:     {{ quote.valid_until ? quote.valid_until|date('j.n.Y') : '—' }}
+Cena celkem:     {{ quote.total_with_vat|number_format(2, ',', ' ') }} {{ quote.currency }}
+
+V příloze najdete PDF cenové nabídky.
+
+{% if not is_test %}Děkujeme za spolupráci.
+{% else %}=== TEST EMAIL — klient ho nedostal. ==={% endif %}
+{% endblock %}

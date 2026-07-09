@@ -80,7 +80,9 @@ use MyInvoice\Action\Quote\CreateQuoteAction;
 use MyInvoice\Action\Quote\DeleteQuoteAction;
 use MyInvoice\Action\Quote\GetQuoteAction;
 use MyInvoice\Action\Quote\ListQuotesAction;
+use MyInvoice\Action\Quote\PdfQuoteAction;
 use MyInvoice\Action\Quote\PreviewQuoteNumberAction;
+use MyInvoice\Action\Quote\SendQuoteEmailAction;
 use MyInvoice\Action\Quote\UpdateQuoteAction;
 use MyInvoice\Action\Invoice\ListPaymentsAction;
 use MyInvoice\Action\Invoice\CreatePaymentAction;
@@ -350,6 +352,8 @@ final class Routes
         $app->get    ('/api/quotes/{id:[0-9]+}',              GetQuoteAction::class);
         $app->put    ('/api/quotes/{id:[0-9]+}',              UpdateQuoteAction::class);
         $app->delete ('/api/quotes/{id:[0-9]+}',              DeleteQuoteAction::class);
+        $app->get    ('/api/quotes/{id:[0-9]+}/pdf',          PdfQuoteAction::class);
+        $app->post   ('/api/quotes/{id:[0-9]+}/send',         SendQuoteEmailAction::class);
         $app->post   ('/api/quotes/{id:[0-9]+}/clone',        CloneQuoteAction::class);
         $app->post   ('/api/quotes/{id:[0-9]+}/to-invoice',   ConvertToInvoiceAction::class);
         $app->post   ('/api/quotes/{id:[0-9]+}/to-proforma',  ConvertToProformaAction::class);

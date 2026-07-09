@@ -1702,7 +1702,18 @@
     "to_proforma_failed": "Failed to generate proforma.",
     "related_documents": "Related documents",
     "related_invoice": "Issued invoice",
-    "related_proforma": "Proforma invoice"
+    "related_proforma": "Proforma invoice",
+    "download_pdf": "PDF",
+    "send_to_client": "Send to client",
+    "send_modal_title": "Send quote",
+    "send_recipients": "Recipients (comma separated)",
+    "send_cc_label": "Copy (CC)",
+    "send_bcc_label": "Blind copy (BCC)",
+    "send_note": "Email note (optional)",
+    "send_note_placeholder": "Text is added above the quote summary in the email.",
+    "recipients_required": "Enter at least one recipient.",
+    "send_success": "Quote sent: {recipients}",
+    "send_failed": "Failed to send quote."
   },
   "payment_method": {
     "label": "Payment method",
