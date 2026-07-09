@@ -73,6 +73,15 @@ use MyInvoice\Action\Invoice\ListInvoicesAction;
 use MyInvoice\Action\Invoice\PreviewVarsymbolAction;
 use MyInvoice\Action\Invoice\MarkPaidAction;
 use MyInvoice\Action\Invoice\UnmarkPaidAction;
+use MyInvoice\Action\Quote\CloneQuoteAction;
+use MyInvoice\Action\Quote\ConvertToInvoiceAction;
+use MyInvoice\Action\Quote\ConvertToProformaAction;
+use MyInvoice\Action\Quote\CreateQuoteAction;
+use MyInvoice\Action\Quote\DeleteQuoteAction;
+use MyInvoice\Action\Quote\GetQuoteAction;
+use MyInvoice\Action\Quote\ListQuotesAction;
+use MyInvoice\Action\Quote\PreviewQuoteNumberAction;
+use MyInvoice\Action\Quote\UpdateQuoteAction;
 use MyInvoice\Action\Invoice\ListPaymentsAction;
 use MyInvoice\Action\Invoice\CreatePaymentAction;
 use MyInvoice\Action\Invoice\DeletePaymentAction;
@@ -328,10 +337,23 @@ final class Routes
         $app->delete ('/api/invoices/{id:[0-9]+}/link-advance',       UnlinkInvoiceAdvanceAction::class);
         $app->post   ('/api/invoices/bulk-reissue',          BulkReissueAction::class);
         $app->post   ('/api/invoices/bulk-reminder',         BulkSendRemindersAction::class);
-        $app->post   ('/api/invoices/{id:[0-9]+}/clone',     CloneInvoiceAction::class);
-        $app->get    ('/api/documents/{entity_type:invoice|work_report}/{id:[0-9]+}/signature-selection', [SignatureDocumentSelectionAction::class, 'get']);
+        $app->post   ('/api/invoices/{id:[0-9]+}/clone',     CloneInvoiceAction::class);        $app->get    ('/api/documents/{entity_type:invoice|work_report}/{id:[0-9]+}/signature-selection', [SignatureDocumentSelectionAction::class, 'get']);
         $app->put    ('/api/documents/{entity_type:invoice|work_report}/{id:[0-9]+}/signature-selection', [SignatureDocumentSelectionAction::class, 'put']);
         $app->delete ('/api/documents/{entity_type:invoice|work_report}/{id:[0-9]+}/signature-selection', [SignatureDocumentSelectionAction::class, 'delete']);
+
+        // Cenové nabídky (quotes) — samostatný typ dokladu, konverze na fakturu/proformu.
+        // Chráněné AuthMiddleware + SupplierScopeMiddleware (globální group); write = RoleMiddleware dle metody.
+        // Literální cesty PŘED {id:[0-9]+}, aby nekolidovaly.
+        $app->get    ('/api/quotes',                          ListQuotesAction::class);
+        $app->get    ('/api/quotes/preview-number',           PreviewQuoteNumberAction::class);
+        $app->post   ('/api/quotes',                          CreateQuoteAction::class);
+        $app->get    ('/api/quotes/{id:[0-9]+}',              GetQuoteAction::class);
+        $app->put    ('/api/quotes/{id:[0-9]+}',              UpdateQuoteAction::class);
+        $app->delete ('/api/quotes/{id:[0-9]+}',              DeleteQuoteAction::class);
+        $app->post   ('/api/quotes/{id:[0-9]+}/clone',        CloneQuoteAction::class);
+        $app->post   ('/api/quotes/{id:[0-9]+}/to-invoice',   ConvertToInvoiceAction::class);
+        $app->post   ('/api/quotes/{id:[0-9]+}/to-proforma',  ConvertToProformaAction::class);
+
 
         // Přijaté faktury (purchase invoices) — fáze 1 integrace forku.
         // Všechny chráněné AuthMiddleware + SupplierScopeMiddleware (skrz globální group).

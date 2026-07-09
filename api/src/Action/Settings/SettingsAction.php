@@ -230,6 +230,8 @@ final class SettingsAction
             'invoice_number_format', 'proforma_number_format', 'credit_note_number_format',
             'purchase_invoice_number_format',
             'invoice_number_period',
+            // Cenové nabídky — samostatné číslování + platnost (migrace 0131)
+            'quote_number_format', 'quote_number_period', 'quote_validity_days',
             // Per-supplier branding emailů (migrace 0016) + PDF logo+název (migrace 0058)
             'email_branding_enabled', 'email_accent_color', 'pdf_logo_show_name',
             // Tax settings pro EPO výkazy (migrace 0038, fáze 6)
@@ -312,7 +314,7 @@ final class SettingsAction
         }
         // Validace per-supplier varsymbol templatů: prázdný string → NULL (= fallback na cfg);
         // jinak max 60 znaků a musí obsahovat alespoň jeden counter placeholder {C+}.
-        foreach (['invoice_number_format', 'proforma_number_format', 'credit_note_number_format', 'purchase_invoice_number_format'] as $f) {
+        foreach (['invoice_number_format', 'proforma_number_format', 'credit_note_number_format', 'purchase_invoice_number_format', 'quote_number_format'] as $f) {
             if (array_key_exists($f, $body)) {
                 $v = trim((string) ($body[$f] ?? ''));
                 if ($v === '') {
@@ -332,6 +334,18 @@ final class SettingsAction
             && !in_array($body['invoice_number_period'], ['year', 'month', 'none'], true)
         ) {
             return Json::error($response, 'validation_failed', "Neplatné invoice_number_period (year|month|none).", 400);
+        }
+        if (array_key_exists('quote_number_period', $body)
+            && !in_array($body['quote_number_period'], ['year', 'month', 'none'], true)
+        ) {
+            return Json::error($response, 'validation_failed', "Neplatné quote_number_period (year|month|none).", 400);
+        }
+        if (array_key_exists('quote_validity_days', $body)) {
+            $days = (int) $body['quote_validity_days'];
+            if ($days < 1 || $days > 365) {
+                return Json::error($response, 'validation_failed', "quote_validity_days musí být 1–365.", 400);
+            }
+            $body['quote_validity_days'] = $days;
         }
         if (array_key_exists('default_payment_due_unit', $body)
             && !in_array($body['default_payment_due_unit'], ['days', 'month'], true)
@@ -496,6 +510,8 @@ final class SettingsAction
         $row['auto_generate_recurring']  = (bool) ($row['auto_generate_recurring'] ?? true);
         $row['default_prices_include_vat'] = (bool) ($row['default_prices_include_vat'] ?? false);
         $row['embed_isdoc']              = (bool) ($row['embed_isdoc'] ?? true);
+        $row['quote_number_period']      = (string) ($row['quote_number_period'] ?? 'year');
+        $row['quote_validity_days']      = (int) ($row['quote_validity_days'] ?? 14);
         $row['email_branding_enabled']   = (bool) ($row['email_branding_enabled'] ?? false);
         $row['email_accent_color']       = (string) ($row['email_accent_color'] ?? '#3B2D83');
         $row['pdf_logo_show_name']       = (bool) ($row['pdf_logo_show_name'] ?? false);

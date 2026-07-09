@@ -55,6 +55,11 @@ export interface Supplier {
   // default '{PP}{YY}{MM}{CCC}'. {PP} = daňový prefix (PF/PN/KU/KN/NU/NN).
   purchase_invoice_number_format: string | null
   invoice_number_period: 'year' | 'month' | 'none'
+  // Cenové nabídky — samostatné číslování + platnost (migrace 0131).
+  // quote_number_format — template 'CN{YYYY}{CCCC}', null = vestavěný default.
+  quote_number_format: string | null
+  quote_number_period: 'year' | 'month' | 'none'
+  quote_validity_days: number
   // Per-supplier email branding (migrace 0016)
   email_branding_enabled: boolean
   email_accent_color: string  // #RRGGBB
