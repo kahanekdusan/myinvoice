@@ -351,4 +351,13 @@ final class SetupAction
 
         return $errors;
     }
+
+    private static function queryScalar(\PDO $pdo, string $sql): mixed
+    {
+        $statement = $pdo->query($sql);
+        if ($statement === false) {
+            throw new \RuntimeException('Setup dotaz se nepodařilo provést.');
+        }
+        return $statement->fetchColumn();
+    }
 }

@@ -117,6 +117,7 @@ use MyInvoice\Action\Invoice\LinkAdvanceAction as LinkInvoiceAdvanceAction;
 use MyInvoice\Action\Invoice\UnlinkAdvanceAction as UnlinkInvoiceAdvanceAction;
 use MyInvoice\Action\Invoice\PdfAction;
 use MyInvoice\Action\Invoice\PublicInvoiceGetAction;
+use MyInvoice\Action\Invoice\PublicInvoiceAttachmentAction;
 use MyInvoice\Action\Invoice\PublicInvoiceHeartbeatAction;
 use MyInvoice\Action\Invoice\PublicInvoicePdfAction;
 use MyInvoice\Action\Invoice\ListPdfsAction;
@@ -471,6 +472,7 @@ final class Routes
         $app->get    ('/api/public/invoice/{token:[a-f0-9]{32,128}}',            PublicInvoiceGetAction::class);
         $app->post   ('/api/public/invoice/{token:[a-f0-9]{32,128}}/heartbeat',  PublicInvoiceHeartbeatAction::class);
         $app->get    ('/api/public/invoice/{token:[a-f0-9]{32,128}}/pdf',        PublicInvoicePdfAction::class);
+        $app->get    ('/api/public/invoice/{token:[a-f0-9]{32,128}}/attachment/{attId:[0-9]+}', PublicInvoiceAttachmentAction::class);
 
         // Dashboard
         $app->get ('/api/dashboard/summary',          SummaryAction::class);

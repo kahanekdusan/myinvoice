@@ -305,8 +305,16 @@ final class Mailer
                 'smtp_debug'    => '',
             ]);
 
-            return $graphResponse;
+            return [
+                'smtp_response' => $graphResponse,
+                'imap_append' => ['status' => 'skipped', 'folder' => null, 'error' => null],
+            ];
         }
+
+        // Obálku vytvoříme před DKIM/S/MIME podpisem. Obsahuje i Bcc příjemce,
+        // jejichž hlavička se při přípravě podepsané zprávy záměrně odstraní.
+        $snapshot = Envelope::create($email);
+        $envelope = new Envelope($snapshot->getSender(), $snapshot->getRecipients());
 
         if ($this->emailSigning !== null) {
             $email = $this->emailSigning->signIfEnabled(
@@ -563,6 +571,127 @@ final class Mailer
         // Ruční EsmtpTransport (smtpTransport) se tak dotkne JEN profilů s vlastním SMTP;
         // instalace, které si SMTP v profilu vědomě nenastaví, mají zaručeně 0 regresí.
         return Transport::fromDsn($this->buildDsn());
+    }
+
+    /** Doména z první adresy From, lowercase; null při chybějící adrese. */
+    private function fromDomain(Email $email): ?string
+    {
+        $from = $email->getFrom();
+        if ($from === []) return null;
+        $address = $from[0]->getAddress();
+        $at = strrpos($address, '@');
+        if ($at === false || $at === strlen($address) - 1) return null;
+        $domain = strtolower(substr($address, $at + 1));
+        return $domain !== '' ? $domain : null;
+    }
+
+    /** @param array<string,mixed>|null $emailProfile */
+    private function imapFailurePolicy(?array $emailProfile): string
+    {
+        return $emailProfile !== null && ($emailProfile['imap_on_failure'] ?? 'log_only') === 'fail_send'
+            ? 'fail_send'
+            : 'log_only';
+    }
+
+    /** @param array<string,mixed>|null $emailProfile */
+    private function keepaliveEnabled(?array $emailProfile): bool
+    {
+        if ($emailProfile !== null && ($emailProfile['transport_type'] ?? 'global') === 'smtp') {
+            return (bool) ($emailProfile['smtp_keepalive'] ?? false);
+        }
+        return (bool) $this->config->get('smtp.keepalive', false);
+    }
+
+    /** @param array<string,mixed> $emailProfile */
+    private function profileTransportCacheKey(array $emailProfile): string
+    {
+        $identity = [
+            'id' => $emailProfile['id'] ?? null,
+            'transport_type' => $emailProfile['transport_type'] ?? 'global',
+            'smtp_host' => $emailProfile['smtp_host'] ?? null,
+            'smtp_port' => $emailProfile['smtp_port'] ?? null,
+            'smtp_encryption' => $emailProfile['smtp_encryption'] ?? null,
+            'smtp_auth_enabled' => $emailProfile['smtp_auth_enabled'] ?? null,
+            'smtp_auth_type' => $emailProfile['smtp_auth_type'] ?? null,
+            'smtp_username' => $emailProfile['smtp_username'] ?? null,
+            'smtp_password' => $emailProfile['smtp_password'] ?? null,
+            'smtp_verify_peer' => $emailProfile['smtp_verify_peer'] ?? null,
+            'smtp_verify_peer_name' => $emailProfile['smtp_verify_peer_name'] ?? null,
+            'smtp_allow_self_signed' => $emailProfile['smtp_allow_self_signed'] ?? null,
+            'smtp_timeout' => $emailProfile['smtp_timeout'] ?? null,
+        ];
+        return hash('sha256', json_encode($identity, JSON_THROW_ON_ERROR));
+    }
+
+    private function rawMessageForImap(?SentMessage $sent, RawMessage $email): string
+    {
+        return $sent !== null ? $sent->toString() : $email->toString();
+    }
+
+    private function sendmailDsn(string $command): string
+    {
+        return $command === '' ? 'sendmail://default' : 'sendmail://default?command=' . rawurlencode($command);
+    }
+
+    /** @return list<object>|null */
+    private function smtpAuthenticators(string $authType): ?array
+    {
+        return match (strtoupper(trim($authType))) {
+            'LOGIN' => [new LoginAuthenticator()],
+            'PLAIN' => [new PlainAuthenticator()],
+            'CRAM-MD5' => [new CramMd5Authenticator()],
+            'XOAUTH2' => [new XOAuth2Authenticator()],
+            default => null,
+        };
+    }
+
+    private function smtpTransport(
+        string $host,
+        int $port,
+        bool $authEnabled,
+        string $authType,
+        string $user,
+        string $pass,
+        string $encryption,
+        bool $verifyPeer,
+        bool $verifyPeerName,
+        bool $allowSelfSigned,
+        int $timeout,
+    ): EsmtpTransport {
+        $tls = match ($encryption) {
+            'ssl' => true,
+            '', 'none' => false,
+            default => null,
+        };
+
+        $transport = new EsmtpTransport(
+            $host,
+            $port,
+            $tls,
+            null,
+            $this->logger,
+            null,
+            $authEnabled ? $this->smtpAuthenticators($authType) : [],
+        );
+        $transport->setAutoTls($encryption !== '' && $encryption !== 'none');
+        $transport->setRequireTls($encryption === 'tls');
+        if ($authEnabled && $user !== '') {
+            $transport->setUsername($user);
+            $transport->setPassword($pass);
+        }
+
+        $stream = $transport->getStream();
+        if ($stream instanceof SocketStream) {
+            $stream->setTimeout(max(1, min(300, $timeout)));
+            $options = $stream->getStreamOptions();
+            if ($encryption !== '' && $encryption !== 'none') {
+                $options['ssl']['verify_peer'] = $verifyPeer;
+                $options['ssl']['verify_peer_name'] = $verifyPeer && $verifyPeerName;
+                $options['ssl']['allow_self_signed'] = $allowSelfSigned;
+            }
+            $stream->setStreamOptions($options);
+        }
+        return $transport;
     }
 
     /**

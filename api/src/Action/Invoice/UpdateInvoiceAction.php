@@ -56,9 +56,14 @@ final class UpdateInvoiceAction
 
         if ($existing['status'] !== 'draft') {
             // Cenová nabídka (proforma + numbering_type=quote) zůstává editovatelná i po vystavení.
-            // Ostatní vystavené doklady může upravit jen admin s explicit ?force=1.
-            if (!$isIssuedQuote && (!$isAdmin || !$isForce)) {
-                return Json::error($response, 'not_editable', 'Vystavenou fakturu nelze editovat.', 409);
+            // Ostatní vystavené doklady smí upravit jen admin s explicitním ?force=1.
+            if (!$isIssuedQuote && !$isForce) {
+                return Json::error($response, 'not_editable',
+                    'Vystavenou fakturu nelze upravit. Administrátor ji může odemknout k editaci přímo v editoru dokladu (tlačítko „Odemknout k editaci").', 409);
+            }
+            if (!$isIssuedQuote && !$isAdmin) {
+                return Json::error($response, 'forbidden',
+                    'Odemknout a upravit vystavenou fakturu smí jen administrátor.', 403);
             }
             // Cancellation/credit_note jsou implicitně chráněné (auditní stopa)
             if (in_array($existing['invoice_type'], ['cancellation'], true)) {

@@ -44,6 +44,15 @@ final class PublicInvoiceAttachmentAction
 
         $ref = $this->repo->publicInvoiceRefByToken($token);
         if ($ref === null) {
+            $legacyInvoice = $this->repo->findByPublicViewToken($token);
+            if ($legacyInvoice !== null) {
+                $ref = [
+                    'id' => (int) $legacyInvoice['id'],
+                    'supplier_id' => (int) $legacyInvoice['supplier_id'],
+                ];
+            }
+        }
+        if ($ref === null) {
             return Json::error($response, 'token_invalid_or_expired',
                 'Tento odkaz není platný nebo byl zneplatněn.', 404);
         }

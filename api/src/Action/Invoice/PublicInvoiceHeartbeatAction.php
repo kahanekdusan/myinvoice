@@ -30,7 +30,8 @@ final class PublicInvoiceHeartbeatAction
             return $this->invalidTokenResponse($response);
         }
 
-        $invoice = $this->repo->findByPublicViewToken($token);
+        $invoice = $this->repo->findByPublicToken($token)
+            ?? $this->repo->findByPublicViewToken($token);
         if ($invoice === null) {
             return $this->invalidTokenResponse($response);
         }
