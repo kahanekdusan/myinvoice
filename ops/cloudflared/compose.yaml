@@ -1,3 +1,5 @@
+name: myinvoice_cloudflared
+
 services:
   tunnel:
     image: cloudflare/cloudflared@sha256:a5b5e6fd9a372f054b9a843c219bfbcdceb54691605312a8b1ee72978bdf1aa1
@@ -5,9 +7,9 @@ services:
     restart: unless-stopped
     command:
       - tunnel
+      - run
       - --token-file
       - /run/secrets/tunnel-token
-      - run
     read_only: true
     cap_drop:
       - ALL
@@ -20,12 +22,8 @@ services:
         read_only: true
     networks:
       - public-gateway
-      - default-bridge
 
 networks:
   public-gateway:
     external: true
     name: public-gateway
-  default-bridge:
-    external: true
-    name: bridge
