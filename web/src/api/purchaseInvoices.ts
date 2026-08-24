@@ -128,6 +128,11 @@ export interface PurchaseInvoice {
   reverse_charge: boolean
   prices_include_vat?: boolean
   is_fixed_asset: boolean
+  /**
+   * Plátcovství dodavatele k datu plnění (snapshot na dokladu, migrace 0133). U legacy
+   * dokladů (snapshot NULL) backend fallbackuje na živý příznak klienta. Řídí nárok na odpočet.
+   */
+  vendor_is_vat_payer: boolean
   /** Nárok na odpočet DPH (full=plný, none=bez nároku → mimo DPH evidenci, proportional=krácený §75). */
   vat_deduction: VatDeduction
   /** Procento odpočtu při vat_deduction='proportional' (§75 poměrný; 0–100, default 100). */
@@ -284,6 +289,8 @@ export interface PurchaseInvoicePayload {
   reverse_charge?: boolean
   prices_include_vat?: boolean
   is_fixed_asset?: boolean
+  /** Snapshot plátcovství dodavatele k datu plnění (migrace 0133). */
+  vendor_is_vat_payer?: boolean
   vat_deduction?: VatDeduction
   vat_deduction_percent?: number
   tax_deductible?: boolean
@@ -335,9 +342,17 @@ export interface PurchaseListFilters {
   needs_review?: boolean
   /** '1' = předané k úhradě, '0' = nepředané (odvozeno z payment_ordered_at). */
   payment_ordered?: '1' | '0'
+  /** Filtr na dávku hromadného AI importu (#232). */
+  import_batch_id?: string
   q?: string
   page?: number
   per_page?: number
+}
+
+export interface ImportBatch {
+  import_batch_id: string
+  created_at: string
+  count: number
 }
 
 export interface PurchaseListMeta {
@@ -387,6 +402,7 @@ export const purchaseInvoicesApi = {
     if (filters.overdue)      params['filter[overdue]']      = 1
     if (filters.needs_review) params['filter[needs_review]'] = 1
     if (filters.payment_ordered) params['filter[payment_ordered]'] = filters.payment_ordered
+    if (filters.import_batch_id) params['filter[import_batch_id]'] = filters.import_batch_id
     if (filters.page)        params.page                   = filters.page
     if (filters.per_page)    params.per_page               = filters.per_page
     return api.get<{ data: PurchaseMonthGroup[]; meta: PurchaseListMeta }>(
@@ -424,6 +440,17 @@ export const purchaseInvoicesApi = {
 
   dismissExtractionWarning: (id: number) =>
     api.post<PurchaseInvoice>(`/purchase-invoices/${id}/dismiss-extraction-warning`).then(r => r.data),
+
+  /** Rychlá změna typu dokladu (#232) — oprava AI klasifikace po importu. */
+  setDocumentKind: (id: number, documentKind: PurchaseDocumentKind) =>
+    api.post<PurchaseInvoice>(`/purchase-invoices/${id}/document-kind`, {
+      document_kind: documentKind,
+    }).then(r => r.data),
+
+  /** Posledních N dávek hromadného AI importu (#232) — pro „dohledat import". */
+  listImportBatches: (limit = 20) =>
+    api.get<{ data: ImportBatch[] }>('/purchase-invoices/import-batches', { params: { limit } })
+      .then(r => r.data.data),
 
   // „Zaplatit pomocí QR" — QR z uloženého účtu (GET), jednorázové lazy doplnění
   // účtu z ISDOC/AI (POST), ruční editace účtu (PUT).

@@ -7,6 +7,292 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.56.1] — 2026-08-20
+
+### Fixed
+
+- **Kontrolní hlášení s dokladem ze třetí země EPO odmítalo.** Přijaté plnění se samovyměřením od dodavatele, který nemá DIČ registrace k DPH v členském státě EU — typicky americká cloudová služba —, se zařazovalo do oddílu A.2, jenže věta A.2 se neobejde bez kódu státu a DIČ dodavatele. XSD u atributu `k_stat` požaduje „kód státu, který přidělil daňové identifikační číslo registrace k DPH dodavatele" s odkazem na tabulku členských států EU; dodavatel bez takové registrace žádné takové číslo nemá, věta odešla s prázdnými atributy a EPO celé podání zamítlo s hláškou, že chybí stát a DIČ. Nově se do A.2 dostane jen dodavatel, u kterého jde platnou větu sestavit, a podání projde. Rozhoduje existence použitelného DIČ registrace k DPH v EU, ne sídlo dodavatele — jinak by stejnou chybou prošel i neplátce se sídlem v EU. Dodavatel ze třetí země odchází z hlášení tiše (je to správný a běžný stav), u dodavatele z EU bez DIČ se ozve varování, protože tam jde skoro vždy o neúplný kontakt, který lze před podáním doplnit. **Přiznání k DPH se nemění**: samovyměřená daň zůstává na ř. 12 a zrcadlový odpočet na ř. 43 ve stejné výši jako dosud, mění se pouze kontrolní hlášení. Kniha DPH nově u takového dokladu tiskne prázdný sloupec KH, shodně se skutečným výstupem. Kontrolní součet `celk_zd_a2` se nově sčítá z reálně odeslaných vět, takže sedí na obsah hlášení; táž oprava se preventivně promítla i do oddílů A.4 a B.2, kde vyřazený řádek mohl zůstat v rekapitulaci.
+
+## [4.56.0] — 2026-08-20
+
+### Added
+
+- **Karetní avíza Raiffeisenbank se importují.** E-mailové avízo o odchozí platbě kartou nemá variabilní symbol ani protiúčet, a proto ho systémový parser Raiffeisenbank dosud odmítl dřív, než se ho vůbec pokusil vytěžit — v přehledu skončilo jako `parse_failed`. Nově se karetní šablona rozpozná vedle převodu: vlastní účet se vezme z pole **Účet**, obchodník z pole **Detaily** a zachová se datum, částka, měna, konstantní symbol i disponibilní zůstatek. Chybějící VS a protiúčet import neblokují a transakce může dál do párování přijatých faktur podle částky, data a názvu obchodníka. Zpracování příchozích i odchozích převodů zůstává beze změny. (#269, díky @blondak)
+
+### Changed
+
+- **Tlačítko Uložit má každá sekce nastavení dodavatele.** Boxy *Dodavatel*, *Číslování faktur*, *Daňové nastavení (EPO)* a *Pohoda XML export* editují jeden a tentýž objekt, ale jediné tlačítko bylo schované na konci posledního z nich — kdo si po instalaci nastavoval číselnou řadu, neměl u ní co kliknout a stránka působila, jako by nešla uložit. Nově má tlačítko každý box, pojmenované podle sekce, u které stojí. Všechna ukládají celou stránku, takže se rozdělaná změna v jiném boxu neztratí; odpovídá to zvyklosti zbytku administrace. (#268, díky @semerak-michal)
+
+### Fixed
+
+- **Nulový přijatý doklad se hlásil jako třístranný obchod.** Každá přijatá faktura se sazbou 0 % — osvobozené plnění, nákup od neplátce, poplatek úřadu — dostávala automaticky kód 30 a mířila na ř. 30 přiznání (pořízení zboží prostřední osobou při třístranném obchodu), protože jediný nákupní kód s nulovou sazbou bez přenesené povinnosti je právě tenhle. Nově nulová sazba žádný kód nevnucuje a o zařazení rozhoduje jediné místo, které zná zemi dodavatele. Migrace uklidí historicky přiřazené kódy 30 u firem, které protějšek (ř. 31) nikdy nepoužily.
+- **Poplatky orgánů veřejné moci se nesamovyměřovaly.** Soudní a správní poplatky, kolky nebo evropský platební rozkaz zůstávají bez klasifikace i tehdy, když je vyměřil zahraniční soud: orgán při výkonu veřejné správy není osobou povinnou k dani (§ 5 odst. 4 ZDPH), takže se na něj nevztahuje samovyměření dle § 9 odst. 1. Detail dokladu to nově řekne upozorněním.
+- **Tuzemský doklad v přenesené povinnosti končil na řádku pro EU.** Založení i úprava přijaté faktury dosazovaly kód způsobem, který zemi dodavatele nezná, takže tuzemský doklad podle § 92e (stavební práce, odpad) skončil na ř. 5 a v kontrolním hlášení v oddílu A.2 místo správného ř. 10 a oddílu B.1 — a protože kód už dosazený byl, správné zařazení se k němu nedostalo. Nově kód odvozují řádky dokladu a hlavička ho přebírá od nich. Doplnila se i dvě chybějící kombinace: dodavatel ze třetí země s přenesenou povinností a tuzemský doklad § 92a s nulovou sazbou.
+- **Nulová sazba na vystavené faktuře se hlásila jako osvobozené plnění.** Řádek s nulovou sazbou automaticky mířil na ř. 50 (osvobozená plnění bez nároku na odpočet), přestože stejně často jde o přeúčtování nákladů, náhradu škody nebo smluvní pokutu — a ř. 50 tím nafukoval jmenovatel koeficientu § 76, čímž snižoval krácený odpočet. Osvobození si nově uživatel označí sám a nezařazený nulový řádek pojmenuje upozornění v přiznání. Přibyla i chybějící větev tuzemského § 92a (ř. 25 + kontrolní hlášení A.1) a prahy sazeb se berou z číselníku, ne natvrdo z 21 %.
+- **Cizí sazba DPH se počítala jako česká.** Import přijatých faktur z Fakturoidu a iDokladu si u nenalezené sazby dosadil tuzemských 21 %, takže z německých 19 % vznikl český odpočet; nově je to chyba dokladu se srozumitelnou hláškou v protokolu dávky. Stejně tak se za základní sazbu už neprohlásí všechno nad prahem mezi pásmy — rozhoduje základní sazba z číselníku a snížená větev jen české 5–15 %. AI extrakce z nenamapované sazby udělala nulu, z ní odvodila přenesenou povinnost a samovyměřila daň z faktury, která cizí daň už obsahuje; nově je taková sazba důvod přenesenou povinnost nespustit a doklad dostane varování.
+- **Kontrolní hlášení slévalo režimy § 92 do jedné věty.** Oddíly A.1 a B.1 se sčítaly za celý doklad a kód předmětu plnění přepsala poslední neprázdná hodnota, ačkoliv XSD očekává větu pro každý kód. Nově se základ (A.1) i základ s daní po sazbách (B.1) sčítají zvlášť podle kódu a emituje se věta pro každý z nich.
+- **Vystavené plnění do EU bez ručního kódu se vykazuje jednotně.** Doklad s přenesenou povinností pro odběratele z jiného členského státu se podle toho, kudy do výkazu vstoupil, hlásil jednou jako dodání zboží (ř. 20) a jednou jako poskytnutí služby (ř. 21). Zboží od služby pozná jen měrná jednotka položky, takže obě cesty nově drží týž statistický výchozí předpoklad — službu. Dodání zboží do jiného členského státu si uživatel označí kódem ručně.
+- **Cizoměnová faktura zaplacená v korunách zůstávala částečně uhrazená.** Párování správně tolerovalo rozdíl mezi kurzem dokladu a kurzem banky, ale po úspěšném spárování znovu vydělilo skutečnou korunovou částku kurzem faktury — z platby 24 300 Kč za fakturu na 1 000 EUR s kurzem 24,50 tak vzniklo 991,84 EUR a doklad se tvářil jako nedoplacený, přestože párování tutéž transakci vyhodnotilo jako úplnou platbu. Nově se u úplné úhrady v toleranci zaeviduje celý zbývající obnos v měně faktury; skutečná korunová částka zůstává beze změny na bankovní transakci a kurz ani částka dokladu se nemění. Výrazně nižší platba je nadále částečnou úhradou přepočtenou kurzem faktury a párování ve stejné měně se nemění. Platí pro automatické i ruční párování. (#270, díky @blondak)
+
+## [4.55.0] — 2026-08-19
+
+### Added
+
+- **Přechod na MyÚčto jedním tlačítkem (Systém → Přechod na MyÚčto).** MyÚčto.cz je nástupce MyInvoice od téhož autora, postavený na stejném základu, a jeho migrace číslované 1000+ navazují na schéma MyInvoice. Přechod je proto **in-place**: vymění se kód a nad stávající databází se dojedou zbylé migrace. Data se nikam nekopírují a druhá databáze se nezakládá. Stránka nejdřív vysvětlí, co MyÚčto je a co zůstává zdarma, vyžádá si vědomé potvrzení zálohy — tohle je jediná operace v aplikaci, kterou nelze vzít zpět jinak než obnovou dumpu — a teprve pak pustí přechod na pozadí s průběhem po krocích. V Dockeru přechod provádí host, protože kontejner nemůže přepsat vlastní image; aplikace pro něj vypíše přesné příkazy.
+- **Kontrola prostředí před přechodem.** Preflight dosud ověřoval jen to, jestli update *proběhne* (zlib, práva, místo na disku), ne jestli výsledek *poběží*. U nástupce s vyššími nároky je to rozdíl mezi „nespustí se" a „skončí půl na půl": soubory by se vyměnily, migrace spadly a instalace zůstala s novým kódem nad starým schématem. Stránka teď ukazuje checklist s naměřenými hodnotami — verze PHP, sada rozšíření, verze MariaDB, PHP CLI, práva zápisu, volné místo — a to i když všechno sedí. Před nevratnou operací je „co se ověřilo a s jakou hodnotou" ta informace, podle které se člověk rozhoduje.
+- **`cmd/docker-upgrade-to-myucto.ps1`** — PowerShell varianta přechodového skriptu pro Windows hosty bez bashe. Dělá totéž a ve stejném pořadí jako `.sh`.
+
+### Changed
+
+- **Účetnictví se po přechodu vypne.** MyÚčto zavádí přepínač „Vést účetnictví" s defaultem zapnuto, což je správně pro firmu, která v MyÚčtu účtuje, ale ne pro instalaci, která právě přišla z MyInvoice a účetnictví nikdy nevedla. Ta by dostala plné účetní menu a k tomu režim „daňová evidence", tedy default sloupce — u s.r.o. rovnou špatně, protože ta vede podvojné účetnictví ze zákona. Přechod agendu skryje a volbu (vést/nevést a v jakém režimu) nechá na vědomém rozhodnutí. Platí pro nativní i Docker cestu.
+- **Přechod si zjistí nejnovější verzi MyÚčta až při spuštění.** Dosud četl z cache, která se plní ruční kontrolou a jednou za den — instalace, která se dívala včera, tak nasadila včerejší verzi a o novější se dozvěděla až po nevratné operaci. Když se ověření nepovede, jede se dál z cache, ale řekne se to.
+- **Docker: `mariadb:11.8` místo plovoucího `mariadb:11`** a `max_allowed_packet` 64 MB. MyÚčto vyžaduje MariaDB 11.8 a výš; plovoucí tag dnes vede na 11.8, ale instalace založená loni běží klidně na 11.4 a `docker compose up` na už stažený image nesáhne. Default `max_allowed_packet` 16 MB navíc neunese dump databáze ani přílohu do 50 MB — kontrola prostředí to hlásila jako nález.
+
+### Fixed
+
+- **Okno výměny souborů a migrací odpovídá 503, ne fatálem.** Aktualizace vyměňuje přes deset tisíc souborů in-place nad běžící instalací a hned poté posouvá schéma. Celé to okno trvá jednotky minut a instalace je po tu dobu vnitřně nekonzistentní — nový kód odkazuje na třídu, jejíž soubor ještě nedorazil, nebo se ptá na tabulku, kterou založí až migrace. Každý request, který do toho okna spadl, končil hláškou „Backend selhal při startu". Nově se před výměnou zakládá značka údržby a requesty dostanou 503 „probíhá aktualizace"; značka expiruje, aby spadlý worker nedržel instalaci dole navěky, a maže se i po neúspěchu, takže 503 nepřežije rollback.
+- **Stránka přechodu pozná, že pod ní aplikace zmizela.** Průběh se čte pollingem, jenže od výměny souborů se není koho ptát: nejdřív brána údržby vrací 503 a pak zmizí i celá routa, protože nástupce ji nemá. Stránka proto zůstávala viset na posledním kroku („krok 5 z 9") a vypadalo to jako zásek, přestože přechod v pořádku doběhl. Nově se obě fáze pojmenují a po dokončení nabídne stránka přechod do MyÚčta — na přehled, ne reloadem adresy, kterou už nástupce nemá.
+- **Migrace 1137 neshodí přechod z MyInvoice.** `ALTER TABLE supplier MODIFY COLUMN data_box_type` nemá variantu `IF EXISTS`, jenže MyInvoice ten sloupec zahodil vlastní migrací 0140. Na instalaci přicházející z MyInvoice migrace spadla na chybu 1054 a upgrade se zastavil uprostřed. (Opraveno na straně MyÚčta, vydáno v 5.16.0.)
+- **Health check přechodu nezávisí na překladu cest.** Na Windows v Git Bash končil `curl -o /dev/null` chybou zápisu, i když server odpověděl 200 — skript pak po pěti minutách ohlásil, že aplikace nenaběhla, a nedošel na krok, který vypíná účetnictví.
+
+## [4.54.0] — 2026-08-14
+
+### Changed
+
+- **Odkaz na MyÚčto v patičce nově nejdřív vysvětlí, o co jde.** Tlačítko *MyÚčto — přejděte na novější systém* dosud odesílalo rovnou na cizí web, aniž by kdekoliv zaznělo, co MyÚčto je a proč by k němu měl uživatel jít. Nově se otevře okno, které řekne, že MyÚčto je přímý nástupce MyInvoice od stejného autora s přibližně trojnásobkem funkcí — a hlavně že **všechno, co je zdarma v MyInvoice, zůstává zdarma i tam**. Vypíše, v čem je MyÚčto dál (modernější rozhraní, více AI poskytovatelů na výběr, AI integrace přes MCP server, úplnější dokumentace, lépe ověřené DPH, kontrolní i souhrnné hlášení) i co je za volitelný poplatek navíc (podvojné účetnictví, sklady, e-shop; mzdy se připravují). Teprve z tohoto okna vedou odkazy na GitHub a MyÚčto.cz. Česky i anglicky.
+
+### Removed
+
+- **Odkaz „Chcete jinou funkci?" z patičky zmizel.** Okno s nabídkou zakázkového vývoje od MyWebdesign.cz se z aplikace odstranilo včetně odkazu v patičce — poptávky vyřizuje web studia. V patičce tak zůstává *Podpořte autora* a odkaz na MyÚčto.
+
+## [4.53.3] — 2026-08-13
+
+### Fixed
+
+- **Účetní nemohl spravovat pravidelnou fakturaci.** Uživatel s rolí *účetní* si šablonu pravidelné faktury otevřel i vyplnil, ale uložení skončilo hláškou o chybějícím oprávnění — a stejně dopadlo pozastavení, obnovení, smazání i ruční spuštění. Server totiž u pravidelné fakturace povoloval účetnímu jen čtení, přestože aplikace i manuál tuhle agendu účetnímu přiznávají. Nově s ní účetní pracuje v plném rozsahu, práva správce ani role *jen pro čtení* se nemění. (#263, díky @blondak)
+- **Přílohy přijatých faktur se z Fakturoidu nikdy nestáhly.** Import s volbou „stahovat přílohy" u přijatých faktur (výdajů) doklad založil, ale originální PDF od dodavatele k němu nepřiložil. Chyba byla navíc tichá — import skončil bez jediné chyby v protokolu, takže to vypadalo, že přílohy prostě nejsou. MyInvoice hledal přílohu na místě, které Fakturoid ve své odpovědi neposílá; nově ji bere ze správného seznamu příloh včetně původního názvu souboru. Přijaté faktury z Fakturoidu tak dorazí i s dokladem, stejně jako u iDokladu. (#261, díky @judzi)
+- **Účetní nemohl spustit import dokladů.** Nahrání dávky Pohoda XML / ISDOC / PDF, sken složky s přijatými fakturami, spuštění importu z iDokladu nebo Fakturoidu i zrušení běžícího importu — všechno účetnímu skončilo na chybějícím oprávnění, ačkoliv manuál import účetnímu slibuje. Import je práce s daty, ne konfigurace, takže ho účetní nově spouští i řídí a v menu na něj má odkaz (*Prodej → Import vystavených*, *Nákup → Import přijatých*). Nastavení integrací, tedy API klíče k iDokladu, Fakturoidu a AI, zůstává vyhrazené správci; role *jen pro čtení* k importům nemá přístup dál.
+
+### Security
+
+- **Přílohy z Fakturoidu se stahují jen z adres Fakturoidu.** Odkaz na přílohu bere MyInvoice z odpovědi Fakturoid API a stahuje ho s přihlašovacím údajem účtu. Kdyby taková adresa mířila jinam, odešel by přístupový token na cizí server. Nově se stahuje výhradně přes zabezpečené spojení a jen z domény `fakturoid.cz`; cokoliv jiného se odmítne a zapíše do protokolu.
+
+## [4.53.2] — 2026-08-05
+
+### Fixed
+
+- **Vystavený doklad nešlo odemknout k editaci.** Dialog „Odemknout doklad k editaci" ukázal varování i potvrzovací zaškrtávátko, ale obě tlačítka pod ním chyběla — zaškrtnutí tedy nevedlo nikam a jediným východiskem bylo zavřít okno křížkem, čímž se rozdělaný stav zahodil. Příčina byla ve sdílené komponentě modálních oken: vykreslovala jen tělo dialogu a patičku s akčními tlačítky tiše zahazovala. Patička se nově vykreslí vždy, když ji dialog nabízí — mimo scrollovanou oblast, s odděleným pruhem a tlačítky vpravo. Ostatní dialogy v aplikaci vypadají stejně jako dosud. (#260)
+- **Jméno a příjmení klienta se nedalo zadat ani nikde nebylo vidět.** Databáze i API tato pole vedou dlouho (používá je export do Stereo, veřejný náhled dokladu i snapshot na faktuře), ve formuláři klienta ale chyběla — u fyzické osoby nebo kontaktní osoby firmy tak nebylo kam je vyplnit a u naimportovaných klientů se hodnota nedala ani zkontrolovat. Formulář klienta má nově dvojici polí **Jméno** a **Příjmení** hned pod názvem firmy a v detailu klienta se jméno zobrazuje pod hlavičkou. Beze změny dat i API — jde čistě o zpřístupnění existujících polí v UI.
+
+## [4.53.1] — 2026-08-01
+
+### Fixed
+
+- **Úvodní průvodce uměl zamknout admina na obrazovce, ze které se nedalo pokračovat.** V kroku „vyžadovat silné MFA" se daly zaškrtnout povolené metody; odškrtnutí přístupového klíče zapsalo do konfigurace `auth.allowed_mfa_methods = ['totp']`, ale stránka pro dokončení MFA nabídla přesto i registraci klíče — ta pak skončila hláškou „Registrace passkey není v této instalaci povolená" a jedinou cestou dál bylo odhlášení. Výběr metod z průvodce zmizel: po instalaci jsou povolené obě, zúžení zůstává vědomým zásahem do `cfg.php` (`auth.allowed_mfa_methods`) nebo do ENV. Stránka `/setup-mfa` navíc povolené metody bere výhradně ze serveru, takže nikdy nenabídne postup, který API vzápětí odmítne, a když není povolená žádná použitelná metoda, řekne to místo zobrazení nefunkčního formuláře. Průvodce už také nezapisuje seznam metod do `cfg.local.php`, pokud si ho instalace vysloveně nevyžádá — čerstvá instalace tím nedostane skrytý per-instance override.
+- **Ukázková data se při povinném MFA nevygenerovala.** Zaškrtnutí „vygenerovat ukázková data" v průvodci nemělo žádný efekt, pokud se zároveň zapnulo vyžadování silného MFA: session vzniklá setupem smí do dokončení MFA jen přesně vyjmenované endpointy a generátor ukázkových dat mezi nimi chyběl. Průvodce dostal `403` a chybu ukázal jen nenápadně na závěrečné obrazovce, takže to vypadalo, že se data prostě nevytvořila. Endpoint je nově součástí povoleného seznamu; vlastní kontroly zůstávají beze změny — pustí ho jen admin a jen do systému, ve kterém ještě nejsou žádná data.
+- **Nezobrazený dialog pro přístupový klíč vypadal jako zatuhlá aplikace.** Systémové okno se umí otevřít za oknem prohlížeče, na druhém monitoru, nebo si volání převezme správce hesel a jeho okno se nevykreslí. Tlačítko v tu chvíli zůstalo neaktivní až do vypršení ceremonie (~2 minuty) a interní zrušení čekající požadavek neukončilo, jen ho označilo za zastaralý — kdo čekal, čekal dál. Zrušení je nově okamžité a po pár sekundách marného čekání se ukáže panel **Čekám na potvrzení bezpečnostního dialogu** s nápovědou, kde dialog hledat (a zvlášť pojmenovaným případem, kdy WebAuthn obsluhuje rozšíření prohlížeče), a s tlačítkem *Zrušit čekání*. Vysvětlující hlášku po vypršení ceremonie nově ukazují všechna místa s přístupovými klíči — přihlášení, odemčení zámku, správa klíčů i vydání API tokenu — ne jen přihlašovací obrazovka.
+
+## [4.53.0] — 2026-07-30
+
+### Added
+
+- **Nativní instalace se aktualizují přímo z aplikace.** Dosud uměl *Systém → Aktualizace* povýšit jen Docker; u nativní instalace tlačítko vypsalo příkazy k ručnímu zkopírování. Nově proběhne upgrade stejně jako v Dockeru: aplikace si stáhne z GitHubu release balíček `myinvoice-X.Y.Z.tar.gz`, ověří jeho SHA-256, nasadí ho přes instalaci a spustí migrace. **Composer ani Node na serveru mít nemusíš** — balíček, který se staví v CI, už obsahuje `vendor`, sestavený frontend i manuál. Průběh se ukazuje krok za krokem (příprava → stažení → ověření → rozbalení → záloha → výměna → migrace) a dlouhý běh nepřeruší vypršení platnosti, protože worker průběžně hlásí, že žije.
+- **Aktualizace nesahá na tvoje data a umí se vrátit zpět.** Výměna souborů přeskakuje `cfg*.php`, `.env`, `storage/`, `private/`, `log/`, `tmp/` a `.git/`, nic nemaže a každý přepisovaný soubor odkládá do `storage/updates/<verze>/backup/`. Když výměna selže, obnoví se ze zálohy; při selhání migrace se rollback záměrně nespouští (schéma už může být změněné) a aktualizace skončí jako neúspěšná s odkazem na log. Stahuje se jen přes HTTPS a jen z domén GitHubu, `VERSION` se přepisuje až jako poslední krok — přerušený upgrade se tedy netváří jako dokončený. Kontrola prostředí předem ověří práva, místo na disku, PHP CLI a `zlib`; když prostředí aktualizaci neumožní, UI nabídne ruční postup se stejným balíčkem.
+
+### Fixed
+
+- **Nativní aktualizace na Windows spadla na souboru, který sama drží.** Výměna přepisuje celý balíček přes instalaci, tedy i `api/bin/native-update.php` — skript, který v tu chvíli běží. Windows na spuštěném PHP skriptu drží zámek, takže přejmenování i kopírování selžou, ale smazání projde a jméno zůstane blokované do konce procesu: aktualizační worker si tak sám smazal soubor, nový na jeho místo nezapsal a po doběhnutí z instalace zmizel. Rollback ho nevrátil, protože se cesta do seznamu přepsaných souborů zapisovala až po úspěšném přepisu. Nově se zamčený soubor nejdřív uhne stranou (přejmenovat otevřený soubor Windows dovolí), nová verze se přesune na uvolněné jméno a odložená kopie se maže hned, případně na konci; do seznamu pro rollback se cesta zapisuje ještě před přepisem, takže se obnoví i soubor přepsaný jen napůl. Chybějícího workera navíc aplikace pozná před spuštěním a rovnou nabídne ruční návod, místo aby čekala na hlášení, které nikdy nepřijde.
+- **Po dokončení upgradu visela hláška „Upgrade zařazen do fronty".** Panel se držel odpovědi na spuštění, kterou nic neuklízelo — když worker doběhl, pod ním naskočil výsledek, ale oznámení o zařazení do fronty zůstalo nad ním, dokud uživatel stránku nenačetl znovu. Vypadalo to, že aktualizace pořád běží. Hláška se nově zahodí ve chvíli, kdy je běh hotový a je k dispozici jeho výsledek. Zároveň se opravilo vykreslování poznámek k vydání: víceřádková odrážka se lámala na nový odstavec, takže text vypadl z odsazení a odrážka zmizela.
+- **Zálohy nesly práva systému, na kterém vznikly.** PHP razí do ZIPu unixový mód podle zdrojového souboru, takže se do archivu propsala práva instalace — doklady zapsané php-fpm mají typicky `0600` a `unzip` je při obnově takhle i vytvoří. Rozbalená záloha pak byla nečitelná pro kohokoliv jiného a obnova končila ručním `chmod`/`chown` přes celý strom; navíc záloha z Windows a z Linuxu nebyla zaměnitelná. Každá položka archivu nově dostává pevné `0644` (adresář `0755`) bez ohledu na to, kde a pod kým vznikla. Platí pro všechny zálohy s uživatelskými daty — PDF a přílohy, dokumenty a přílohy deníku i SQL dump. Obsah, šifrování ani tvar cest se nemění, **staré zálohy tedy zůstávají čitelné** a nové se obnovují stejným postupem.
+- **Skripty v `cmd/` nešlo spustit podle dokumentace.** Devět skriptů bylo v gitu vedeno jako nespustitelné, přestože je `cmd/README.md` volá přímo cestou — čtyři z dokumentovaného crontabu a `docker-update-watcher.sh` z hotové systemd unity. Kdo se řídil README, dostal z cronu `Permission denied` a ze systemd `status=203/EXEC` v restart smyčce. Všechny `.sh` v repozitáři mají nově spustitelný bit. (#251)
+- **Watcher aktualizací nepoznal běžící produkční stack.** Detekce hledala ve výpisu `docker compose ps` slovo `running`, jenže novější Compose tiskne ve sloupci STATUS docker-style `Up 2 weeks` — kontrola tiše přestala platit a watcher vždy sáhl po výchozím compose souboru. Nově se ptáme rovnou na ID kontejneru, což na formátu výpisu nezávisí. Opraveno v shellové i PowerShell variantě. (#251)
+
+## [4.52.2] — 2026-07-29
+
+### Changed
+
+- **V patičce aplikace je nově výrazný odkaz na MyÚčto.cz.** Za odkazem „Chcete jinou funkci?" přibylo zvýrazněné tlačítko **„MyÚčto — přejděte na kompletní účetní systém"** vedoucí na [myucto.cz](https://myucto.cz/). Těžiště vývoje se přesunulo do sesterského projektu MyÚčto, kde veškerá funkcionalita MyInvoice zůstává zdarma a komerční je jen účetní nadstavba (podvojné účetnictví, majetek, sklad, EPO podání) — odkaz na to upozorňuje přímo v aplikaci, ne jen v README. Čistě vizuální doplněk, žádná změna chování ani dat.
+
+## [4.52.1] — 2026-07-28
+
+### Fixed
+
+- **Sestavení v4.52.0 neprošlo v CI kvůli testovací fixture.** Integrační test přístupu k firmám (`SupplierMembershipTest`) zakládal uživatele s doslovným bcrypt řetězcem o 61 znacích, přestože `users.password_hash` je `CHAR(60)`. Lokální MariaDB běží bez STRICT režimu a přebytečný znak tiše uřízne, CI ho má zapnutý — a tam se stejný zápis změní v `SQLSTATE[22001] 1406 Data too long`, takže celá třída (10 testů) skončila chybou. Fixture nově hash generuje přes `password_hash(..., PASSWORD_BCRYPT)`, čímž má vždy přesně 60 znaků; heslo v testu stejně nikdo nepoužívá, session i tokeny se vytvářejí přímo. **Běhového kódu se oprava netýká** — chování aplikace je shodné s v4.52.0, upgrade je čistě formální a nevyžaduje žádnou akci. (#246)
+
+## [4.52.0] — 2026-07-28
+
+### Added
+
+- **Omezení uživatele na vybrané firmy.** V *Systém → Uživatelé* je u každého účtu nová sekce **Přístup k firmám** — zaškrtnutím dodavatelů omezíš, co uživatel v instalaci vidí. Typický případ: externí účetní nebo auditor má vidět jen jednu z firem, které v aplikaci vedeš. Dokud správce nikomu nic nezaškrtne, chová se aplikace přesně jako dosud — prázdný výběr znamená přístup ke všem firmám, takže se stávajících instalací upgrade nedotkne. Role `admin` je z omezení vyjmutá vždy, instalaci proto nelze „vyzamknout". (#246)
+- **Role pro konkrétní firmu.** U každé přiřazené firmy lze zvolit roli, která pro ni přebije globální roli uživatele — globální *accountant* tak může být v jedné z firem jen *readonly*. Prázdná volba dědí globální roli. Per-firmu roli `admin` zvolit nelze: admin práva jsou celoinstanční (endpointy `/api/admin/*` nejsou vázané na firmu), takže by šlo o cestu k eskalaci na správce celé instalace. (#246)
+- **Omezení hlídá server, ne jen UI.** Požadavek na doklad či seznam pod nepovolenou firmou vrací `403` (`forbidden_supplier`), detail nepovolené firmy `404` (neprozrazuje, že existuje), přepínač firem i veřejné `GET /api/v1/suppliers` nabízejí jen povolené firmy a **API token** vázaný na nepovolenou firmu se nevytvoří ani nefunguje. Bez hlavičky `X-Supplier-Id` aplikace vybere první **přiřazenou** firmu, ne první v databázi. Když správce firmu uživateli odebere, aplikace si stale výběr sama zahodí a přepne se na povolenou — bez odhlášení. (#246)
+
+### Upgrade
+
+- **Migrace `0148` je čistě aditivní** — zakládá tabulku `user_suppliers` a žádnou existující nemění. Po nasazení se nic nezmění, dokud správce vědomě někomu přístup neomezí. Schéma je záměrně shodné se sesterským projektem MyÚčto.cz, aby byly databáze mezi sebou kompatibilní.
+
+## [4.51.0] — 2026-07-26
+
+### Added
+
+- **Přístupové klíče (passkeys) jako druhý faktor.** Účet si v *Profil → Přístupové klíče* může zaregistrovat libovolný počet klíčů — otisk prstu, obličej, zámek zařízení nebo hardwarový klíč. Registrace prvního klíče se ověřuje aktuálním heslem, dalších už existujícím silným faktorem. Kde klíč fyzicky leží, rozhoduje prohlížeč: buď je vázaný na zařízení (Windows Hello, Touch ID), nebo ho synchronizuje správce hesel či cloud účtu — první případ znamená, že se ztrátou zařízení mizí i faktor, proto si u jediného zařízením vázaného klíče drž zálohu v podobě druhého klíče nebo TOTP. Ověření uživatele na zařízení je povinné, ceremonie jsou jednorázové a systém hlídá anomálie čítače podpisů. Funkce je čistě opt-in: kdo si klíč nezaregistruje, nepozná změnu. (#239)
+- **Volitelné přihlášení bez hesla.** Po zapnutí `auth.passwordless_login.enabled` nabídne přihlašovací stránka tlačítko *Přihlásit přístupovým klíčem* — bez zadávání e-mailu a hesla. Vyžaduje HTTPS a platnou `app.url`, protože z ní vychází WebAuthn origin. Výchozí stav je vypnuto. (#239)
+- **Obecná politika vícefaktorového ověření.** `auth.require_mfa` a `auth.allowed_mfa_methods` nahrazují dosavadní TOTP-only `auth.require_totp`, které zůstává funkční jako legacy varianta. Seznam povolených metod řídí, co **splní** povinné MFA — nikdy nezpůsobí, že by se přeskočil faktor, který uživatel reálně má: kdo má zapnuté TOTP, zadává ho i po zúžení seznamu na `['passkey']`, jen ho systém pošle zaregistrovat povolenou metodu. Neznámá hodnota v seznamu (třeba `email_otp`, které se nastavuje zvlášť) start aplikace neshodí, jen se objeví health warning. (#239)
+- **Zámek aplikace.** Po nastavené době nečinnosti se session zamkne a business API ji odmítne i tehdy, když někdo odstraní překryv v prohlížeči. Odemyká se **výhradně přístupovým klíčem** a odemčení rotuje session ID i CSRF token, aniž by prodloužilo absolutní platnost přihlášení. Správce nastavuje výchozí a maximální interval přes `session.lock_after_minutes` (0 = nevynucuje), uživatel si v profilu může zvolit vlastní, kratší. Účet bez použitelné passkey si vlastní interval nastavit nemůže — zamčenou session by nešlo odemknout. (#239)
+- **Účelové potvrzení citlivých operací.** Vydání API tokenu i správa přístupových klíčů vyžadují čerstvé ověření silným faktorem (passkey nebo TOTP); proof je jednorázový a vázaný na konkrétní operaci i session. (#239)
+
+### Changed
+
+- **`reset-2fa.php` se jmenuje `reset-mfa.php`** a resetuje všechny faktory — vypne TOTP, odvolá přístupové klíče, zruší důvěryhodná zařízení, čekající e-mailové kódy i rozpracovaná ověřovací flow a invaliduje všechny session. Původní název zůstává funkčním aliasem. (#239)
+- **Session jsou autoritativně v MariaDB, `session.driver` se ignoruje.** Redis dál slouží pro rate limiting, brute-force ochranu a cache; jeho výpadek ale nesmí obnovit odvolanou, nahrazenou ani zamčenou session. Klíč `session.driver` můžeš z `cfg.php` bez náhrady smazat. (#239)
+- **CSP povoluje rámce rozšíření prohlížeče** (`frame-src ... chrome-extension: moz-extension:`). Správci hesel vykreslují výběr přístupového klíče jako iframe na vlastní URL; bez toho se okno nevykreslí a přihlášení klíčem se zasekne. Rozšíření má ke stránce přístup tak jako tak, takže se tím nic neotevírá. (#239)
+- **CI konečně pouští integrační testy.** Backend job má nově MariaDB i Redis, takže z 1848 testů jich reálně běží 1738 místo zhruba 1416 — včetně testů atomicity session, které dosud neběžely nikde. (#239)
+
+### Upgrade
+
+- **Instalace s povinným MFA odhlásí všechny přihlášené.** Migrace označí existující session jako `legacy`, protože z pouhé existence TOTP nelze odvodit, že konkrétní session druhý faktor skutečně ověřila. Kde je MFA povinné, musí se každý jednou znovu přihlásit; přihlašovací endpointy starou cookie ignorují, takže stačí normální login. Instalace bez povinného MFA se změna netýká. (#239)
+- **Migrace `0145` přestavuje tabulku `sessions`** (dvanáct sloupců, backfill, tři indexy) a po dobu jejího běhu je tabulka zamčená. Naměřeno ~16 s na 300 000 session; u běžných instalací s jednotkami až stovkami řádků je to pod sekundu. Vyplatí se před upgradem spustit `php api/bin/cron-cleanup.php`. Po migraci **neexistuje rollback jen přes kód** — nové sloupce jsou `NOT NULL` bez defaultu a starší verze je neplní, takže návrat vyžaduje i obnovu databáze ze zálohy. (#239)
+
+## [4.50.1] — 2026-07-24
+
+### Fixed
+
+- **Souhrnné hlášení (DPHSHV) chybně rozdělovalo jméno fyzické osoby a nerozdělovalo adresu.** Oprava rozdělení jména z issue #200 (odstranění akademických titulů) se aplikovala jen na přiznání k DPH a kontrolní hlášení — souhrnné hlášení si `VetaP` sestavovalo vlastní starou logikou, která zůstala neopravená. U OSVČ `MUDr. Josef Novák` tak vzniklo `jmeno="MUDr."`, `prijmeni="Josef Novák"` místo správného `jmeno="Josef"`, `prijmeni="Novák"`. Ze stejného důvodu se celá adresa psala do atributu `ulice` (`ulice="Nová 158"`) místo rozdělení na `ulice="Nová"` a `c_pop="158"`. Souhrnné hlášení nově sestavuje `VetaP` stejným sdíleným helperem jako přiznání a kontrolní hlášení (odstranění vedoucích i koncových titulů, přednost strukturovaných polí jméno/příjmení, rozdělení adresy na ulici a čísla popisné/orientační). Kontaktní atributy `email`/`c_telef`, které DPHSHV na rozdíl od DPH/KH nezná, se do souhrnného hlášení záměrně nevkládají, aby ho EPO neodmítlo. Jde čistě o generátor XML — stačí nasadit a hlášení znovu vyexportovat. (#200)
+
+## [4.50.0] — 2026-07-24
+
+### Fixed
+
+- **Souhrnné hlášení (DPHSHV) generovalo XML, které EPO odmítlo.** Portál MOJE daně vracel na vygenerovaném souhrnném hlášení tři různé chyby a hlášení nešlo podat. (1) Atribut `shvies_forma` se plnil hodnotou „B" (řádné), jenže DPHSHV zná jen `[RN]` — „R" pro řádné, „N" pro následné (opravné) hlášení; „B" bylo omylem převzaté z kontrolního hlášení, kde platí. Nově se vyplňuje „R". (2) Každý řádek `VetaR` nesl `k_storno="N"`, EPO ale u řádného hlášení kód storna zakazuje („Pro řádné souhrnné hlášení nesmí být vyplněn kód storna") — atribut je vyhrazený pro storno řádky následného hlášení, takže se v řádném vynechává úplně. (3) Do `c_vat` se psalo DIČ včetně kódu země (`SK2020122753`), přestože kód země patří samostatně do `k_stat` a `c_vat` má být bez prefixu (`2020122753`) — jinak EPO hlásilo „DIČ pořizovatele může být nesprávné". DIČ se nově normalizuje sdílenou logikou z kontrolního hlášení: strhne se **jen** prefix odpovídající kódu země (ISO i DPH variantě — Řecko má ISO „GR", ale DPH kód „EL"), nikdy ne libovolná první dvě písmena, aby se nepoškodila alfanumerická vnitrostátní část (např. francouzské „FRAB123456789" → „AB123456789"). Jde čistě o generátor XML — stačí nasadit a hlášení znovu vyexportovat. (#238)
+- **Cizoměnná faktura mohla vstoupit do daňových výkazů s kurzem 1, tedy jako by šlo o koruny.** Import vydaných faktur z Fakturoidu (i z iDokladu) přenášel měnu, ale nepřenášel do faktury měnový kurz — na rozdíl od přijatých faktur, kde se kurz dotahoval. Faktura se základem 23,60 EUR pak do souhrnného hlášení i přiznání k DPH vstoupila jako 23,60 Kč (a do XML jako 24 Kč) místo správných 573,13 Kč. Příčinou byla kombinace: import kurz nezaložil a sdílený producent daňových řádků (`VatLedgerService`, ze kterého čerpá přiznání k DPH, kontrolní i souhrnné hlášení) při chybějícím kurzu tiše dosazoval 1,0. Nově import vydaných faktur přebírá kurz ze zdroje (Fakturoid `exchange_rate`, iDoklad `ExchangeRate`) a při jeho absenci dopočítá oficiální kurz ČNB k datu uskutečnění plnění; týká se faktur i dobropisů z obou importů. Daňový producent nově rozlišuje skutečný kurz od chybějícího a chybějící kurz vede k viditelnému upozornění místo tichého přepočtu. (#238)
+- **Automatické doplnění kurzů po upgradu kontrolovalo jen přijaté faktury.** Skript `backfill-exchange-rates.php` umí doplnit kurz přijatým i vydaným fakturám, ale detekce v `migrate.php`, která ho po migracích spouští, počítala jen chybějící kurzy v `purchase_invoices`. Pokud žádná přijatá faktura kurz nepostrádala, backfill se nespustil vůbec, i když bez kurzu byly vydané faktury. Detekce nově sčítá non-CZK doklady bez kurzu na obou stranách (přijaté i vydané, mimo storna a koncepty). (#238)
+- **Přehled souhrnného hlášení popisoval typy plnění posunutě.** Ve frontendu byly popisky kódů plnění o jeden posunuté — kód 3 (poskytnutí služby do EU) se zobrazoval jako „Přemístění zboží", ačkoli samotné XML mělo kód správně. Popisky se opravily podle DPHSHV (0 = dodání zboží do EU, 1 = přemístění obchodního majetku, 2 = třístranný obchod prostřední osobou, 3 = poskytnutí služby do EU) a přesunuly do jazykových souborů. (#238)
+
+### Changed
+
+- **Chybějící kurz u daňového výkazu se doplní z ČNB při stažení, ne že výkaz spadne.** Když přiznání k DPH, kontrolní nebo souhrnné hlášení narazí na cizoměnný doklad bez kurzu, náhled výkazu na to jen upozorní (nic nezapisuje) a při **stažení XML** se chybějící kurzy tiše doplní oficiálním kurzem ČNB k datu uskutečnění plnění a výkaz se vytvoří. Tvrdá chyba nastane pouze tehdy, když ČNB kurz pro daný den a měnu vůbec nezná — pak se vypíšou čísla dotčených faktur a doklad je bezpečnější nevytvořit než vykázat cizí měnu jako koruny. Doplnění kurzu je idempotentní: nikdy nepřepíše ručně zadaný kurz.
+
+### Removed
+
+- **Zahozen matoucí sloupec `supplier.data_box_type`.** Přidala ho migrace 0038 jako „typ datové schránky (OVM/PO/FO)", ale UI pro něj nikdy nemělo editační pole, takže byl na všech instalacích prázdný. Jediné místo, které ho četlo, byl generátor EPO `VetaP` — a používal ho chybně jako typ daňového subjektu, což rozbilo podání DPH/KH/SHV všem právnickým osobám (opraveno v 4.49.2). Typ subjektu drží `taxpayer_type` (fyzická/právnická osoba) a nic jiného s ním souviset nemá; sloupec se zavádějícím jménem k té záměně jen zval, tak jde pryč i s průchodem přes API a frontend. Datové schránky zatím implementované nejsou — až budou, dostanou vlastní, jednoznačně pojmenovaná pole. `data_box_id` zůstává beze změny. Žádná data se neztrácejí, sloupec byl všude NULL. (migrace 0140)
+
+## [4.49.2] — 2026-07-20
+
+### Fixed
+
+- **Právnická osoba nemohla podat přiznání k DPH, kontrolní ani souhrnné hlášení — EPO podání odmítlo.** Ve `VetaP` se atribut `typ_ds` (typ daňového subjektu: F = fyzická, P = právnická osoba) plnil z databázového sloupce `data_box_type`, což je ale typ *datové schránky* (OVM/PO/FO) — jiná věc se zavádějícím jménem. Ten sloupec navíc nemá nikde v UI editor, jen projde přenosovým payloadem nastavení, takže je v praxi vždy prázdný. Fallback proto padal na „F" úplně vždy a každé s.r.o. dostalo na Daňovém portálu tvrdou chybu „U fyzické osoby musí být kmenová část DIČ tvořena RČ nebo vlastním číslem plátce" — DIČ právnické osoby je odvozené od IČO, ne od rodného čísla, takže podání neprošlo vůbec. `typ_ds` se nově odvozuje z `taxpayer_type` (fo/po), tedy z pole, které uživatel v nastavení skutečně vyplňuje a které se o pár řádků dál už používalo pro volbu mezi obchodní firmou a jménem/příjmením. Týká se DPHDP3, DPHKH1 i DPHSHV. Jde čistě o generátor XML — žádná migrace, stačí nasadit a výkaz znovu vyexportovat.
+
+## [4.49.1] — 2026-07-20
+
+### Fixed
+
+- **Upgrade padal na migraci 0136, pokud v datech byly starší duplicitní bankovní pohyby.** Migrace `0136` přidávala na `bank_transactions` unikátní index přes `(source, source_ref)` a napřed tvrdě zastavila upgrade, když v datech našla duplicitu. Na instalacích s delší historií ale duplicitní e-mailová avíza reálně existují — pocházejí z doby před idempotenčním lookupem (#161) — takže se z pojistky proti souběhu stal blokátor celého upgradu aplikace, a to včetně všech následujících migrací. Unikátnost se nově nevyžaduje vůbec a zůstává jen běžný index; duplicitní avízo samo o sobě nic nerozbíjí (jde o obsahově shodné řádky), zato ruční čištění živé tabulky, na které visí `invoice_payments` a `payment_matches`, riskantní je. Idempotenci importů z iDokladu i z e-mailových avíz drží aplikační vrstva, kde byla i doteď, takže se pro uživatele nic nemění — jen upgrade projde. Instalace, které původní `0136` už úspěšně aplikovaly, si unikátní index nechají zahodit a dorovnají schéma. (#225, migrace 0139)
+- **Doklad s dlouhou adresou nešel vyexportovat do Pohody.** Exportér psal adresu protistrany syrově, přestože Pohoda XSD má na adresní typ délkové limity — faktura s ulicí delší než 64 znaků neprošla validací a export skončil chybou. Pole se nově ořezávají podle limitů ze schématu (firma 255, ulice a jméno 64, obec 45, PSČ 15, e-mail 98, telefon 40), s ohledem na diakritiku. Adresa je identifikační údaj, ne částka, takže zkrácení je přijatelnější než neexportovatelný doklad. Ostatní exportéry jsou v pořádku: Stereo ani Money S3 schéma nemají, ISDOC na adresních polích žádný limit nedefinuje.
+
+## [4.49.0] — 2026-07-20
+
+### Added
+
+- **Klienta lze založit bez e-mailu.** Hlavní e-mail klienta byl dosud povinný, což nutilo vymýšlet fiktivní adresu u historických dokladů, kde e-mail protistrany prostě není k dispozici. Nově je pole volitelné; když ho vyplníte, kontroluje se dál na platný tvar, takže se do systému nedostane neodesílatelná adresa. Bez e-mailu klientovi nepůjde odeslat doklad ani upomínku — odesílací cesty vracejí srozumitelnou chybu místo pádu a cron automatických upomínek takového klienta hlásí jako **přeskočeného**, ne jako chybu běhu. E-mail vlastní firmy (dodavatele) zůstává povinný, protože se tiskne na fakturu a slouží jako odesílatel. Importy z iDokladu a Fakturoidu dosud u klientů bez e-mailu dosazovaly placeholder `unknown@import.local`, aby prošly přes `NOT NULL`; nově tam zůstane prázdno a migrace tento placeholder v existujících datech přepíše na prázdnou hodnotu, aby nevypadal jako reálná adresa. (#221, migrace 0138)
+
+### Fixed
+
+- **OSS ovládání v editoru zvyšovalo každý řádek položky.** Zaškrtávátko OSS sedělo nad polem popisu, takže i u dokladu bez jediného OSS plnění byla každá položka o řádek vyšší. Checkbox se přesunul na konec řádku hned před tlačítko smazání a popis má zpět plnou šířku; číselníky státu, sazby, typu plnění a původního období se po zaškrtnutí rozbalí do vlastního řádku pod položkou. Mobilní zobrazení zůstává beze změny.
+
+## [4.48.0] — 2026-07-20
+
+### Added
+
+- **OSS (One Stop Shop) — ruční evidence a EPO export.** Nový režim pro přeshraniční B2C prodej do EU: dodavatel se zaregistruje v **Nastavení → firma** (režim, datum platnosti, stát identifikace, měna přiznání) a na řádcích faktury pak označuje plnění spadající do OSS — stát spotřeby, typ plnění a sazby, kurz a případné původní období u oprav se ukládají jako **snímek na řádku**, takže pozdější změna číselníků výkaz nerozhodí. Kvartální přehled **Daně → OSS přiznání** sumuje podle státu, sazby a typu plnění a exportuje řádné přiznání i opravy minulých období do XML **OSSEI1** pro portál EPO, včetně validace proti přiloženému oficiálnímu XSD. OSS údaje si nese i dobropis a hromadné opětovné vystavení. Zařazení řádku, volba zahraniční sazby a kurzový snímek jsou záměrně ruční — automatické posouzení B2B/B2C, hlídání limitu 10 000 EUR ani režim IOSS tato etapa neřeší. (#223, migrace 0137)
+- **Hromadný PDF export vystavených faktur.** Vybrané faktury lze sloučit do jednoho PDF, volitelně s elektronickým podpisem výsledku, a v seznamu přibylo zaškrtnutí všech faktur v měsíčním bloku. Sloučený export za období má strop 200 faktur — na rozdíl od ZIPu, který skládá už nacachovaná PDF, se každý doklad renderuje znovu, takže kvartál o stovkách faktur uměl přetáhnout timeout requestu; nad strop export vrátí `too_many` s doporučením ZIPu. Do sloučeného PDF vstupují jen vystavené doklady, aby se omylem nepodepsal koncept s placeholderem `DRAFT-{id}`. (#224)
+- **Vazba faktury na bankovní operaci v detailu dokladu.** U uhrazené faktury je nově vidět, která bankovní operace ji zaplatila, včetně zdroje výpisu. Dotaz je kotvený na tenanta přes `JOIN invoices ON supplier_id`, takže cizí dodavatel vazbu nevidí ani se znalostí ID faktury. (#222)
+- **iDoklad — import bankovních pohybů bez duplicit.** Import z iDokladu umí přírůstkově načíst bankovní pohyby jako virtuální výpis (`source = idoklad`), omezit je obdobím a bezpečně je spárovat s fakturami. Pohyby převzaté později oficiálním GPC/PDF výpisem zůstávají jako `ignored`, takže sekundární výpis už nevisí navždy na oranžovém badge. (#220)
+
+### Fixed
+
+- **OSS se nabízel i bez registrace do režimu.** Přepínač OSS v nastavení firmy sice existoval (a je ve výchozím stavu vypnutý), ale řádky faktury nabízely OSS zaškrtávátko každému. Nově se OSS ovládání v editoru zobrazí až po zapnutí režimu; řádek, který příznak už nese, si prvky ponechá i po vypnutí, aby zpětná editace dokladu nebyla naslepo. Zároveň byla **doplněna chybějící routa a položka menu** `Daně → OSS přiznání` — stránka kvartálního přehledu byla v aplikaci přítomná, ale nebyla odnikud dosažitelná (manuál ji přitom už popisoval). Menu i routa respektují přepínač, takže bez registrace se OSS nenabízí vůbec.
+- **Zahraniční sazba DPH šla vybrat i na řádku mimo OSS.** U dodavatele s OSS se sazby načítají pro všechny státy, ale výběr na řádku je nefiltroval podle země. Cizí sazba na běžném řádku zůstala v tuzemské evidenci a podle prahu roku spadla do české klasifikace — DE 19 % se vykázalo na snížené sazbě DPHDP3 s 19% částkou daně, bez jakéhokoli varování. Nabídka je nově omezená na české sazby, dokud není řádek označený jako OSS, odškrtnutí OSS vrátí sazbu na výchozí a totéž pravidlo hlídá i serverová validace (zahraniční sazbu mimo OSS odmítne). Souhrnné řádky výkazu práce a materiálu jsou vždy tuzemské. (#223)
+- **Nulová OSS sazba rozbíjela uložení faktury.** Editor ji nabízel, ale backend ji odmítal, takže doklad s ní nešel uložit. Formulář OSSEI1 zná v `vat_rate_type_code` jen „Z" (základní) a „S" (sníženou), nulová sazba tam nemá kód — volba proto z nabídky zmizela. (#223)
+- **§ 42 varování v přiznání u čistě OSS dobropisu.** Kontrola data zařazení opravného dokladu se spouštěla i pro dobropis, jehož záporná DPH je celá zahraniční, a tím zbytečně zpochybňovala tuzemské přiznání. Nově se vyžaduje aspoň jeden ne-OSS řádek. (#223)
+
+## [4.47.0] — 2026-07-18
+
+### Added
+
+- **Export vystavených faktur do Money S3 (Seyfor).** Vystavené faktury lze exportovat do XML pro účetnictví **Money S3** (`format=money_s3` v exportu faktur), vedle stávajícího Stereo / Pohoda / ISDOC. Oficiální veřejné XSD pro tento formát neexistuje — struktura byla odvozena z reálného exportu Money S3 a ověřena proti uživatelské příručce. (#211) Sazby DPH se přitom neváží natvrdo na aktuální 12/21, ale **odvozují se z položek dokladu**: nižší nenulová sazba jde do sníženého koše, vyšší do základního, jediná sazba se rozřadí prahem 17 %. Díky tomu projdou i doklady ze starších období s historickými sazbami (15/21 pro 2013–2023, 14/20 pro 2012, 5/22 pro 1995–2003), zatímco dřív cokoli mimo 12/21 export tvrdě shodilo. Tři a víc různých nenulových sazeb na jednom dokladu dvoukošíkový model Money S3 neumí → zůstává tvrdá chyba. (#213)
+- **iDoklad — synchronizace bankovních účtů.** Import z iDokladu má novou volbu **Bankovní účty**, která načte číselník účtů z iDokladu a bezpečně jej namapuje na aktivní účty stejné měny v MyInvoice. Účet se propojí jen při jednoznačné shodě čísla účtu / IBANu (u českého účtu se kontroluje i kód banky); neznámý nebo nejednoznačný účet se pouze označí ke kontrole (`unmatched` / `ambiguous`). Synchronizace nikdy nezakládá ani nepřepisuje lokální bankovní účet a je idempotentní. Tvoří bezpečný základ pro budoucí import bankovních pohybů z iDokladu a jejich deduplikaci vůči GPC/IMAP. (#218, migrace 0135)
+- **Daňový optimalizátor — odhad čistého příjmu za minulý měsíc.** Nová rozbalovací karta ukazuje pravděpodobný čistý příjem za poslední uzavřený kalendářní měsíc: reálné zaplacené tržby a náklady, z nichž se odhadnou odvody (anualizací × 12 přes stejnou logiku jako roční přepočet — výdajový paušál se stropem 2 M příjmu, odpočty, dětské slevy, minimální vyměřovací základy pojistného — pak vydělené 12). Čistý příjem = zisk (tržby − skutečné náklady) minus odhadnuté odvody, tj. reálná hotovost, co zbyde. Zobrazuje se vždy nezávisle na roku zvoleném v přepínači. (#217, #219)
+
+### Fixed
+
+- **iDoklad — import vydané faktury přebírá její skutečný bankovní účet.** Při více účtech téže měny import dosud vždy dosadil výchozí účet měny, takže faktura vystavená např. s účtem Fio se po importu mohla zobrazit s výchozím účtem RB. Nově se účet hledá podle historických údajů `MyAddress` konkrétního dokladu (číslo účtu + kód banky, stejná normalizace jako v bankovním modulu, kód banky umí odvodit i z českého IBANu); výchozí účet měny je jen fallback při chybějícím nebo nejednoznačném účtu. (#216)
+- **Import ISDOC 5.x.** Parser měl namespace natvrdo na 6.x (`…/namespace/2013`), takže u staršího ISDOC 5.2 (`…/namespace/invoice`) nenašel `<ID>` a spadl na zavádějící „Chybí ISDOC ID (varsymbol)", přestože doklad oba elementy obsahoval. Namespace se nově bere z kořene dokumentu (struktura čtených elementů je mezi 5.x a 6.x shodná), u skutečně neznámého namespace parser vrací jasnou hlášku. (#208)
+- **Bankovní modul u účtů se stejným číslem lišících se kódem banky (návazně na #206).** Seznam výpisů i přehled stavů na účtech (včetně měsíčních grafů) nově správně rozlišují účty se shodným číslem podle kódu banky — výpisy si drží kód banky, filtrují se i podle něj a stavy/grafy se zobrazí pro všechny účty, ne jen pro výchozí. Kontrola jednoznačnosti při přiřazení „staršího výpisu bez kódu banky" byla sjednocena do jednoho helperu. (#209, #210, #212, #214)
+
+## [4.46.1] — 2026-07-16
+
+### Fixed
+
+- **Import GPC/ABO výpisu k účtu se stejným číslem u více bank (#206).** Když měl dodavatel dva bankovní účty se stejným číslem účtu lišící se jen kódem banky (např. Fio `…/2010` a Raiffeisenbank `…/5500`), mohl se nahraný GPC/ABO (i PDF) výpis tiše přiřadit k výchozímu účtu — GPC hlavička kód banky vlastního účtu nenese a kód v transakčních řádcích patří protistraně. Nově se v takovém případě import zastaví a vyžádá **ruční výběr cílového účtu** (stejný dialog jako u víceměnového účtu se sdíleným číslem); pokud číslu odpovídá jen jeden účet, přiřadí se automaticky. Kandidáti v dialogu se rozlišují měnou i kódem banky. U neinteraktivního adresářového skenu se nejednoznačnost zaloguje do chybového logu.
+- **Import PDF výpisu Raiffeisenbank — kurz kartové platby se 3+ desetinnými místy (#205).** Detekce řádku s kurzem počítala natvrdo se dvěma desetinnými místy, takže kurz jako `21.716 CZK/USD` se nerozpoznal a jeho useknutý prefix se vzal jako částka → self-check součtu výpis zamítl. Nově se rozpozná libovolný počet desetinných míst.
+
+## [4.46.0] — 2026-07-14
+
+### Added
+
+- **Web faktura — trvalý veřejný odkaz na vystavenou fakturu.** Každá vystavená faktura (i proforma či dobropis) může mít trvalý veřejný odkaz `/invoice/{token}`, na kterém si ji klient **bez přihlášení** prohlédne v prohlížeči, stáhne PDF a přílohy e-mailu (obdoba „web faktury" z Fakturoidu). Veřejná stránka je dvojjazyčná podle jazyka dokladu a ukazuje totéž co PDF: dodavatele, odběratele, položky s rozpadem DPH, součty, platební údaje s QR kódem a poznámky; stav úhrady se zobrazuje živě (Uhrazeno / Částečně uhrazeno / Po splatnosti). Odkaz se automaticky vkládá do e-mailu při odeslání faktury klientovi. V detailu faktury je pod „…" akce **Web faktura** s možností zkopírovat/otevřít odkaz, indikací „zobrazeno klientem" a revokací (**Vygenerovat nový odkaz** — starý okamžitě přestane platit). Payload veřejného API je striktní whitelist (neúnikají tokeny, snapshoty, interní ID ani kontaktní údaje klienta), přílohy jsou vázané na fakturu proti cross-invoice přístupu a endpointy mají vlastní rate-limit proti anonymnímu zneužití.
+
+## [4.45.0] — 2026-07-12
+
+### Added
+
+- **Import PDF výpisů Raiffeisenbank (vedle Creditasu, ČSOB a KB).** Výpisy z Raiffeisenbank (běžný i spořicí účet) jde nahrát rovnou jako **PDF** a systém je deterministicky rozparsuje na transakce (bez AI) — stejné tlačítko, párování, stavy účtů i originál ke stažení jako u GPC. RB má vertikální layout (dvojice dat zaúčtování + valuta jako kotva transakce) a odlišný číselný formát (desetinná tečka, mezera jako oddělovač tisíců); parser to řeší vlastní třídou v registru a hlídá se proti záměně typu transakce za název protiúčtu. Jako u ostatních bank platí self-check: součet transakcí musí na haléř přesně sednout na počáteční a konečný zůstatek z hlavičky, jinak se výpis odmítne.
+- **Sloupec „Start (km)" v knize jízd.** Tabulka jízd nově ukazuje počáteční stav tachometru (před sloupcem „Ujeto (km)").
+
+### Fixed
+
+- **Import z iDokladu — incremental sync „od posledního importu" (#197).** Filtr `DateLastChange>=…` iDoklad v3 API odmítal chybou HTTP 400 „Incorrect filter format". API vyžaduje tvar `sloupec~operátor~hodnota` (`DateLastChange~gte~…`); sjednoceno do jednoho helperu napříč kontakty, fakturami i dobropisy, takže inkrementální import projde.
+- **Import z iDokladu — duplicitní variabilní symbol u paušálů (#196).** Import vystavených faktur bral `varsymbol` přednostně z platebního VariableSymbolu; u paušálů/trvalých plateb má víc faktur stejný VS → kolize na UNIQUE indexu a import spadl na „Duplicate entry". V našem modelu je variabilní symbol číslo dokladu, takže se nově bere unikátní DocumentNumber (VariableSymbol jen jako fallback).
+- **Stažení archivovaného zdrojového ISDOC u přijaté faktury vracelo 404.** IIS pravidlo `hiddenSegments` blokovalo segment `source` kdekoli v URL, takže `GET /api/purchase-invoices/{id}/source` skončil chybou 404.8 dřív, než dorazil k PHP. Root-level `/source/` (plánovací dokumenty) zůstává chráněný.
+- **EPO výkazy — atribut `VetaP/stat` je název státu z číselníku, ne ISO2 kód (#201).** EPO XSD u `VetaP/stat` vyžaduje název státu z číselníku Země (např. „ČESKÁ REPUBLIKA"); dosud se posílal dvoupísmenný ISO2 kód („CZ"), který datovým typem projde, ale je věcně mimo číselník. Týká se kontrolního hlášení, přiznání DPH i souhrnného hlášení.
+- **Další vlna oprav věcné správnosti výkazů DPH z červencového auditu** (kontrolní hlášení, souhrnné hlášení). Opravena rekapitulace VetaC a poměrný odpočet u reverse charge, návrat služeb ze třetích zemí do KH oddílu A.2, doplněné validace DIČ a atributů zvláštních režimů KH a zaokrouhlení i kvartální termín souhrnného hlášení. Bez dopadu na běžné UI — mění se jen to, co teče do výkazů; kryto regresními testy.
+
+## [4.44.4] — 2026-07-11
+
+### Added
+
+- **Klikatelný název dodavatele v detailu přijaté faktury.** Kliknutí na jméno dodavatele otevře seznam přijatých faktur filtrovaný na daného dodavatele — stejně jako u vydané faktury odkaz na faktury klienta.
+
+### Changed
+
+- **Popisek „Oprávněná osoba" v nastavení dodavatele dává smysl i pro OSVČ.** Dříve radil „u OSVČ nech prázdné"; nově: u fyzické osoby jde pole volitelně vyplnit vlastním jménem/příjmením pro přesné rozdělení do EPO výkazů (jinak se odvodí z názvu, viz níže).
+
+### Fixed
+
+Návazně na červencový audit DPH/KH proběhla další vlna oprav věcné správnosti výkazů (kontrolní hlášení, přiznání DPH, Kniha DPH). Bez dopadu na běžné UI — mění se jen to, co teče do výkazů. Vše ověřeno křížově KH × DPHDP3 × Kniha DPH a proti reálnému výstupu účetní.
+
+- **Poskytnutí služby do jiného členského státu EU (reverse charge) se chybně zahrnovalo do KH oddílu A.1.** Přeshraniční B2B služba do JČS do kontrolního hlášení nepatří — vykazuje se jen na ř. 21 přiznání a v souhrnném hlášení (kód 3). A.1 zůstává vyhrazen tuzemskému přenesení §92. (#199)
+- **Služba ze 3. země v reverse charge (Anthropic, GitHub apod. z USA) se chybně vykazovala v KH oddílu A.2.** A.2 je určen jen pro dodavatele registrované k DPH v jiném členském státě EU (vyžaduje kód státu EU + EU DIČ). Plnění ze 3. země se vykazuje pouze v přiznání (ř. 12 samovyměření + ř. 43 odpočet), do KH ne. (migrace 0129)
+- **Doklad, kde je na jedné faktuře řádek v přenesené povinnosti (§92) i běžný zdanitelný řádek**, posílal do KH sekce (A.1/B.1) celý základ dokladu a běžný řádek z A.4/B.2 zmizel. Nově se doklad rozdělí správně po řádcích a KH sedí s přiznáním.
+- **Přijaté plnění bez nároku na odpočet u zahraničního reverse charge** (např. reprezentace) zahazovalo celý doklad včetně povinného výstupního samovyměření (§ 108, nezávislé na nároku dle § 72/4). Nově výstup zůstává, odepře se jen odpočet.
+- **Zahraniční spotřebitelský nákup s už naúčtovaným DPH** (B2C přes OSS, chybně označený jako reverse charge) se nově do DPH evidence nezahrnuje — nejde o reverse charge a cizí DPH by se jinak omylem přiznalo na výstup.
+- **Pořízení zboží z JČS ve snížené 12% sazbě** se vykazovalo na ř. 3 / ř. 43 (základní 21 %) místo ř. 4 / ř. 44 (snížená).
+- **Zařazení zahraničního reverse charge do zdaňovacího období** nově reaguje i na reverse charge daný klasifikačním kódem (nejen příznakem) — importovaný doklad bez příznaku se dřív mohl zařadit do jiného období.
+- **Rekapitulace přiznání DPH (ř. 62/63)** už nesčítá daň z řádků, které daň nenesou, ani z řádků mimo mapu výkazu — dřív mohla nesedět s detailem.
+- **Termín podání kontrolního hlášení u kvartálního podání** se počítá z konce kvartálu, ne z předaného měsíce.
+- **Jméno fyzické osoby (OSVČ) s akademickým titulem v EPO XML** — „MUDr. Josef Novák" dávalo `jmeno="MUDr."`. Nově se titul odstraní (vedoucí i koncový za čárkou) a jméno/příjmení se rozdělí správně; volitelně lze použít strukturovaná pole. (#200)
+- **U reverse charge se přestalo hlásit „od neplátce nelze odpočíst".** Zahraniční RC dodavatel je z pohledu české DPH neplátce ze své podstaty, ale příjemce si daň samovyměří a odpočet mu náleží (§ 72/73) — varování při uložení i při AI importu bylo u RC dokladu chybné.
+
+## [4.44.3] — 2026-07-10
+
+### Added
+
+- **Import PDF výpisů pro ČSOB a KB (vedle Creditasu).** Banky bez použitelného GPC/ABO exportu jde nahrát rovnou jako **PDF výpis** — systém ho deterministicky rozparsuje na transakce (bez AI). Podporováno: **Banka CREDITAS** (běžný i spořicí účet, CZ/EN), **ČSOB** (běžný CZK i devizový EUR účet) a **KB (Komerční banka)**. Import je od GPC k nerozeznání — stejné tlačítko (jeden soubor GPC/ABO nebo PDF, rozhoduje přípona; naráz i mix obojího), stejné párování, stavy účtů i originál ke stažení. Každý parser provádí self-check: součet transakcí musí na haléř přesně sedět na počáteční a konečný zůstatek z hlavičky, jinak se výpis odmítne (nikdy se neuloží špatně přečtená finanční data). U ČSOB se částka odvozuje z rozdílu po sobě jdoucích běžných zůstatků (pořadové číslo se v PDF slévá s částkou), takže self-check navíc ověří i úplnost řetězu zůstatků. Přidání další banky = jedna nová třída v registru parserů.
+
+### Changed
+
+- **Přehled bankovních výpisů (`Finance → Bankovní účty → Bankovní výpisy`) defaultně zobrazuje všechny roky** místo posledního roku — výpisy se hromadí přes víc let a poslední rok jich řadu skryl. Filtr roku zůstává k dispozici.
+
 ## [4.44.2] — 2026-07-06
 
 ### Fixed

@@ -4,7 +4,7 @@ import { useI18n } from 'vue-i18n'
 import { taxApi, type TaxAnalysis, type TaxProfile } from '@/api/tax'
 import { useToast } from '@/composables/useToast'
 import { formatMoney, formatMonth } from '@/composables/useFormat'
-import { compare as engineCompare, predict as enginePredict, regular as engineRegular, type EngineProfile } from '@/composables/useTaxEngine'
+import { compare as engineCompare, predict as enginePredict, regular as engineRegular, pausalPeriods, pausalRateChange, type EngineProfile } from '@/composables/useTaxEngine'
 
 const { t } = useI18n()
 const toast = useToast()
@@ -14,6 +14,7 @@ const saving = ref(false)
 const error = ref('')
 const analysis = ref<TaxAnalysis | null>(null)
 const year = ref<number>(new Date().getFullYear())
+const lastMonthOpen = ref(false)
 
 const profile = reactive<TaxProfile>({
   activity_rate: 60, use_actual_expenses: false, actual_expenses: 0,
@@ -53,6 +54,19 @@ const pred = computed(() =>
   analysis.value && isForecast.value
     ? enginePredict(engineProfile.value, analysis.value.ytd_income ?? 0, analysis.value.months_elapsed ?? 1, analysis.value.constants)
     : null)
+
+// Paušál: měsíční zálohy se můžou během roku změnit (2026: 1. pásmo od 1. 7.).
+// Pásmo bereme efektivní ze srovnání, jinak deklarované z profilu (predikce).
+const pausalBand = computed<string | null>(() => {
+  if (cmp.value?.pausal.ok && cmp.value.pausal.eff) return cmp.value.pausal.eff
+  return profile.flat_tax_band !== 'none' && !analysis.value?.is_vat_payer ? profile.flat_tax_band : null
+})
+const pausalMonths = computed(() =>
+  analysis.value && pausalBand.value ? pausalPeriods(analysis.value.constants, pausalBand.value) : [])
+const pausalChange = computed(() =>
+  analysis.value && pausalBand.value ? pausalRateChange(analysis.value.constants, pausalBand.value) : null)
+const periodLabel = (from: string, to: string) =>
+  `${formatMonth(from.slice(0, 7))} – ${formatMonth(to.slice(0, 7))}`
 
 // YoY: čistý příjem standardního režimu loni (stejný profil na loňský příjem + loňské konstanty).
 const prevNet = computed(() => {
@@ -218,6 +232,53 @@ async function save() {
 
       <!-- ── VÝSLEDKY ── -->
       <div>
+        <!-- Čistý příjem za minulý měsíc (odhad, nezávisle na zvoleném roce) -->
+        <div v-if="analysis.last_month" class="bg-surface border border-neutral-200 rounded-lg shadow-sm mb-6 overflow-hidden">
+          <button type="button" @click="lastMonthOpen = !lastMonthOpen"
+            class="w-full flex items-center justify-between gap-3 px-5 py-4 text-left cursor-pointer hover:bg-neutral-50">
+            <div>
+              <div class="text-xs font-semibold uppercase tracking-wide text-neutral-500">
+                {{ t('tax.last_month_title', { month: formatMonth(analysis.last_month.ym) }) }}
+              </div>
+              <div class="text-2xl font-bold font-mono text-success-700 mt-1">{{ formatMoney(analysis.last_month.net_income, 'CZK') }}</div>
+            </div>
+            <span class="text-neutral-400 transition-transform shrink-0" :class="lastMonthOpen ? 'rotate-180' : ''">▾</span>
+          </button>
+          <div v-if="lastMonthOpen" class="px-5 pb-5 border-t border-neutral-100">
+            <table class="w-full text-sm mt-3">
+              <tbody>
+                <tr class="border-b border-neutral-100"><td class="py-1.5 text-neutral-600">{{ t('tax.last_month_revenue') }}</td><td class="py-1.5 text-right font-medium font-mono">{{ formatMoney(analysis.last_month.revenue, 'CZK') }}</td></tr>
+                <tr class="border-b border-neutral-100"><td class="py-1.5 text-neutral-600">− {{ t('tax.last_month_expenses') }}</td><td class="py-1.5 text-right font-medium font-mono">{{ formatMoney(analysis.last_month.expenses, 'CZK') }}</td></tr>
+                <tr class="border-b border-neutral-100"><td class="py-1.5 text-neutral-600">= {{ t('tax.last_month_profit') }}</td><td class="py-1.5 text-right font-medium font-mono">{{ formatMoney(analysis.last_month.profit, 'CZK') }}</td></tr>
+                <tr class="border-b border-neutral-100"><td class="py-1.5 text-neutral-600">{{ t('tax.last_month_tax') }}</td><td class="py-1.5 text-right font-medium font-mono">{{ formatMoney(analysis.last_month.income_tax, 'CZK') }}</td></tr>
+                <tr class="border-b border-neutral-100"><td class="py-1.5 text-neutral-600">{{ t('tax.last_month_social') }}</td><td class="py-1.5 text-right font-medium font-mono">{{ formatMoney(analysis.last_month.social, 'CZK') }}</td></tr>
+                <tr class="border-b border-neutral-100"><td class="py-1.5 text-neutral-600">{{ t('tax.last_month_health') }}</td><td class="py-1.5 text-right font-medium font-mono">{{ formatMoney(analysis.last_month.health, 'CZK') }}</td></tr>
+                <tr><td class="pt-2 font-bold text-success-700">{{ t('tax.last_month_net') }}</td><td class="pt-2 text-right font-bold font-mono text-success-700">{{ formatMoney(analysis.last_month.net_income, 'CZK') }}</td></tr>
+              </tbody>
+            </table>
+            <p class="mt-2 text-[11px] text-neutral-400">{{ t('tax.last_month_hint') }}</p>
+          </div>
+        </div>
+
+        <!-- Změna měsíční zálohy paušálu uprostřed roku (2026: 1. pásmo od 1. 7.) -->
+        <div v-if="pausalChange" class="flex gap-3 items-start bg-warning-50 border border-warning-200 rounded-xl px-4 py-3 mb-6">
+          <span class="text-xl leading-none">📆</span>
+          <div class="text-sm text-neutral-700">
+            <div class="font-semibold text-warning-800">
+              {{ t('tax.pausal_rate_change', {
+                month: formatMonth(pausalChange.from.slice(0, 7)),
+                prev: formatMoney(pausalChange.previousMonthly, 'CZK'),
+                next: formatMoney(pausalChange.monthly, 'CZK'),
+              }) }}
+            </div>
+            {{ t('tax.pausal_rate_change_hint', {
+              overpaid: formatMoney(pausalChange.overpaid, 'CZK'),
+              months: pausalChange.monthsAtPrevious,
+              reduced: formatMoney(pausalChange.reducedAdvance, 'CZK'),
+            }) }}
+          </div>
+        </div>
+
         <!-- RETROSPEKTIVA (uzavřený rok) -->
         <template v-if="cmp">
           <div class="text-sm text-neutral-500 mb-3">
@@ -237,6 +298,13 @@ async function save() {
                   <span v-if="cmp.pausal.note" class="text-warning-600"> · {{ t('tax.surcharge') }} {{ formatMoney(cmp.pausal.surcharge, 'CZK') }}</span>
                 </template>
                 <template v-else>{{ cmp.pausal.reason === 'vat_payer' ? t('tax.vat_payer_note') : t('tax.over_2m_note') }}</template>
+              </div>
+              <!-- Měsíční zálohy — při změně sazby uprostřed roku po obdobích, ne průměr -->
+              <div v-if="cmp.pausal.ok && pausalMonths.length" class="mt-2 space-y-0.5">
+                <div v-for="p in pausalMonths" :key="p.from" class="flex justify-between gap-2 text-[11px] text-neutral-500">
+                  <span>{{ pausalMonths.length > 1 ? periodLabel(p.from, p.to) : t('tax.pausal_monthly_label') }}</span>
+                  <span class="font-mono text-neutral-700">{{ t('tax.pausal_per_month', { amount: formatMoney(p.amount, 'CZK') }) }}</span>
+                </div>
               </div>
             </div>
             <!-- Běžný režim -->

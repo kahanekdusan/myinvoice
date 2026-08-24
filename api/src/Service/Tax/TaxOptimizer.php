@@ -124,15 +124,78 @@ final class TaxOptimizer
         }
 
         $total = (float) $c['pausal_annual'][$band['effective']];
+        $schedule = $this->pausalSchedule($band['effective'], $c);
+
         return [
             'applicable'   => true,
             'effective'    => $band['effective'],
             'declared'     => $band['declared'],
             'surcharge'    => $band['surcharge'],
-            'monthly'      => round($total / 12, 0),
+            // Poslední platná měsíční záloha roku. NENÍ to total/12 — sazba se může
+            // změnit uprostřed roku (2026: 9 984 → 9 162 Kč od července), pak by
+            // průměr odpovídal částce, která nebyla splatná v žádném měsíci.
+            'monthly'      => $schedule['current'],
+            'monthly_periods' => $schedule['periods'],
+            'rate_change'  => $schedule['change'],
             'total'        => round($total, 0),
             'note'         => $band['effective'] !== $band['declared'] ? 'doplatek_do_vyssiho_pasma' : null,
         ];
+    }
+
+    /**
+     * Rozpad měsíčních záloh pásma v roce + popis poslední změny sazby.
+     *
+     * `change` slouží UI: při snížení zálohy uprostřed roku vzniká za už zaplacené
+     * měsíce přeplatek, o který lze snížit nejbližší zálohu (§ 38lk ZDP), nebo si
+     * o něj po skončení roku požádat. Obojí je dopočitatelné z rozvrhu.
+     *
+     * @param array<string,mixed> $c
+     * @return array{current: int|float, periods: list<array<string,mixed>>, change: ?array<string,mixed>}
+     */
+    private function pausalSchedule(string $band, array $c): array
+    {
+        $segments = PausalSchedule::normalize($c['pausal_monthly'] ?? []);
+        // Rok bereme z rozvrhu — ten je ukotvený k požadovanému roku, zatímco
+        // `year` u fallbacku nese rok převzaté tabulky.
+        $year = $segments !== []
+            ? (int) substr((string) $segments[0]['from'], 0, 4)
+            : (int) ($c['year'] ?? date('Y'));
+        $periods = [];
+        foreach (PausalSchedule::breakdown($year, $segments) as $p) {
+            $periods[] = ['from' => $p['from'], 'to' => $p['to'], 'months' => $p['months'], 'amount' => $p[$band]];
+        }
+        if ($periods === []) {
+            $monthly = round(((float) $c['pausal_annual'][$band]) / 12, 2);
+            return ['current' => $monthly, 'periods' => [], 'change' => null];
+        }
+
+        $last = $periods[count($periods) - 1];
+        $change = null;
+        if (count($periods) > 1) {
+            $prev = $periods[count($periods) - 2];
+            $diff = (float) $prev['amount'] - (float) $last['amount'];
+            // Měsíce zaplacené starou (vyšší) sazbou → přeplatek, o který jde snížit
+            // nejbližší zálohu. Při zvýšení sazby přeplatek nevzniká (nedoplatek se
+            // řeší až vyúčtováním), proto jen kladný rozdíl.
+            $monthsAtPrev = 0;
+            foreach ($periods as $p) {
+                if ($p['from'] < $last['from']) {
+                    $monthsAtPrev += (int) $p['months'];
+                }
+            }
+            $overpaid = $diff > 0 ? round($diff * $monthsAtPrev, 0) : 0.0;
+            $change = [
+                'from'             => $last['from'],
+                'previous_monthly' => $prev['amount'],
+                'monthly'          => $last['amount'],
+                'months_at_previous' => $monthsAtPrev,
+                'overpaid'         => $overpaid,
+                // Snížená nejbližší záloha; přeplatek větší než záloha se přenáší dál.
+                'reduced_advance'  => $overpaid > 0 ? round(max(0.0, (float) $last['amount'] - $overpaid), 0) : null,
+            ];
+        }
+
+        return ['current' => $last['amount'], 'periods' => $periods, 'change' => $change];
     }
 
     /**
@@ -286,6 +349,88 @@ final class TaxOptimizer
             'crossings'      => $crossings,
             'secondary_social' => $secondarySocial,
             'defer_advice'   => $defer,
+        ];
+    }
+
+    /**
+     * Pravděpodobný čistý příjem za konkrétní (uzavřený) měsíc — odhad.
+     *
+     * Nejde přesně spočítat: daň z příjmu i minima pojistného se počítají z
+     * ROČNÍHO základu, ne po měsících. Proto se měsíc anualizuje (× 12) a
+     * spočítá stejnou logikou jako {@see computeRegular()} (výdajový paušál
+     * NEBO skutečné náklady, odpočty, dětské slevy, minimální vyměřovací
+     * základy pojistného), odvody se pak vydělí 12. Čistý příjem = zisk (tržby
+     * − skutečné zaplacené náklady) minus tyto měsíční odvody — reálná hotovost,
+     * co zbyde. Je to "kdyby tenhle měsíc reprezentoval celý rok" — nikdy ne
+     * přesná částka, jen orientační odhad (`$monthExpenses` = skutečné zaplacené
+     * náklady daného měsíce, ne paušál).
+     *
+     * @param array<string,mixed> $profile
+     * @param array<string,mixed> $c konstanty roku
+     * @return array<string,mixed>
+     */
+    public function estimateMonthly(array $profile, float $monthIncome, float $monthExpenses, array $c): array
+    {
+        $annualIncome = $monthIncome * 12;
+
+        // Výdaje pro DAŇOVÝ ZÁKLAD (a tím i pro vyměřovací základ pojistného):
+        // stejná volba jako computeRegular() — buď výdajový paušál % z příjmu (se
+        // stropem), nebo skutečné výdaje. Paušál není reálný cashflow, proto se pro
+        // zobrazení "náklady"/"zisk" (informativní, reálná hotovost) níže vždy bere
+        // $monthExpenses (skutečně zaplacené přijaté faktury), bez ohledu na režim.
+        $rate = (int) ($profile['activity_rate'] ?? 40);
+        $useActual = !empty($profile['use_actual_expenses']);
+        $taxExpensesAnnual = $useActual
+            ? $monthExpenses * 12
+            : min($annualIncome * $rate / 100, (float) ($c['expense_caps'][$rate] ?? PHP_INT_MAX));
+
+        $deductions = min((float) ($profile['mortgage_interest'] ?? 0), (float) $c['mortgage_cap'])
+            + min((float) ($profile['pension_contrib'] ?? 0), (float) $c['pension_cap'])
+            + (float) ($profile['life_insurance'] ?? 0)
+            + (float) ($profile['donations'] ?? 0);
+
+        $base = max(0.0, $annualIncome - $taxExpensesAnnual - $deductions);
+
+        $thr = (float) $c['tax_high_threshold'];
+        $tax = $base <= $thr
+            ? $base * $c['tax_rate_low']
+            : $thr * $c['tax_rate_low'] + ($base - $thr) * $c['tax_rate_high'];
+
+        $nonRefundable = (float) $c['credit_taxpayer'] + (!empty($profile['spouse_credit']) ? (float) $c['credit_spouse'] : 0.0);
+        $taxAfterCredits = max(0.0, $tax - $nonRefundable);
+
+        $childTotal = $this->childCreditTotal((int) ($profile['children_count'] ?? 0), $c['child_credits']);
+        $annualIncomeTax = $taxAfterCredits - $childTotal;
+
+        $taxProfit = $annualIncome - $taxExpensesAnnual;
+        $socMin = !empty($profile['is_secondary']) ? (float) $c['social_min_base_secondary'] : (float) $c['social_min_base_main'];
+        $socialBase = max($taxProfit * (float) $c['social_assessment_pct'], $socMin);
+        $healthBase = max($taxProfit * (float) $c['health_assessment_pct'], (float) $c['health_min_base']);
+        $annualSocial = $socialBase * $c['social_rate'];
+        $annualHealth = $healthBase * $c['health_rate'];
+
+        // Měsíční odvody = roční / 12 (daň i minima pojistného se počítají z ročního
+        // základu). Zaokrouhlené hodnoty, aby vodopád v UI seděl na korunu.
+        $incomeTax = round($annualIncomeTax / 12, 0);
+        $social    = round($annualSocial / 12, 0);
+        $health    = round($annualHealth / 12, 0);
+
+        $revenue  = round($monthIncome, 0);
+        $expenses = round($monthExpenses, 0);
+        $profit   = round($monthIncome - $monthExpenses, 0);
+
+        return [
+            'revenue'    => $revenue,
+            'expenses'   => $expenses,
+            'profit'     => $profit,
+            'income_tax' => $incomeTax,
+            'social'     => $social,
+            'health'     => $health,
+            // Čistý příjem = reálná hotovost, co zbyde: zisk (tržby − skutečné zaplacené
+            // náklady) po odečtení odvodů. Na rozdíl od roční karty (kde jsou „náklady"
+            // paušál, tedy fiktivní, a proto se neodečítají) tato měsíční karta pracuje
+            // se skutečnými náklady, takže je do čistého příjmu započítává — vodopád sedí.
+            'net_income' => $profit - $incomeTax - $social - $health,
         ];
     }
 

@@ -33,9 +33,17 @@ na měsíc obvykle.
 ## 24.2 Upload výpisu do MyInvoice
 
 V hlavním menu **Finance → Bankovní účty**, záložka **Bankovní výpisy** →
-tlačítko **Nahrát výpis**.
+tlačítko **Nahrát GPC/ABO nebo PDF**.
 
 ![Upload výpisu](img/11_banka_upload.webp)
+
+> 💡 **PDF výpis místo GPC.** Některé banky GPC/ABO export nenabízejí (Banka
+> CREDITAS), případně ho konkrétní účet nemá zapnutý. Pro **Creditas, ČSOB, KB a Raiffeisenbank**
+> proto stačí nahrát rovnou **PDF výpis** — systém ho deterministicky rozparsuje
+> na transakce (bez AI) a ověří, že součet sedí na počáteční a konečný zůstatek
+> z hlavičky (na haléř přesně). Dál to funguje úplně stejně jako GPC — párování,
+> stavy účtů i originál ke stažení. Jeden soubor může být GPC/ABO nebo PDF,
+> rozhoduje přípona; naráz jde vybrat i mix obojího.
 
 Vyber soubor (drag & drop nebo klik). Po nahrání:
 
@@ -100,6 +108,13 @@ připraví koncept **daňového dokladu k přijaté platbě** (viz § 11.1.2);
 doplatek zálohy, ke které už existuje finální doklad, se eviduje na finál.
 Stejně fungují platby z **e-mailových avíz** ([37. Bankovní účty](37_Bankovni_ucty.md)).
 
+U cizoměnové faktury placené na **CZK účet** se přepočet kurzem dokladu
+použije jen k rozpoznání platby. Pokud se CZK pohyb vejde do devizové tolerance,
+zaeviduje se jako úhrada celého zbývajícího obnosu v měně faktury. Skutečná
+CZK částka zůstává beze změny na bankovní transakci; nemusí se rovnat
+částce faktury násobené kurzem dokladu. Výrazně nižší platba se nadále
+eviduje jako částečná úhrada přepočtená kurzem faktury.
+
 ### 24.4.2 Manuální párování
 
 Pro transakce, které se nespárovaly automaticky (typicky chybí VS, nebo
@@ -109,9 +124,12 @@ Pro transakce, které se nespárovaly automaticky (typicky chybí VS, nebo
 2. Najdeš fakturu (číslo / klient / částka).
 3. Vyber a potvrď.
 
-Zaeviduje se platba ve výši transakce — plné pokrytí označí fakturu `paid`
-(`paid_at` = datum transakce), nižší částka je částečná úhrada. Activity log:
-`bank.matched_manual`.
+Ve stejné měně se zaeviduje platba ve výši transakce. U CZK platby
+cizoměnové faktury, která odpovídá celému zbytku v devizové toleranci, se
+faktura vyrovná celým zbytkem v její měně; přesný CZK pohyb zůstane na
+bankovní transakci. Výrazně nižší částka je částečná úhrada.
+Plné pokrytí označí fakturu `paid` (`paid_at` = datum transakce).
+Activity log: `bank.matched_manual`.
 
 #### Sloučená úhrada (jedna platba na více faktur)
 

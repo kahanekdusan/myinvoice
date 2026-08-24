@@ -65,7 +65,13 @@ final class CreatePurchaseInvoiceAction
         // Dodavatel neplátce DPH → odpočet nelze uplatnit. Když volající vat_deduction
         // explicitně neposlal, vynutíme 'none' (bezpečný default); když zvolil jinak,
         // respektujeme to (vědomý override v editoru), ale níže přidáme varování.
-        $vendorNonPayer = isset($vendor['is_vat_payer']) && !$vendor['is_vat_payer'];
+        // Plátcovství bereme ze snapshotu k datu plnění (`vendor_is_vat_payer` z těla, migrace
+        // 0133) — ne z živého flagu klienta, aby historická faktura zůstala daňově správně
+        // i když dodavatel dnes plátce už není. Fallback na živý flag jen když snapshot chybí.
+        $vendorIsPayer = array_key_exists('vendor_is_vat_payer', $body)
+            ? (bool) $body['vendor_is_vat_payer']
+            : (isset($vendor['is_vat_payer']) ? (bool) $vendor['is_vat_payer'] : true);
+        $vendorNonPayer = !$vendorIsPayer;
         if ($vendorNonPayer && !array_key_exists('vat_deduction', $body)) {
             $body['vat_deduction'] = 'none';
         }
@@ -73,8 +79,34 @@ final class CreatePurchaseInvoiceAction
         $user = (array) $request->getAttribute(AuthMiddleware::ATTR_USER, []);
         $userId = (int) ($user['id'] ?? 0);
 
-        // Auto-default VAT klasifikace pokud user nezadal (s multi-tenant scope)
-        $this->applyVatClassificationDefaults($body, $supplierId);
+        // Konzistence hlavičky s položkami: explicitní RC klasifikace na položce/hlavičce
+        // (5/23/24/24e/25…) vynucuje reverse_charge = 1 — jinak si data odporují a při
+        // změně klasifikace se výkazy rozpadnou (viz VatClassificationDefaulter).
+        // PŘED auto-defaulty, aby se zbylé neoklasifikované položky defaultovaly už jako RC.
+        $rcForcedByClassification = false;
+        if (empty($body['reverse_charge'])) {
+            $explicitCodes = [];
+            foreach ((array) ($body['items'] ?? []) as $it) {
+                if (!empty($it['vat_classification_code'])) {
+                    $explicitCodes[] = (string) $it['vat_classification_code'];
+                }
+            }
+            if (!empty($body['vat_classification_code'])) {
+                $explicitCodes[] = (string) $body['vat_classification_code'];
+            }
+            if ($this->vatDefaulter->anyReverseChargeCode($explicitCodes, $supplierId)) {
+                $body['reverse_charge'] = 1;
+                $rcForcedByClassification = true;
+            }
+        }
+
+        // Klasifikaci DPH tady ZÁMĚRNĚ nedoplňujeme. Rozhoduje jediný country-aware SSOT
+        // {@see PurchaseInvoiceRepository::defaultClassificationCode()} při ukládání řádků,
+        // který zná zemi dodavatele i povahu plnění; hlavičku z řádků převezme
+        // syncHeaderClassificationFromItems() po uložení. Dřív tu předsazený
+        // VatClassificationDefaulter kód dosadil dřív, než se SSOT vůbec dostal ke slovu
+        // (DB lookup pro 21 % + RC vrací podle display_order '24e' → tuzemský § 92e doklad
+        // skončil na ř. 5 + KH A.2 místo ř. 10 + KH B.1).
 
         try {
             $id = $this->repo->createDraft($body, $userId, $supplierId);
@@ -95,6 +127,10 @@ final class CreatePurchaseInvoiceAction
             $this->repo->setVatOverrides($id, $supplierId, is_array($body['vat_overrides']) ? $body['vat_overrides'] : null);
         }
         $this->calc->recompute($id);
+        // Hlavičková klasifikace se přebírá z řádků (SSOT je defaultClassificationCode()).
+        // Až PO recompute — volba dominantního kódu váží podle total_with_vat, které
+        // kalkulátor dopočítává.
+        $this->repo->syncHeaderClassificationFromItems($id, $supplierId);
 
         $ip = $this->ipMatcher->clientIpFromRequest($request->getServerParams());
         $this->logger->log('purchase_invoice.created', $userId, 'purchase_invoice', $id, [
@@ -106,49 +142,18 @@ final class CreatePurchaseInvoiceAction
         // Non-blocking varování (např. dobropis s kladným součtem — viz issue #35).
         $warnings = PurchaseInvoiceValidation::warnings($invoice ?? []);
         // Neplátce + přesto uplatněn odpočet → upozorni (uživatel vědomě přepsal).
-        if ($vendorNonPayer && ($invoice['vat_deduction'] ?? 'full') !== 'none') {
+        // VÝJIMKA reverse charge (zahraniční služba/zboží): dodavatel je z pohledu české
+        // DPH neplátce ZE SVÉ PODSTATY (nefakturuje českou DPH), ale příjemce si daň
+        // samovyměří a smí ji odečíst (§ 72/73) — varování by tu bylo false positive.
+        if ($vendorNonPayer && !PurchaseInvoiceValidation::isReverseCharge($invoice) && ($invoice['vat_deduction'] ?? 'full') !== 'none') {
             $warnings[] = 'vendor_non_payer_deduction';
+        }
+        if ($rcForcedByClassification) {
+            $warnings[] = 'reverse_charge_forced_by_classification';
         }
         if (!empty($warnings)) {
             $invoice['_warnings'] = $warnings;
         }
         return Json::ok($response, $invoice, 201);
-    }
-
-    /**
-     * Auto-default vat_classification_code (purchase) podle vat_rate na řádcích a header.
-     */
-    private function applyVatClassificationDefaults(array &$body, int $supplierId): void
-    {
-        $vatRates = $this->repo->vatRateMap();
-        $reverseCharge = !empty($body['reverse_charge']);
-
-        if (!empty($body['items']) && is_array($body['items'])) {
-            foreach ($body['items'] as &$item) {
-                if (!empty($item['vat_classification_code'])) continue;
-                $rateId = (int) ($item['vat_rate_id'] ?? 0);
-                $rate = (float) ($vatRates[$rateId] ?? 0);
-                $taxDate = $body['tax_date'] ?? $body['issue_date'] ?? null;
-                $item['vat_classification_code'] = $this->vatDefaulter->defaultForPurchase($rate, $reverseCharge, $taxDate, $supplierId);
-            }
-            unset($item);
-        }
-
-        if (empty($body['vat_classification_code']) && !empty($body['items'])) {
-            $itemsWithTotals = array_map(function ($it) use ($vatRates) {
-                $rateId = (int) ($it['vat_rate_id'] ?? 0);
-                $rate = (float) ($vatRates[$rateId] ?? 0);
-                $qty = (float) ($it['quantity'] ?? 1);
-                $price = (float) ($it['unit_price_without_vat'] ?? 0);
-                return ['vat_rate' => $rate, 'total_with_vat' => $qty * $price * (1 + $rate / 100)];
-            }, (array) $body['items']);
-            $body['vat_classification_code'] = $this->vatDefaulter->suggestHeaderForInvoice(
-                $itemsWithTotals,
-                (bool) ($body['reverse_charge'] ?? false),
-                'purchase',
-                $body['tax_date'] ?? $body['issue_date'] ?? null,
-                $supplierId,
-            );
-        }
     }
 }

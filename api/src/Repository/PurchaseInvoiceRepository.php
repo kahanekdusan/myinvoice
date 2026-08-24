@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace MyInvoice\Repository;
 
 use MyInvoice\Infrastructure\Database\Connection;
+use MyInvoice\Support\PublicAuthorityFeeText;
 use PDO;
 
 /**
@@ -40,6 +41,7 @@ final class PurchaseInvoiceRepository
         $stmt = $this->db->pdo()->prepare(
             'SELECT pi.*,
                     c.company_name AS vendor_company_name, c.ic AS vendor_ic, c.dic AS vendor_dic,
+                    c.is_vat_payer AS vendor_current_is_vat_payer,
                     c.main_email AS vendor_main_email, c.language AS vendor_language,
                     cur.code AS currency, cur.symbol AS currency_symbol, cur.decimals AS currency_decimals,
                     pcur.code AS payment_currency, pcur.symbol AS payment_currency_symbol,
@@ -55,7 +57,17 @@ final class PurchaseInvoiceRepository
         $row = $stmt->fetch(PDO::FETCH_ASSOC);
         if ($row === false) return null;
 
+        // Efektivní plátcovství dodavatele pro tento doklad: primárně zmrazený snapshot
+        // (migrace 0133), u legacy dokladů (NULL) fallback na živý příznak klienta. Editor
+        // i daňová logika pracují s touto konkrétní bool hodnotou.
+        $snapshot = $row['vendor_is_vat_payer'] ?? null;
+        $vendorCurrent = $row['vendor_current_is_vat_payer'] ?? null;
+        unset($row['vendor_current_is_vat_payer']);
+
         $row = $this->castInvoice($row);
+        $row['vendor_is_vat_payer'] = $snapshot !== null
+            ? (bool) (int) $snapshot
+            : ($vendorCurrent !== null ? (bool) (int) $vendorCurrent : true);
         $row['items'] = $this->itemsFor($id);
         $row['vat_breakdown'] = $this->buildVatBreakdown($row['items']);
         $row['totals'] = [
@@ -255,6 +267,10 @@ final class PurchaseInvoiceRepository
         if (!empty($filters['needs_review'])) {
             $where[] = "pi.extraction_warning IS NOT NULL";
         }
+        if (!empty($filters['import_batch_id'])) {
+            $where[] = 'pi.import_batch_id = ?';
+            $params[] = (string) $filters['import_batch_id'];
+        }
         // „Předané k úhradě" — odvozená dimenze (příznak payment_ordered_at), NE status.
         // '1' = předané, '0' = nepředané. Status zůstává received/booked/paid (ortogonální).
         if (isset($filters['payment_ordered']) && $filters['payment_ordered'] !== null && $filters['payment_ordered'] !== '') {
@@ -397,13 +413,23 @@ final class PurchaseInvoiceRepository
         }
 
         // Sanity check: vendor existuje a patří tenantovi
-        $stmt = $pdo->prepare('SELECT supplier_id, default_expense_category_id FROM clients WHERE id = ?');
+        $stmt = $pdo->prepare('SELECT supplier_id, default_expense_category_id, is_vat_payer FROM clients WHERE id = ?');
         $stmt->execute([$vendorId]);
         $vendorRow = $stmt->fetch(\PDO::FETCH_ASSOC) ?: [];
         $vendorSupplier = (int) ($vendorRow['supplier_id'] ?? 0);
         if ($vendorSupplier !== $supplierId) {
             throw new \InvalidArgumentException("Vendor #$vendorId nepatří tomuto tenantovi.");
         }
+
+        // Snapshot plátcovství dodavatele k datu plnění (migrace 0133). Volající může poslat
+        // explicitní `vendor_is_vat_payer` (editor / import, který stav zná); jinak zmrazíme
+        // AKTUÁLNÍ živý příznak klienta. Doklad si pak drží vlastní stav nezávisle na tom,
+        // jak se plátcovství dodavatele později změní v registru.
+        $vendorIsVatPayer = array_key_exists('vendor_is_vat_payer', $data)
+            ? ($data['vendor_is_vat_payer'] === null ? null : ((bool) $data['vendor_is_vat_payer'] ? 1 : 0))
+            : (array_key_exists('is_vat_payer', $vendorRow) && $vendorRow['is_vat_payer'] !== null
+                ? ((bool) $vendorRow['is_vat_payer'] ? 1 : 0)
+                : null);
 
         // Výchozí kategorie nákladu dodavatele — aplikuje se, pokud volající kategorii
         // explicitně neurčil. Platí pro manuální zadání i pro všechny importy
@@ -443,7 +469,7 @@ final class PurchaseInvoiceRepository
         }
 
         $sql = 'INSERT INTO purchase_invoices
-            (supplier_id, vendor_id, varsymbol, vendor_invoice_number, document_kind,
+            (supplier_id, vendor_id, vendor_is_vat_payer, varsymbol, vendor_invoice_number, document_kind,
              issue_date, tax_date, due_date, received_at,
              currency_id, exchange_rate, exchange_rate_date, exchange_rate_source,
              reverse_charge, prices_include_vat, language, note_above_items, note_below_items,
@@ -454,12 +480,13 @@ final class PurchaseInvoiceRepository
              payment_account_number, payment_bank_code, payment_iban, payment_bic,
              payment_variable_symbol, payment_account_source, payment_account_checked_at,
              status, vat_classification_code, vat_deduction, vat_deduction_percent, tax_deductible, is_fixed_asset, expense_category_id, created_by)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "draft", ?, ?, ?, ?, ?, ?, ?)';
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "draft", ?, ?, ?, ?, ?, ?, ?)';
 
         $stmt = $pdo->prepare($sql);
         $stmt->execute([
             $supplierId,
             $vendorId,
+            $vendorIsVatPayer,
             $manualVarsymbol,
             $vendorInvoiceNumber,
             $documentKind,
@@ -651,6 +678,17 @@ final class PurchaseInvoiceRepository
             throw new \InvalidArgumentException('vendor_invoice_number má max 50 znaků');
         }
 
+        // Snapshot plátcovství dodavatele (migrace 0133) přepisujeme jen když ho volající
+        // explicitně poslal (editor faktury / import, který stav zná). Ostatní update cesty
+        // ho neposílají → zmrazený stav dokladu zůstává nedotčený (klíč pro historické doklady).
+        $hasVendorVatPayer = array_key_exists('vendor_is_vat_payer', $data);
+        $vendorIsVatPayer = null;
+        if ($hasVendorVatPayer) {
+            $vendorIsVatPayer = $data['vendor_is_vat_payer'] === null
+                ? null
+                : ((bool) $data['vendor_is_vat_payer'] ? 1 : 0);
+        }
+
         // Platební účet pro QR platbu měníme jen když ho volající explicitně poslal
         // (editor faktury). Ostatní update cesty `payment` neposílají → účet zůstává.
         $hasPayment = array_key_exists('payment', $data);
@@ -672,6 +710,7 @@ final class PurchaseInvoiceRepository
                 payment_currency_id = ?, payment_exchange_rate = ?,
                 paid_amount_payment_ccy = ?, paid_amount_invoice_ccy = ?, exchange_diff_base = ?,
                 vat_classification_code = ?, vat_deduction = ?, vat_deduction_percent = ?, tax_deductible = ?, is_fixed_asset = ?, expense_category_id = ?'
+              . ($hasVendorVatPayer ? ', vendor_is_vat_payer = ?' : '')
               . $paymentSet
               . ($hasVarsymbol ? ', varsymbol = ?' : '')
               . ' WHERE id = ? AND supplier_id = ?';
@@ -706,6 +745,7 @@ final class PurchaseInvoiceRepository
             !empty($data['is_fixed_asset']) ? 1 : 0,
             isset($data['expense_category_id']) && $data['expense_category_id'] ? (int) $data['expense_category_id'] : null,
         ];
+        if ($hasVendorVatPayer) $params[] = $vendorIsVatPayer;
         if ($hasPayment) {
             array_push($params, ...$paymentParams);
         }
@@ -778,7 +818,13 @@ final class PurchaseInvoiceRepository
             // faktura NEDORAZILA do výkazů (VatClassificationMapper SKIPNE code=NULL).
             $code = $item['vat_classification_code'] ?? null;
             if ($code === null) {
-                $code = self::defaultClassificationCode($rate, $reverseCharge, $countryIso, $standardRate);
+                $code = self::defaultClassificationCode(
+                    $rate,
+                    $reverseCharge,
+                    $countryIso,
+                    $standardRate,
+                    PublicAuthorityFeeText::indicatesPublicAuthorityFee((string) ($item['description'] ?? '')),
+                );
             }
             $stmt->execute([
                 $purchaseInvoiceId,
@@ -793,6 +839,17 @@ final class PurchaseInvoiceRepository
                 !empty($item['is_fixed_asset']) ? 1 : 0,
             ]);
         }
+
+        // Pozn.: konzistenci hlavičkového reverse_charge s klasifikací položek
+        // ZDE ZÁMĚRNĚ neřešíme. Flip příznaku patří do Create/Update akcí, které
+        // se dívají jen na kódy VÝSLOVNĚ zadané uživatelem (VatClassificationDefaulter
+        // ::anyReverseChargeCode) a vrací o tom warning. Kdyby se flipovalo tady,
+        // vstupem by byly i kódy dosazené defaultem (24e/24 pro zahraničního
+        // dodavatele s 0 % — větev výše nezávisí na RC flagu), takže doklad
+        // s vědomě vypnutým reverse_charge by se tiše přepisoval při každém
+        // uložení i re-importu. Výkazy rozpor hlavičky a položek unesou:
+        // VatLedgerService zařazuje i samovyměřuje podle flagu NEBO kódu
+        // (23/24/24e/25) — viz testImportedServiceSelfAssessesWithoutInvoiceFlag.
     }
 
     /**
@@ -823,6 +880,9 @@ final class PurchaseInvoiceRepository
         // Základní sazba pro rok dokladu (číselník daňových konstant). Default 21
         // drží zpětnou kompatibilitu pro volání bez kontextu (CLI backfill).
         float $standardRate = 21.0,
+        // Poplatek orgánu veřejné moci ({@see PublicAuthorityFeeText}) — plnění
+        // MIMO předmět daně, nikdy se nesamovyměřuje ani u zahraničního „dodavatele".
+        bool $publicAuthorityFee = false,
     ): ?string {
         $r = (int) round($rate);
         $std = (int) round($standardRate);
@@ -840,6 +900,13 @@ final class PurchaseInvoiceRepository
         // nebo dovoz ZBOŽÍ (ř.3 / ř.7) se ze samotné sazby nepozná → tam kód vybírá
         // AI dle povahy plnění (supply_nature) nebo uživatel ručně. Dřív se mimo-EU
         // 0 % defaultovalo na 25 (ř.7 dovoz zboží), což u služeb bylo věcně špatně.
+        // Poplatek orgánu veřejné moci (soudní, správní, kolek) — orgán nejedná jako
+        // osoba povinná k dani (§ 5 odst. 4 ZDPH / čl. 13 směrnice), plnění tedy NENÍ
+        // předmětem daně a příjemci nevzniká povinnost přiznat daň ani u zahraničního
+        // soudu/úřadu. Žádný kód → doklad zůstane mimo přiznání i KH (issue #30).
+        if ($r === 0 && $publicAuthorityFee) {
+            return null;
+        }
         if ($isForeign && $r === 0) {
             return $isEu ? '24e' : '24';
         }
@@ -847,13 +914,65 @@ final class PurchaseInvoiceRepository
         // Vzácnější použití (vendor obvykle fakturuje bez DPH), ale když má 21 % sazbu
         // (typicky reverse-charge invoice s vyčíslenou daní pro info), tohle je správně.
         if ($isEu && $reverseCharge && $r >= $std) return '23';
+        // Dodavatel ze 3. země / neusazená osoba + RC + základní sazba → přijetí služby
+        // (kód 24, ř. 12 + KH A.2). Dřív takový doklad propadl na tuzemský § 92a ('5',
+        // ř. 10 + KH B.1), přestože přenesenou povinnost mezi plátci v tuzemsku
+        // se zahraničním dodavatelem uplatnit nelze. Dovoz ZBOŽÍ (ř. 7, kód 25) se ze
+        // sazby nepozná — ten vybírá AI dle povahy plnění nebo uživatel ručně.
+        if ($isForeign && $reverseCharge && $r >= $std) return '24';
         // CZ tuzemsko (nebo zahraniční vendor s CZ DPH, vzácné)
         if ($reverseCharge && $r >= $std) return '5';
+        // Tuzemský § 92a doklad se vystavuje BEZ vyčíslené daně (sazba 0 %) — dřív takový
+        // doklad propadl na null a do přiznání (ř.10 + KH B.1) se vůbec nedostal.
+        if ($reverseCharge && $r === 0)   return '5';
         if ($r >= $std)                   return '40';
         // Snížené sazby 5–15 % (12 aktuální, 10/15 historické). Pásmo 16 až <std
         // záměrně nemapujeme (např. německá 19 % není česká DPH → user vybere ručně).
         if ($r >= 5 && $r <= 15)          return '41';
         return null;
+    }
+
+    /**
+     * Doplní hlavičkovou klasifikaci z řádků, pokud na hlavičce žádná není.
+     *
+     * Kód na řádcích derivuje {@see defaultClassificationCode()} (zná zemi dodavatele
+     * i povahu plnění), takže hlavička ho jen přebírá — nikdy nerozhoduje sama. Dřív
+     * ji dopočítával VatClassificationDefaulter, který zemi dodavatele nezná: doklad
+     * v tuzemském režimu přenesené povinnosti (§ 92e stavební práce, 21 %) tak dostal
+     * '24e' → ř. 5 + KH A.2 (služba z EU) místo ř. 10 + KH B.1.
+     *
+     * Bere kód s největším součtem |total_with_vat| — u dokladu s víc kódy je hlavička
+     * jen orientační, rozhoduje řádek (výkazy čtou COALESCE(položka, hlavička)).
+     * Řádky BEZ kódu se do volby nepočítají, ale prázdná hlavička je legitimní výsledek:
+     * u plnění mimo předmět daně (§ 5 odst. 4) i u osvobozeného tuzemského plnění
+     * se kód nepřiřazuje záměrně.
+     */
+    public function syncHeaderClassificationFromItems(int $purchaseInvoiceId, int $supplierId): void
+    {
+        $pdo = $this->db->pdo();
+        $stmt = $pdo->prepare(
+            'SELECT pii.vat_classification_code AS code,
+                    SUM(ABS(COALESCE(pii.total_with_vat, 0))) AS weight
+               FROM purchase_invoice_items pii
+               JOIN purchase_invoices pi ON pi.id = pii.purchase_invoice_id
+              WHERE pii.purchase_invoice_id = ?
+                AND pi.supplier_id = ?
+                AND pii.vat_classification_code IS NOT NULL
+           GROUP BY pii.vat_classification_code
+           ORDER BY weight DESC, code ASC
+              LIMIT 1'
+        );
+        $stmt->execute([$purchaseInvoiceId, $supplierId]);
+        $code = $stmt->fetchColumn();
+        if ($code === false) {
+            return;
+        }
+        $pdo->prepare(
+            'UPDATE purchase_invoices
+                SET vat_classification_code = ?
+              WHERE id = ? AND supplier_id = ?
+                AND (vat_classification_code IS NULL OR vat_classification_code = "")'
+        )->execute([(string) $code, $purchaseInvoiceId, $supplierId]);
     }
 
     /**
@@ -1531,6 +1650,91 @@ final class PurchaseInvoiceRepository
         $pdo->prepare(
             'UPDATE purchase_invoices SET extraction_warning = ? WHERE id = ? AND supplier_id = ?'
         )->execute([$combined, $id, $supplierId]);
+    }
+
+    /**
+     * Označí přijatou fakturu identifikátorem importní dávky (#232). Volá se po
+     * úspěšném vytvoření dokladu při hromadném AI importu, ať jde dávka později
+     * dohledat/filtrovat v seznamu. Idempotentní (přepíše na stejnou hodnotu).
+     */
+    public function setImportBatchId(int $id, int $supplierId, string $batchId): void
+    {
+        $batchId = substr(trim($batchId), 0, 32);
+        if ($batchId === '') {
+            return;
+        }
+        $this->db->pdo()->prepare(
+            'UPDATE purchase_invoices SET import_batch_id = ? WHERE id = ? AND supplier_id = ?'
+        )->execute([$batchId, $id, $supplierId]);
+    }
+
+    /**
+     * Rychlá změna typu dokladu (#232) — pro opravu po AI importu, kdy AI účtenku
+     * klasifikuje jako `receipt` („Doklad o úhradě"), ale účetní ji chce vést jako
+     * `invoice`. Řádkové totály ani `prices_include_vat` NEmění (jsou uložené), jde
+     * jen o metadata/zařazení. Přechod z/na `advance` je vyloučen (má vazby na
+     * settlement — ten se řeší jen v editoru); stornovaný doklad měnit nelze.
+     *
+     * @return string|null  chybová hláška (pro UI), nebo null při úspěchu
+     */
+    public function updateDocumentKind(int $id, int $supplierId, string $kind): ?string
+    {
+        $allowed = ['invoice', 'receipt', 'credit_note', 'advance'];
+        if (!in_array($kind, $allowed, true)) {
+            return 'Neplatný typ dokladu.';
+        }
+        $pdo = $this->db->pdo();
+        $stmt = $pdo->prepare(
+            'SELECT document_kind, status FROM purchase_invoices WHERE id = ? AND supplier_id = ?'
+        );
+        $stmt->execute([$id, $supplierId]);
+        $row = $stmt->fetch(\PDO::FETCH_ASSOC);
+        if ($row === false) {
+            return 'Doklad nenalezen.';
+        }
+        $current = (string) $row['document_kind'];
+        if ($current === $kind) {
+            return null; // no-op
+        }
+        if ((string) $row['status'] === 'cancelled') {
+            return 'Stornovaný doklad nelze měnit.';
+        }
+        if ($current === 'advance' || $kind === 'advance') {
+            return 'Změnu na/ze zálohy proveďte v editoru dokladu (má vazby na vyúčtování).';
+        }
+        $pdo->prepare(
+            'UPDATE purchase_invoices SET document_kind = ? WHERE id = ? AND supplier_id = ?'
+        )->execute([$kind, $id, $supplierId]);
+        return null;
+    }
+
+    /**
+     * Posledních N importních dávek (#232) — pro dropdown „dohledat import" v seznamu
+     * přijatých. Vrací id dávky, čas první faktury v dávce a počet dokladů.
+     *
+     * @return list<array{import_batch_id:string, created_at:string, count:int}>
+     */
+    public function recentImportBatches(int $supplierId, int $limit = 20): array
+    {
+        $limit = max(1, min(100, $limit));
+        $stmt = $this->db->pdo()->prepare(
+            'SELECT import_batch_id, MIN(created_at) AS created_at, COUNT(*) AS cnt
+               FROM purchase_invoices
+              WHERE supplier_id = ? AND import_batch_id IS NOT NULL
+              GROUP BY import_batch_id
+              ORDER BY created_at DESC
+              LIMIT ' . $limit
+        );
+        $stmt->execute([$supplierId]);
+        $out = [];
+        foreach ($stmt->fetchAll(\PDO::FETCH_ASSOC) as $r) {
+            $out[] = [
+                'import_batch_id' => (string) $r['import_batch_id'],
+                'created_at'      => (string) $r['created_at'],
+                'count'           => (int) $r['cnt'],
+            ];
+        }
+        return $out;
     }
 
     public function updateTotals(int $id, float $withoutVat, float $vat, float $withVat, float $rounding): void

@@ -148,7 +148,7 @@ final class UpdateInvoiceAction
             return Json::error($response, 'integrity_violation', $e->getMessage(), 400);
         }
 
-        $errors = InvoiceValidation::invoice($body, $this->repo->vatRateMap());
+        $errors = InvoiceValidation::invoice($body, $this->repo->vatRateMap(), $this->repo->vatRateCountryMap());
         if (!empty($errors)) {
             return Json::error($response, 'validation_failed', 'Validace selhala', 400, ['fields' => $errors]);
         }
@@ -158,6 +158,8 @@ final class UpdateInvoiceAction
 
         try {
             $this->repo->updateDraft($id, $body);
+        } catch (\InvalidArgumentException $e) {
+            return Json::error($response, 'integrity_violation', $e->getMessage(), 400);
         } catch (\PDOException $e) {
             if ($dupMsg = self::varsymbolDuplicateMessage($e, $body['varsymbol'] ?? null)) {
                 return Json::error($response, 'varsymbol_duplicate', $dupMsg, 409);
@@ -222,13 +224,42 @@ final class UpdateInvoiceAction
         }
 
         $ip = $this->ipMatcher->clientIpFromRequest($request->getServerParams());
-        $action = ($existing['status'] !== 'draft') ? 'invoice.force_updated' : 'invoice.updated';
+        // Force-edit vystavené faktury má vlastní typ auditní položky s plným
+        // kontextem: CO se přepsalo (changed) + starý/nový snapshot odběratele
+        // a dodavatele (rebuildSnapshots je při force-editu přepsal z live dat).
+        $isForceEdit = $existing['status'] !== 'draft';
+        if ($isForceEdit) {
+            $payload = ($payload ?? []) + [
+                'old_snapshot' => [
+                    'client'   => self::decodeSnapshot($existing['client_snapshot'] ?? null),
+                    'supplier' => self::decodeSnapshot($existing['supplier_snapshot'] ?? null),
+                ],
+                'new_snapshot' => [
+                    'client'   => self::decodeSnapshot($invoice['client_snapshot'] ?? null),
+                    'supplier' => self::decodeSnapshot($invoice['supplier_snapshot'] ?? null),
+                ],
+            ];
+        }
+        $action = $isForceEdit ? 'invoice.force_edit' : 'invoice.updated';
         $this->logger->log($action, $user['id'] ?? null, 'invoice', $id, $payload, $ip, $request->getHeaderLine('User-Agent'));
 
         if ($rateMeta !== null) {
             $invoice['_meta'] = ['exchange_rate' => $rateMeta];
         }
         return Json::ok($response, $invoice);
+    }
+
+    /** JSON snapshot (string z DB) → pole pro auditní payload; neparsovatelný → null. */
+    private static function decodeSnapshot(mixed $raw): ?array
+    {
+        if (is_array($raw)) {
+            return $raw;
+        }
+        if (!is_string($raw) || $raw === '') {
+            return null;
+        }
+        $decoded = json_decode($raw, true);
+        return is_array($decoded) ? $decoded : null;
     }
 
     /**
@@ -244,7 +275,7 @@ final class UpdateInvoiceAction
         // název (client_id → client); ostatní pole se mapují sama na sebe. Drž v sync
         // s editovatelnými sloupci v InvoiceRepository::updateDraft().
         $columns = [
-            'client_id', 'currency_id', 'project_id', 'revenue_category_id',
+            'client_id', 'currency_id', 'project_id', 'revenue_category_id', 'branding_profile_id',
             'issue_date', 'tax_date', 'due_date', 'varsymbol',
             'invoice_type', 'payment_method', 'note_above_items', 'note_below_items',
             'discount_percent', 'advance_paid_amount', 'reverse_charge',

@@ -19,7 +19,10 @@ use MyInvoice\Repository\TaxConstantsRepository;
  *
  * Sekce KH:
  *   - **A.1** Plnění v režimu přenesené daňové povinnosti (dodavatel)
- *   - **A.2** Pořízení zboží z jiného členského státu (intra-EU acquisition)
+ *   - **A.2** Přijatá plnění se samovyměřením od dodavatele registrovaného k DPH
+ *     v JINÉM ČLENSKÉM STÁTĚ (pořízení zboží § 25, služba § 24/§ 9/1, zboží
+ *     s instalací). Dodavatel bez EU registrace k DPH (3. země, neplátce z EU)
+ *     sem NEPATŘÍ — viz komentář u emisního bloku VetaA2.
  *   - **A.3** Plnění uskutečněná § 92a/b (dodání investičního zlata)
  *   - **A.4** Tuzemská plnění s DPH nad 10 000 Kč (vystavené)
  *   - **A.5** Tuzemská plnění s DPH **do** 10 000 Kč (sumace)
@@ -39,11 +42,24 @@ final class KontrolniHlaseniBuilder
         private readonly TaxConstantsRepository $taxConstants,
     ) {}
 
+    /** Povolené formy podání KH (EPO XSD, § 101e–101f): B řádné, O opravné, N následné, E následné/opravné. */
+    public const FORMS = ['B', 'O', 'N', 'E'];
+    /** Formy, u kterých EPO vyžaduje datum zjištění důvodů (d_zjist) — následná podání. */
+    public const FORMS_REQUIRING_DZJIST = ['N', 'E'];
+
     /**
+     * @param string $form khdph_forma — viz FORMS; u N/E je $dZjist povinné
+     * @param string|null $dZjist datum zjištění důvodů pro podání (DD.MM.YYYY)
      * @return array{xml: string, summary: array<string,mixed>, warnings: list<string>}
      */
-    public function build(int $supplierId, int $year, int $month, string $period = 'monthly'): array
+    public function build(int $supplierId, int $year, int $month, string $period = 'monthly', string $form = 'B', ?string $dZjist = null): array
     {
+        if (!in_array($form, self::FORMS, true)) {
+            throw new \InvalidArgumentException("Neplatná forma hlášení '{$form}' (povolené: " . implode(', ', self::FORMS) . ').');
+        }
+        if (in_array($form, self::FORMS_REQUIRING_DZJIST, true) && ($dZjist === null || $dZjist === '')) {
+            throw new \InvalidArgumentException('Následné kontrolní hlášení vyžaduje datum zjištění důvodů (d_zjist).');
+        }
         $supplier = $this->loadSupplier($supplierId);
         $warnings = $this->validateSupplier($supplier, $period);
 
@@ -63,8 +79,35 @@ final class KontrolniHlaseniBuilder
         $end = (new \DateTimeImmutable(sprintf('%04d-%02d-01', $year, $endMonth)))->modify('last day of this month')->format('Y-m-d');
 
         // Všechny sekce z jedné projekce kanonických řádků (VatLedgerService).
-        ['a1' => $a1, 'a2' => $a2, 'a4' => $a4, 'a5' => $a5, 'b1' => $b1, 'b2' => $b2, 'b3' => $b3]
+        ['a1' => $a1, 'a2' => $a2, 'a4' => $a4, 'a5' => $a5, 'b1' => $b1, 'b2' => $b2, 'b3' => $b3,
+         'missing_rates' => $missingRates, 'estimated_codes' => $estimatedCodes]
             = $this->collectSections($supplierId, $start, $end);
+        // Zahraniční RC bez explicitní klasifikace — fallback odhadl SLUŽBU (24e/24).
+        // Jde-li o zboží, patří plnění na jiný řádek přiznání (23 → ř. 3, 25 → ř. 7)
+        // → uživatel musí kód zvolit ručně; proto adresný warning per doklad.
+        foreach ($estimatedCodes as $e) {
+            $warnings[] = sprintf(
+                '%s (%s, %s): klasifikace odhadnuta — kód %s (%s). %s',
+                $e['doc'], $e['vendor'], $e['country'], $e['code'],
+                $e['code'] === '24e' ? 'služba z EU, ř. 5' : 'služba ze 3. země, ř. 12',
+                $e['code'] === '24e'
+                    ? 'U pořízení zboží z EU zvol ručně kód 23.'
+                    : 'U dovozu zboží ze 3. země zvol ručně kód 25.',
+            );
+        }
+        // #238: doklady v cizí měně bez kurzu — akce je při stažení doplní z ČNB.
+        if ($missingRates !== []) {
+            $warnings[] = 'Chybí kurz u dokladů v cizí měně: '
+                . implode(', ', VatLedgerService::missingExchangeRateLabels($missingRates))
+                . '. Při stažení XML se doplní z ČNB.';
+        }
+        $a1 = $this->filterReverseChargeRowsWithDic($a1, 'A.1', $warnings);
+        $b1 = $this->filterReverseChargeRowsWithDic($b1, 'B.1', $warnings);
+        // A.2 se emituje jen tam, kde jde sestavit PLATNÝ řádek (k_stat + vatid_dod).
+        // Musí předcházet rekapitulaci VetaC, ať celk_zd_a2 sedí s tím, co odešlo.
+        $a2 = $this->filterA2RowsWithEuVatId($a2, $warnings);
+        $a4 = $this->filterKhAttributeConflicts($a4, 'A.4', $warnings);
+        $b2 = $this->filterKhAttributeConflicts($b2, 'B.2', $warnings);
 
         $dom = new \DOMDocument('1.0', 'UTF-8');
         $dom->preserveWhiteSpace = false;
@@ -90,7 +133,13 @@ final class KontrolniHlaseniBuilder
         }
         $vetaD->setAttribute('rok', (string) $year);
         $vetaD->setAttribute('d_poddp', date('d.m.Y')); // datum podání (dnes)
-        $vetaD->setAttribute('khdph_forma', 'B'); // B = řádné podání
+        // B řádné / O opravné (§ 101f/1) / N následné (§ 101f/2) / E následné-opravné.
+        $vetaD->setAttribute('khdph_forma', $form);
+        // Datum zjištění důvodů pro podání následného KH — EPO ho u N/E vyžaduje
+        // (alternativou v XSD je č.j. výzvy, tu negenerujeme). U O je volitelné.
+        if ($dZjist !== null && $dZjist !== '') {
+            $vetaD->setAttribute('d_zjist', $dZjist);
+        }
         $dphkh->appendChild($vetaD);
 
         // VetaP — identifikace plátce (sdíleno s DPHDP3 přes EpoSupplierBlockBuilder)
@@ -105,7 +154,6 @@ final class KontrolniHlaseniBuilder
         $rowNum = 0;
         foreach ($a1 as $r) {
             $cleanDic = self::cleanDic($r['counterparty_dic'] ?? '');
-            if ($cleanDic === '') continue; // Pattern [0-9]{1,10} required
             $rowNum++;
             $v = $dom->createElement('VetaA1');
             $v->setAttribute('c_radku', (string) $rowNum);
@@ -117,26 +165,44 @@ final class KontrolniHlaseniBuilder
             $dphkh->appendChild($v);
         }
 
-        // VetaA2 — pořízení zboží z jiného členského státu (intra-EU acquisition).
-        // Per XSD: k_stat (země dodavatele), vatid_dod (DIČ bez prefixu země),
-        // c_evid_dd (číslo dokladu dodavatele), dppd (datum povinnosti přiznat daň
-        // — required), zakl_dane1/dan1 (21%), zakl_dane2/dan2 (12%).
-        // Plnění je z definice samovyměřené (vendor fakturuje bez DPH, my si daň
-        // přiznáme sami) — `dan1`/`dan2` = base × sazba/100, ne pii.total_vat
-        // (které je 0 pro RC).
+        // VetaA2 — přijatá plnění se samovyměřením od dodavatele REGISTROVANÉHO K DPH
+        // V JINÉM ČLENSKÉM STÁTĚ (pořízení zboží z JČS § 25, přijetí služby § 24/§ 9/1,
+        // zboží s instalací). Per XSD: k_stat (kód člen. státu), vatid_dod (VAT ID bez
+        // prefixu země), c_evid_dd, dppd (required), zakl_dane1/dan1 (21%),
+        // zakl_dane2/dan2 (12%). Plnění je z definice samovyměřené (vendor fakturuje
+        // bez DPH, my si daň přiznáme sami) — `dan1`/`dan2` = base × sazba/100, ne
+        // pii.total_vat (které je 0 pro RC).
+        //
+        // ⚠️ NEROZŠIŘOVAT na dodavatele ze 3. země ani na neplátce z EU. XSD u `k_stat`
+        // doslova říká „kód státu, který přidělil DIČ REGISTRACE K DPH dodavatele … viz
+        // tabulka Daňová identifikační čísla členských států EU" — dodavatel bez EU
+        // registrace k DPH žádné takové číslo nemá, řádek A.2 z něj nelze sestavit a EPO
+        // podání odmítne s chybou „chybí stát a DIČ". Že `celk_zd_a2` v kontrolním součtu
+        // jmenuje i ř. 12/13 přiznání, na tom nic nemění: na ř. 12/13 sedí i dodavatelé
+        // z EU (služba § 10–10d, zboží s montáží), kteří k_stat i vatid_dod mají — součet
+        // ty řádky jmenuje kvůli NIM, ne kvůli 3. zemi. Filtr viz
+        // {@see filterA2RowsWithEuVatId()} / {@see a2Identification()}.
         $rowNum = 0;
+        $celkA2 = 0.0;
         foreach ($a2 as $r) {
-            // VAT ID dodavatele z JČS je ALFANUMERICKÉ (např. IE3668997OH → "3668997OH",
-            // AT U12345678 → "U12345678") — cleanDic() je jen pro české číselné DIČ a
-            // písmena by zahodil. Některé doklady (3. země / neplátce v EU) VAT ID nemají
-            // → atribut zůstává prázdný, což XSD (minLength 0) povoluje.
-            $vatId = self::cleanEuVatId($r['counterparty_dic'] ?? '', $r['country_iso2'] ?? '');
+            // Tvrdá pojistka: VetaA2 s prázdným k_stat / vatid_dod se NIKDY neemituje —
+            // XSD ji sice pustí (use="optional"), ale EPO takové podání zamítne. Filtr
+            // výše to už zaručuje; tenhle guard je tu, aby to nešlo obejít změnou
+            // klasifikace nebo nového volajícího. Řádek se nesmí dostat ani do VetaC,
+            // proto se celk_zd_a2 sčítá TADY, z reálně emitovaných vět.
+            $kStat = (string) ($r['k_stat'] ?? '');
+            $vatId = (string) ($r['vatid_dod'] ?? '');
+            if ($kStat === '' || $vatId === '') {
+                $warnings[] = 'Doklad ' . ((string) ($r['vendor_invoice_number'] ?? '') ?: 'bez čísla')
+                    . ' nelze uvést v KH A.2: chybí kód členského státu nebo DIČ dodavatele.';
+                continue;
+            }
             $rowNum++;
             $v = $dom->createElement('VetaA2');
             $v->setAttribute('c_radku', (string) $rowNum);
-            $kStat = self::khCountryCode($r['country_iso2'] ?? '');
-            if ($kStat !== '') $v->setAttribute('k_stat', $kStat);
-            if ($vatId !== '') $v->setAttribute('vatid_dod', $vatId);
+            $v->setAttribute('k_stat', $kStat);
+            $v->setAttribute('vatid_dod', $vatId);
+            $celkA2 += (float) $r['base21'] + (float) $r['base12'];
             $v->setAttribute('c_evid_dd', (string) $r['vendor_invoice_number']);
             $v->setAttribute('dppd', $this->formatDate($r['tax_date']));
             $v->setAttribute('zakl_dane1', $this->formatAmount($r['base21']));
@@ -146,11 +212,16 @@ final class KontrolniHlaseniBuilder
             $dphkh->appendChild($v);
         }
 
-        // VetaA4 — tuzemská plnění nad 10 000 Kč (vystavené)
+        // VetaA4 — tuzemská plnění nad 10 000 Kč (vystavené). Bez `dic_odb` řádek neexistuje
+        // (stejná past jako A.2) — směrování do A.4 proto vyžaduje DIČ už v buildSections()
+        // a tenhle guard je pojistka. Aby vyřazený řádek nemohl zůstat v rekapitulaci,
+        // sčítá se obrat23/obrat5 z REÁLNĚ emitovaných vět, ne z kandidátů.
         $rowNum = 0;
+        $obrat23 = 0.0; $obrat5 = 0.0;
         foreach ($a4 as $r) {
             $cleanDic = self::cleanDic($r['counterparty_dic'] ?? '');
             if ($cleanDic === '') continue;
+            $obrat23 += (float) $r['base21']; $obrat5 += (float) $r['base12'];
             $rowNum++;
             $taxDate = $this->formatDate($r['tax_date']);
             $v = $dom->createElement('VetaA4');
@@ -162,8 +233,8 @@ final class KontrolniHlaseniBuilder
             $v->setAttribute('dan1', $this->formatAmount($r['vat21']));
             $v->setAttribute('zakl_dane2', $this->formatAmount($r['base12']));
             $v->setAttribute('dan2', $this->formatAmount($r['vat12']));
-            $v->setAttribute('kod_rezim_pl', '0');
-            $v->setAttribute('zdph_44', 'N'); // N = nejedná se o opravu nedobytné pohledávky
+            $v->setAttribute('kod_rezim_pl', (string) ($r['kh_regime_code'] ?? '0'));
+            $v->setAttribute('zdph_44', (string) ($r['kh_bad_debt'] ?? 'N'));
             $dphkh->appendChild($v);
         }
 
@@ -181,7 +252,6 @@ final class KontrolniHlaseniBuilder
         $rowNum = 0;
         foreach ($b1 as $r) {
             $cleanDic = self::cleanDic($r['counterparty_dic'] ?? '');
-            if ($cleanDic === '') continue;
             $rowNum++;
             $v = $dom->createElement('VetaB1');
             $v->setAttribute('c_radku', (string) $rowNum);
@@ -202,11 +272,14 @@ final class KontrolniHlaseniBuilder
         // VetaB2 — přijatá tuzemská nad 10 000 Kč.
         // XSD vyžaduje: pomer (A/N — poměrný odpočet podle §75) a zdph_44
         // (N = běžné, P = oprava nedobytné pohledávky podle §74b, A = §44 do 31.3.2019).
-        // Default: oba 'N' (běžný odpočet, žádná oprava).
+        // Default: oba 'N' (běžný odpočet, žádná oprava). Bez `dic_dod` řádek neexistuje —
+        // pln23/pln5 se proto (jako u A.4) sčítá z reálně emitovaných vět.
         $rowNum = 0;
+        $pln23 = 0.0; $pln5 = 0.0;
         foreach ($b2 as $r) {
             $cleanDic = self::cleanDic($r['counterparty_dic'] ?? '');
             if ($cleanDic === '') continue;
+            $pln23 += (float) $r['base21']; $pln5 += (float) $r['base12'];
             $rowNum++;
             $v = $dom->createElement('VetaB2');
             $v->setAttribute('c_radku', (string) $rowNum);
@@ -219,7 +292,7 @@ final class KontrolniHlaseniBuilder
             $v->setAttribute('dan2', $this->formatAmount($r['vat12']));
             // pomer = A když byl uplatněn poměrný odpočet §75 (částky jsou už zkrácené ve VatLedgerService).
             $v->setAttribute('pomer', !empty($r['is_pomer']) ? 'A' : 'N');
-            $v->setAttribute('zdph_44', 'N');
+            $v->setAttribute('zdph_44', (string) ($r['kh_bad_debt'] ?? 'N'));
             $dphkh->appendChild($v);
         }
 
@@ -235,15 +308,20 @@ final class KontrolniHlaseniBuilder
 
         // VetaC — rekapitulace plnění za období (obrat = uskutečněná, pln = přijatá).
         // Sumace všech sekcí: A4+A5 (sales), B2+B3 (purchases), A1 (RC sales),
-        // B1 (RC purchases), A2 (EU acquisitions → celk_zd_a2).
-        $obrat23 = 0.0; $obrat5 = 0.0;
-        foreach ($a4 as $r) { $obrat23 += (float) $r['base21']; $obrat5 += (float) $r['base12']; }
+        // B1 (RC purchases), A2 (samovyměření od plátce z JČS → celk_zd_a2).
+        //
+        // Pravidlo: rekapitulace smí obsahovat JEN to, co reálně odešlo jako věta. Sekce
+        // s povinným identifikátorem (A.1/B.1 dic, A.4/B.2 dic_odb/dic_dod, A.2 k_stat +
+        // vatid_dod) proto sčítají v emisních blocích výše; sumační A.5/B.3 nemají co
+        // vyřadit a přičítají se tady.
         $obrat23 += (float) ($a5['base21'] ?? 0); $obrat5 += (float) ($a5['base12'] ?? 0);
-        $pln23 = 0.0; $pln5 = 0.0;
-        foreach ($b2 as $r) { $pln23 += (float) $r['base21']; $pln5 += (float) $r['base12']; }
         $pln23 += (float) ($b3['base21'] ?? 0); $pln5 += (float) ($b3['base12'] ?? 0);
-        $rezPren23 = 0.0; foreach ($a1 as $r) { $rezPren23 += (float) $r['base']; }
-        $plnRezPren = 0.0; foreach ($b1 as $r) { $plnRezPren += (float) $r['base']; }
+        $plnRezPren = 0.0; foreach ($a1 as $r) { $plnRezPren += (float) $r['base']; }
+        $rezPren23 = 0.0; $rezPren5 = 0.0;
+        foreach ($b1 as $r) {
+            $rezPren23 += (float) $r['base21'];
+            $rezPren5 += (float) $r['base12'];
+        }
         $vetaC = $dom->createElement('VetaC');
         $vetaC->setAttribute('obrat23',      $this->formatAmount($obrat23));
         $vetaC->setAttribute('obrat5',       $this->formatAmount($obrat5));
@@ -251,20 +329,25 @@ final class KontrolniHlaseniBuilder
         $vetaC->setAttribute('pln5',         $this->formatAmount($pln5));
         $vetaC->setAttribute('pln_rez_pren', $this->formatAmount($plnRezPren));
         $vetaC->setAttribute('rez_pren23',   $this->formatAmount($rezPren23));
-        // rez_pren5 = 0 záměrně: tuzemský reverse charge (§ 92a–92e — stavební práce,
-        // odpad, zlato, …) je v ČR vždy v základní sazbě 21 %, snížená 12% RC neexistuje.
-        $vetaC->setAttribute('rez_pren5',    '0');
-        // celk_zd_a2 = celkový základ pořízení zboží z JČS (sekce A.2)
-        $celkA2 = 0.0;
-        foreach ($a2 as $r) { $celkA2 += (float) $r['base21'] + (float) $r['base12']; }
+        $vetaC->setAttribute('rez_pren5',    $this->formatAmount($rezPren5));
+        // celk_zd_a2 = celkový základ sekce A.2. Sčítá se z REÁLNĚ EMITOVANÝCH vět
+        // VetaA2 (viz emisní blok výše), ne z kandidátů — plnění, které se do A.2
+        // nevejde (dodavatel bez EU registrace k DPH), nesmí zůstat v rekapitulaci.
+        // Za období, kde je jen samovyměření ze 3. země, tedy vyjde 0.
         $vetaC->setAttribute('celk_zd_a2',   $this->formatAmount($celkA2));
         $dphkh->appendChild($vetaC);
 
-        // Termín podání = 25. dne měsíce následujícího po konci období
-        $deadlineMonth = $month + 1;
+        // Termín podání = 25. dne měsíce následujícího po konci období.
+        // U kvartálního podání je rozhodující konec kvartálu ($endMonth), NE předaný
+        // $month (jinak build(..., 4, 'quarterly') = Q2 vrátí termín 25.05. místo 25.07.).
+        $deadlineMonth = $endMonth + 1;
         $deadlineYear = $year;
         if ($deadlineMonth > 12) { $deadlineMonth -= 12; $deadlineYear++; }
-        $deadline = sprintf('%04d-%02d-25', $deadlineYear, $deadlineMonth);
+        // § 33/4 daňového řádu: sobota/neděle/svátek → nejbližší následující pracovní den
+        // (25.07.2026 = sobota → 27.07.2026; bez posunu UI chybně hlásilo „po termínu").
+        $deadline = CzechWorkingDays::shiftToWorkingDay(
+            new \DateTimeImmutable(sprintf('%04d-%02d-25', $deadlineYear, $deadlineMonth))
+        )->format('Y-m-d');
 
         return [
             'xml'      => $dom->saveXML() ?: '',
@@ -279,9 +362,11 @@ final class KontrolniHlaseniBuilder
                 'b1_count'            => count($b1),
                 'b2_count'            => count($b2),
                 'b3_count_aggregated' => $b3['count'],
+                'form'                => $form,
                 'submission_deadline' => $deadline,
             ],
             'warnings' => $warnings,
+            'missing_rates' => $missingRates,
         ];
     }
 
@@ -309,8 +394,28 @@ final class KontrolniHlaseniBuilder
         $bucket = $this->taxConstants->vatBucketThreshold($periodYear);
 
         // Agregace kanonických řádků per (zdroj, faktura).
+        $ledgerRows = $this->ledger->rows($supplierId, $start, $end, includeDrafts: false);
+        // Daňová pojistka (issue #238): non-CZK doklad bez kurzu by se do KH dostal
+        // s náhradním kurzem 1.0 (cizí měna jako CZK). NEházíme chybu — vrátíme doklady
+        // bez kurzu, akce je při stažení doplní z ČNB (náhled jen varuje).
+        $missingRates = VatLedgerService::missingExchangeRateRows($ledgerRows);
+        // Doklady s jen ODHADNUTÝM kódem (zahraniční RC bez klasifikace) — per doklad
+        // jednou, pro adresné warningy v preview (zboží vs. služba nelze z dat poznat).
+        $estimatedCodes = [];
+        foreach ($ledgerRows as $r) {
+            if (!empty($r['code_estimated']) && $r['code'] !== null) {
+                $doc = (string) ($r['vendor_invoice_number'] ?? $r['doc_number'] ?? ('#' . $r['invoice_id']));
+                $estimatedCodes[$r['source'] . ':' . $r['invoice_id']] = [
+                    'doc'     => $doc,
+                    'vendor'  => (string) ($r['counterparty_name'] ?? ''),
+                    'country' => (string) ($r['country_iso2'] ?? ''),
+                    'code'    => (string) $r['code'],
+                ];
+            }
+        }
+        $estimatedCodes = array_values($estimatedCodes);
         $inv = [];
-        foreach ($this->ledger->rows($supplierId, $start, $end, includeDrafts: false) as $r) {
+        foreach ($ledgerRows as $r) {
             $key = $r['source'] . ':' . $r['invoice_id'];
             if (!isset($inv[$key])) {
                 $inv[$key] = [
@@ -321,34 +426,63 @@ final class KontrolniHlaseniBuilder
                     'dic'                   => self::cleanDic($r['counterparty_dic']),
                     'dic_raw'               => $r['counterparty_dic'], // syrové VAT ID pro A.2 (EU alfanum.)
                     'country_iso2'          => $r['country_iso2'],
+                    'country_is_eu'         => $r['country_is_eu'],
                     'total_czk'             => (float) $r['total_with_vat_czk'],
-                    'kod_pred_pl'           => null, // KH kód předmětu plnění (RC) z klasifikace
-                    'is_rc' => false, 'has_a2' => false, 'has_b1' => false, 'is_pomer' => false,
-                    'base21' => 0.0, 'vat21' => 0.0, 'base12' => 0.0, 'vat12' => 0.0, 'base_total' => 0.0,
+                    // KH kód předmětu plnění (RC) z klasifikace. Doklad může nést VÍC režimů
+                    // § 92 najednou (stavební práce + odpad), a XSD chce větu A.1/B.1 per kód —
+                    // proto se základ i daň sčítají PER KÓD, ne do jednoho čísla za doklad.
+                    // Dřív tu byl skalár, který přepsala poslední neprázdná hodnota, takže
+                    // celý doklad odešel pod jedním (často cizím) kódem.
+                    'a1_by_code'            => [],
+                    'b1_by_code'            => [],
+                    'is_rc' => false, 'has_a1' => false, 'has_a2' => false, 'has_b1' => false, 'is_pomer' => false,
+                    'dom_base21' => 0.0, 'dom_vat21' => 0.0, 'dom_base12' => 0.0, 'dom_vat12' => 0.0,
                     'a2_base21' => 0.0, 'a2_vat21' => 0.0, 'a2_base12' => 0.0, 'a2_vat12' => 0.0,
+                    'kh_regime_codes' => [], 'kh_bad_debt_codes' => [],
                 ];
             }
             $g = &$inv[$key];
             if ($r['is_reverse_charge']) $g['is_rc'] = true;
+            if ($r['kh_section'] === 'A.1') $g['has_a1'] = true;
             if ($r['kh_section'] === 'A.2') $g['has_a2'] = true;
             if ($r['kh_section'] === 'B.1') $g['has_b1'] = true;
             if (!empty($r['vat_deduction_partial'])) $g['is_pomer'] = true;
-            if (!empty($r['kod_pred_pl'])) $g['kod_pred_pl'] = (string) $r['kod_pred_pl'];
+            $rowKodPredPl = (string) ($r['kod_pred_pl'] ?? '');
             $base = (float) $r['base_czk'];
             $vat  = (float) $r['vat_czk'];
-            $g['base_total'] += $base;
-            // Přijaté plnění bez nároku na odpočet (dphdp3_line=NULL, např. kód 42
-            // "tuzemsko bez nároku") do B.2/B.3 nepatří — KH eviduje jen plnění,
-            // u kterých příjemce uplatňuje odpočet (a DPHDP3 je rovněž vynechává).
-            // Vystavené (sale) do A.4/A.5 přispívají vždy.
+            $is21 = $r['vat_rate'] >= $bucket;
+            // Rozřazení základu/daně do KH kbelíků PODLE SEKCE klasifikace — každá položka
+            // přispěje jen do JEDNÉ sekce. Tím se mixed faktura (např. §92 RC řádek +
+            // běžný 21% řádek) rozdělí správně (RC část do A.1/B.1, zdanitelná do A.4/B.2),
+            // místo aby celý součet spadl do jedné sekce (issue — audit KH/DPH 2026-07).
+            // khEligible: vystavené vždy, přijaté jen s nárokem na odpočet (dphdp3_line != NULL);
+            // přijaté bez nároku (kód 42, dphdp3_line=NULL) do KH nepatří, DPHDP3 je taky vynechává.
             $khEligible = $r['source'] === 'sale' || $r['dphdp3_line'] !== null;
-            if ($khEligible) {
-                if ($r['vat_rate'] >= $bucket) { $g['base21'] += $base; $g['vat21'] += $vat; }
-                elseif ($r['vat_rate'] > 0)    { $g['base12'] += $base; $g['vat12'] += $vat; }
-            }
-            if ($r['kh_section'] === 'A.2') {
-                if ($r['vat_rate'] >= $bucket) { $g['a2_base21'] += $base; $g['a2_vat21'] += $vat; }
-                elseif ($r['vat_rate'] > 0)    { $g['a2_base12'] += $base; $g['a2_vat12'] += $vat; }
+            switch ($r['kh_section']) {
+                case 'A.1': // tuzemský §92 dodavatel — jen základ (VetaA1 nemá sazbové sloupce)
+                    $g['a1_by_code'][$rowKodPredPl] = ($g['a1_by_code'][$rowKodPredPl] ?? 0.0) + $base;
+                    break;
+                case 'A.2': // přeshraniční samovyměřené (§ 24 služby, § 25 pořízení zboží z JČS)
+                    if ($is21) { $g['a2_base21'] += $base; $g['a2_vat21'] += $vat; }
+                    elseif ($r['vat_rate'] > 0) { $g['a2_base12'] += $base; $g['a2_vat12'] += $vat; }
+                    break;
+                case 'B.1': // tuzemský §92 příjemce — samovyměřená daň (vat z rcSelfAssess)
+                    $b1sums = $g['b1_by_code'][$rowKodPredPl]
+                        ?? ['base21' => 0.0, 'vat21' => 0.0, 'base12' => 0.0, 'vat12' => 0.0];
+                    if ($is21) { $b1sums['base21'] += $base; $b1sums['vat21'] += $vat; }
+                    elseif ($r['vat_rate'] > 0) { $b1sums['base12'] += $base; $b1sums['vat12'] += $vat; }
+                    $g['b1_by_code'][$rowKodPredPl] = $b1sums;
+                    break;
+                default:
+                    // Tuzemská zdanitelná plnění (A.4/A.5, B.2/B.3). RC bez KH sekce — dovoz
+                    // zboží ze 3. země (kód 25), dodání/služba do EU (kód 20/22) — se sem
+                    // NESMÍ dostat (do KH nepatří, jen DPHDP3/SHV) → guard !is_reverse_charge.
+                    if ($khEligible && !$r['is_reverse_charge']) {
+                        $g['kh_regime_codes'][(string) ($r['kh_regime_code'] ?? '0')] = true;
+                        $g['kh_bad_debt_codes'][(string) ($r['kh_bad_debt'] ?? 'N')] = true;
+                        if ($is21) { $g['dom_base21'] += $base; $g['dom_vat21'] += $vat; }
+                        elseif ($r['vat_rate'] > 0) { $g['dom_base12'] += $base; $g['dom_vat12'] += $vat; }
+                    }
             }
             unset($g);
         }
@@ -356,67 +490,116 @@ final class KontrolniHlaseniBuilder
         $a1 = []; $a2 = []; $a4 = []; $b1 = []; $b2 = [];
         $a5 = ['count' => 0, 'base21' => 0.0, 'vat21' => 0.0, 'base12' => 0.0, 'vat12' => 0.0];
         $b3 = ['count' => 0, 'base21' => 0.0, 'vat21' => 0.0, 'base12' => 0.0, 'vat12' => 0.0];
-        $zeroBase = fn (array $g) => abs($g['base21']) < 0.005 && abs($g['base12']) < 0.005;
 
         foreach ($inv as $g) {
             $hasDic = $g['dic'] !== '';
             // § 101e: „nad 10 000 Kč" = OSTŘE více → přesně 10 000 patří do sumace
             // A.5/B.3, ne do jednotlivé A.4/B.2. Proto '>' (ne '>=').
             $overLimit = abs($g['total_czk']) > $itemThreshold;
+            // Tuzemská zdanitelná část faktury (může být 0 u čistě RC/osvobozeného dokladu).
+            // Faktura může přispět SOUČASNĚ do RC sekce (A.1/B.1/A.2) i do A.4/A.5/B.2/B.3
+            // (mixed doklad) — proto žádný `continue`, sekce se vyhodnocují nezávisle.
+            $domZero = abs($g['dom_base21']) < 0.005 && abs($g['dom_base12']) < 0.005;
 
             if ($g['source'] === 'sale') {
-                if ($g['is_rc']) {
-                    $a1[] = ['counterparty_dic' => $g['dic'], 'vendor_invoice_number' => $g['varsymbol'],
-                             'tax_date' => $g['tax_date'], 'base' => $g['base_total'],
-                             'kod_pred_pl' => $g['kod_pred_pl']];
-                    continue;
+                // A.1 — tuzemský režim přenesení (§ 92a–92e, kód 25s). Jen položky sekce A.1.
+                if ($g['has_a1']) {
+                    // Věta per kód předmětu plnění (XSD) — doklad se dvěma režimy § 92
+                    // (stavební práce + odpad) dřív odešel jako jedna věta pod jedním kódem.
+                    foreach ($g['a1_by_code'] as $code => $codeBase) {
+                        // PHP číselný klíč pole automaticky přetypuje na int — zpět na string.
+                        $code = (string) $code;
+                        if (abs($codeBase) < 0.005) {
+                            continue;
+                        }
+                        $a1[] = ['counterparty_dic' => $g['dic_raw'], 'vendor_invoice_number' => $g['varsymbol'],
+                                 'tax_date' => $g['tax_date'], 'base' => $codeBase,
+                                 'kod_pred_pl' => $code !== '' ? $code : null];
+                    }
                 }
-                if ($zeroBase($g)) continue; // osvobozené / EU dodání / vývoz → ne A.4/A.5
-                $row = ['varsymbol' => $g['varsymbol'], 'tax_date' => $g['tax_date'], 'counterparty_dic' => $g['dic'],
-                        'base21' => $g['base21'], 'vat21' => $g['vat21'], 'base12' => $g['base12'], 'vat12' => $g['vat12']];
-                if ($overLimit && $hasDic) {
-                    $a4[] = $row;
-                } else {
-                    $a5['count']++; $a5['base21'] += $g['base21']; $a5['vat21'] += $g['vat21'];
-                    $a5['base12'] += $g['base12']; $a5['vat12'] += $g['vat12'];
+                // A.4/A.5 — tuzemská zdanitelná část (RC/osvobozené/EU dodání/vývoz nepřispěly).
+                if (!$domZero) {
+                    $regimeCodes = array_keys($g['kh_regime_codes']);
+                    $badDebtCodes = array_keys($g['kh_bad_debt_codes']);
+                    $row = ['varsymbol' => $g['varsymbol'], 'tax_date' => $g['tax_date'], 'counterparty_dic' => $g['dic'],
+                            'base21' => $g['dom_base21'], 'vat21' => $g['dom_vat21'],
+                            'base12' => $g['dom_base12'], 'vat12' => $g['dom_vat12'],
+                            'kh_regime_code' => count($regimeCodes) === 1 ? $regimeCodes[0] : null,
+                            'kh_bad_debt' => count($badDebtCodes) === 1 ? $badDebtCodes[0] : null,
+                            'kh_attribute_conflict' => count($regimeCodes) > 1 || count($badDebtCodes) > 1];
+                    if (($overLimit || $row['kh_bad_debt'] === 'P') && $hasDic) {
+                        $a4[] = $row;
+                    } else {
+                        $a5['count']++; $a5['base21'] += $g['dom_base21']; $a5['vat21'] += $g['dom_vat21'];
+                        $a5['base12'] += $g['dom_base12']; $a5['vat12'] += $g['dom_vat12'];
+                    }
                 }
             } else { // purchase
+                // A.2 — přijatá plnění, kde daň přiznává příjemce (§ 108) a dodavatel je
+                // REGISTROVANÝ K DPH V JINÉM ČLENSKÉM STÁTĚ: pořízení zboží z JČS (§ 25),
+                // přijetí služby (§ 24 / § 9 odst. 1), zboží s instalací.
+                //
+                // ⚠️ Samovyměření od dodavatele ze 3. ZEMĚ (typicky US SaaS) do A.2
+                // NEPATŘÍ, i když je klasifikace pošle sem: VetaA2 se bez `k_stat`
+                // a `vatid_dod` neobejde a XSD u `k_stat` doslova píše „kód státu, který
+                // přidělil DIČ REGISTRACE K DPH dodavatele … viz tabulka Daňová
+                // identifikační čísla členských států EU". Dodavatel ze 3. země (a stejně
+                // tak NEPLÁTCE z EU) takové číslo nemá → platný řádek A.2 z něj nejde
+                // sestavit a EPO podání odmítne („chybí stát a DIČ").
+                //
+                // To NEODPORUJE tomu, že kontrolní součet `celk_zd_a2` jmenuje ř. 12/13
+                // přiznání: na ř. 12/13 sedí i dodavatelé z EU (služba § 10–10d, zboží
+                // s montáží), kteří k_stat i vatid_dod mají — součet ty řádky jmenuje
+                // kvůli nim. Z „součet jmenuje ř. 12/13" tedy NEplyne „do A.2 patří i
+                // 3. země". (Historie: migrace 0129 to opravila správně, 0130 to vrátila
+                // zpět — proto je pravidlo od té doby v kódu, ne jen v číselníku.)
+                //
+                // Daňový dopad = 0: DPHDP3 se řídí `dphdp3_line`, ne `kh_section`, takže
+                // ř. 12 (samovyměření) i ř. 43 (zrcadlový odpočet) zůstávají naplněné —
+                // mění se jen KH. Vlastní vyřazení dělá {@see filterA2RowsWithEuVatId()},
+                // ať se ve `$a2` zachovají údaje pro warning i pro křížovou kontrolu.
                 if ($g['has_a2']) {
-                    // A.2 = přeshraniční samovyměřená plnění (§ 24 služby z EU i 3. země,
-                    // § 25 pořízení zboží z JČS). vatid_dod nese syrové EU VAT ID (alfanum.).
                     $a2[] = ['vendor_invoice_number' => $g['vendor_invoice_number'], 'tax_date' => $g['tax_date'],
                              'counterparty_dic' => $g['dic_raw'], 'country_iso2' => $g['country_iso2'],
+                             'country_is_eu' => $g['country_is_eu'],
                              'base21' => $g['a2_base21'], 'vat21' => $g['a2_vat21'],
                              'base12' => $g['a2_base12'], 'vat12' => $g['a2_vat12']];
-                    continue;
                 }
-                if ($g['has_b1']) { // TUZEMSKÝ režim přenesení (§ 92a–92e) — jen explicitní sekce B.1
-                    // Per-sazbové agregáty (stejný tvar jako B.2) nesou i samovyměřenou daň
-                    // (vat21/vat12 z rcSelfAssess) — B.1 ji musí vykázat, ne jen základ.
-                    $b1[] = ['counterparty_dic' => $g['dic'], 'vendor_invoice_number' => $g['vendor_invoice_number'],
-                             'tax_date' => $g['tax_date'], 'base' => $g['base_total'],
-                             'base21' => $g['base21'], 'vat21' => $g['vat21'],
-                             'base12' => $g['base12'], 'vat12' => $g['vat12'],
-                             'kod_pred_pl' => $g['kod_pred_pl']];
-                    continue;
+                // B.1 — tuzemský režim přenesení (§ 92a–92e) příjemce. Per-sazbové agregáty
+                // nesou i samovyměřenou daň (vat z rcSelfAssess) — B.1 ji vykazuje, ne jen základ.
+                if ($g['has_b1']) {
+                    // Věta per kód předmětu plnění (XSD) — viz A.1 výš.
+                    foreach ($g['b1_by_code'] as $code => $sums) {
+                        // PHP číselný klíč pole automaticky přetypuje na int — zpět na string.
+                        $code = (string) $code;
+                        $b1[] = ['counterparty_dic' => $g['dic_raw'], 'vendor_invoice_number' => $g['vendor_invoice_number'],
+                                 'tax_date' => $g['tax_date'], 'base' => $sums['base21'] + $sums['base12'],
+                                 'base21' => $sums['base21'], 'vat21' => $sums['vat21'],
+                                 'base12' => $sums['base12'], 'vat12' => $sums['vat12'],
+                                 'kod_pred_pl' => $code !== '' ? $code : null];
+                    }
                 }
-                // Zbylé samovyměřené (RC) plnění bez KH sekce = dovoz zboží ze 3. země
-                // (kód 25, DPHDP3 ř.7/8) — do KH se nevykazuje (jen DPHDP3 + odpočet ř.43/44).
-                if ($g['is_rc']) continue;
-                if ($zeroBase($g)) continue;      // osvobozená přijatá bez nároku → ne B.2/B.3
-                $row = ['vendor_invoice_number' => $g['vendor_invoice_number'], 'tax_date' => $g['tax_date'],
-                        'counterparty_dic' => $g['dic'], 'base21' => $g['base21'], 'vat21' => $g['vat21'],
-                        'base12' => $g['base12'], 'vat12' => $g['vat12'], 'is_pomer' => $g['is_pomer']];
-                if ($overLimit && $hasDic) {
-                    $b2[] = $row;
-                } else {
-                    $b3['count']++; $b3['base21'] += $g['base21']; $b3['vat21'] += $g['vat21'];
-                    $b3['base12'] += $g['base12']; $b3['vat12'] += $g['vat12'];
+                // B.2/B.3 — tuzemská přijatá zdanitelná (s nárokem). RC bez KH sekce (dovoz
+                // ze 3. země kód 25) a plnění bez nároku (kód 42) do dom_* nepřispěly.
+                if (!$domZero) {
+                    $badDebtCodes = array_keys($g['kh_bad_debt_codes']);
+                    $row = ['vendor_invoice_number' => $g['vendor_invoice_number'], 'tax_date' => $g['tax_date'],
+                            'counterparty_dic' => $g['dic'], 'base21' => $g['dom_base21'], 'vat21' => $g['dom_vat21'],
+                            'base12' => $g['dom_base12'], 'vat12' => $g['dom_vat12'], 'is_pomer' => $g['is_pomer'],
+                            'kh_bad_debt' => count($badDebtCodes) === 1 ? $badDebtCodes[0] : null,
+                            'kh_attribute_conflict' => count($badDebtCodes) > 1];
+                    if (($overLimit || $row['kh_bad_debt'] === 'P') && $hasDic) {
+                        $b2[] = $row;
+                    } else {
+                        $b3['count']++; $b3['base21'] += $g['dom_base21']; $b3['vat21'] += $g['dom_vat21'];
+                        $b3['base12'] += $g['dom_base12']; $b3['vat12'] += $g['dom_vat12'];
+                    }
                 }
             }
         }
 
-        return ['a1' => $a1, 'a2' => $a2, 'a4' => $a4, 'a5' => $a5, 'b1' => $b1, 'b2' => $b2, 'b3' => $b3];
+        return ['a1' => $a1, 'a2' => $a2, 'a4' => $a4, 'a5' => $a5, 'b1' => $b1, 'b2' => $b2, 'b3' => $b3,
+                'missing_rates' => $missingRates, 'estimated_codes' => $estimatedCodes];
     }
 
     /** @return list<string> warnings */
@@ -445,7 +628,7 @@ final class KontrolniHlaseniBuilder
                     COALESCE(c.iso2, 'CZ') AS country_iso2,
                     s.ic, s.dic, s.is_vat_payer, s.is_identified,
                     s.taxpayer_type, s.vat_period, s.financial_office_code,
-                    s.workplace_code, s.data_box_type, s.data_box_id,
+                    s.workplace_code, s.data_box_id,
                     s.email, s.phone, s.cz_nace_code,
                     s.street_number_pop, s.street_number_orient,
                     s.opr_jmeno, s.opr_prijmeni, s.opr_postaveni,
@@ -487,6 +670,116 @@ final class KontrolniHlaseniBuilder
         return '5';
     }
 
+    /**
+     * Tuzemské RC vyžaduje číselnou kmenovou část DIČ. Neplatný řádek nesmí zůstat
+     * v rekapitulaci VetaC, když jej nelze emitovat do A.1/B.1.
+     *
+     * @param list<array<string,mixed>> $rows
+     * @param list<string> $warnings
+     * @return list<array<string,mixed>>
+     */
+    private function filterReverseChargeRowsWithDic(array $rows, string $section, array &$warnings): array
+    {
+        return array_values(array_filter($rows, static function (array $row) use ($section, &$warnings): bool {
+            if (self::isValidCzechDic($row['counterparty_dic'] ?? '')) {
+                return true;
+            }
+            $number = (string) ($row['vendor_invoice_number'] ?? 'bez čísla');
+            $warnings[] = "Doklad {$number} nelze uvést v KH {$section}: chybí platné české DIČ protistrany. Doplňte DIČ před podáním.";
+            return false;
+        }));
+    }
+
+    /**
+     * Vyřadí ze sekce A.2 plnění, ze kterých NELZE sestavit platný řádek — tedy
+     * dodavatele bez použitelného DIČ registrace k DPH v členském státě EU
+     * ({@see a2Identification()}). Ponechaným řádkům rovnou dopočítá `k_stat`
+     * a `vatid_dod`, aby emisní blok neopakoval tutéž logiku.
+     *
+     * Rozlišení varování je záměrné:
+     *   - dodavatel ze 3. ZEMĚ → tiše mimo KH. Je to správný a běžný stav (ř. 12/43
+     *     přiznání to pokrývají), uživatel nemá co doplňovat; varování na každý US SaaS
+     *     doklad by bylo jen šum.
+     *   - dodavatel z EU BEZ VAT ID → varování. Tam jde skoro vždy o neúplná data
+     *     (chybějící DIČ na kontaktu), které lze před podáním doplnit.
+     *
+     * @param list<array<string,mixed>> $rows
+     * @param list<string> $warnings by-ref
+     * @return list<array<string,mixed>>
+     */
+    private function filterA2RowsWithEuVatId(array $rows, array &$warnings): array
+    {
+        $out = [];
+        foreach ($rows as $row) {
+            $ident = self::a2Identification(
+                $row['country_iso2'] ?? null,
+                !empty($row['country_is_eu']),
+                $row['counterparty_dic'] ?? null,
+            );
+            if ($ident !== null) {
+                $out[] = $row + $ident;
+                continue;
+            }
+            if (!empty($row['country_is_eu'])) {
+                $number = (string) ($row['vendor_invoice_number'] ?? '') ?: 'bez čísla';
+                $warnings[] = "Doklad {$number} nelze uvést v KH A.2: u dodavatele z EU chybí "
+                    . 'DIČ registrace k DPH (VAT ID). Doplňte ho na kontaktu před podáním.';
+            }
+        }
+        return $out;
+    }
+
+    /**
+     * Identifikace dodavatele pro KH oddíl A.2 (VetaA2.k_stat + vatid_dod), nebo `null`,
+     * když z plnění platný řádek A.2 sestavit NELZE.
+     *
+     * Kritérium je záměrně to PŘÍSNĚJŠÍ z dvojice („není z EU" vs. „nemá použitelné EU
+     * VAT ID"): rozhoduje existence DIČ registrace k DPH v členském státě, ne samotné
+     * sídlo dodavatele. Neplátce se sídlem v EU totiž VAT ID taky nemá a řádek by byl
+     * stejně neplatný — kdyby se filtrovalo jen podle země, prošel by a EPO by podání
+     * odmítlo úplně stejně jako u 3. země.
+     *
+     * Public static: stejné pravidlo potřebuje i Kniha DPH (efektivní KH sekce ve sloupci
+     * „KH"), aby nezobrazovala A.2 tam, kde do KH reálně nic neodejde.
+     *
+     * @return array{k_stat: string, vatid_dod: string}|null
+     */
+    public static function a2Identification(?string $countryIso2, bool $countryIsEu, ?string $vatId): ?array
+    {
+        if (!$countryIsEu) {
+            return null;
+        }
+        $kStat = self::khCountryCode($countryIso2);
+        $clean = self::cleanEuVatId($vatId, $countryIso2);
+        if ($kStat === '' || $clean === '') {
+            return null;
+        }
+        return ['k_stat' => $kStat, 'vatid_dod' => $clean];
+    }
+
+    /**
+     * @param list<array<string,mixed>> $rows
+     * @param list<string> $warnings
+     * @return list<array<string,mixed>>
+     */
+    private function filterKhAttributeConflicts(array $rows, string $section, array &$warnings): array
+    {
+        return array_values(array_filter($rows, static function (array $row) use ($section, &$warnings): bool {
+            if (empty($row['kh_attribute_conflict'])) {
+                return true;
+            }
+            $number = (string) ($row['varsymbol'] ?? $row['vendor_invoice_number'] ?? 'bez čísla');
+            $warnings[] = "Doklad {$number} nelze uvést v KH {$section}: položky mají rozdílný režim plnění nebo příznak opravy nedobytné pohledávky. Sjednoťte klasifikaci před podáním.";
+            return false;
+        }));
+    }
+
+    private static function isValidCzechDic(?string $dic): bool
+    {
+        $value = strtoupper(trim((string) $dic));
+        return preg_match('/^(?:CZ)?[0-9]{1,10}$/', $value) === 1;
+    }
+
     /** DIČ pro KH XML — odstraní CZ prefix, jen číslice. */
     /** Public static: stejnou normalizaci DIČ používá DphBookBuilder pro efektivní KH sekci. */
     public static function cleanDic(?string $dic): string
@@ -504,14 +797,22 @@ final class KontrolniHlaseniBuilder
      * u řady států obsahuje písmena (IE 1234567X, AT U12345678, NL 123456789B01, …).
      * XSD vyžaduje formát BEZ kódu členského státu — odstraníme prefix země, mezery a
      * oddělovače, zachováme alfanumerickou kmenovou část.
+     *
+     * Strháváme JEN prefix odpovídající kódu země — buď ISO 3166 (country_iso2), nebo
+     * VIES/DPH kód (u Řecka se liší: ISO "GR" vs VIES "EL", takže akceptujeme obojí).
+     * NEstrháváme libovolná 2 písmena — některá DIČ mají alfanumerickou vnitrostátní
+     * část (FR: „FRAB123456789" → „AB123456789", ne „123456789"). Issue #238.
      */
     public static function cleanEuVatId(?string $vatId, ?string $countryIso2): string
     {
         if (!$vatId) return '';
         $s = preg_replace('/[^A-Z0-9]/', '', strtoupper(trim($vatId))) ?? '';
-        $country = self::khCountryCode($countryIso2);
-        if ($country !== '' && str_starts_with($s, $country)) {
-            $s = substr($s, strlen($country));
+        $iso  = strtoupper(trim((string) $countryIso2)); // ISO 3166 (GR)
+        $vies = self::khCountryCode($countryIso2);        // VIES/DPH kód (EL pro Řecko)
+        foreach ([$vies, $iso] as $prefix) {
+            if ($prefix !== '' && str_starts_with($s, $prefix)) {
+                return substr($s, strlen($prefix));
+            }
         }
         return $s;
     }

@@ -58,6 +58,10 @@ final class KhDphTaxScenariosTest extends TestCase
     private array $invoiceIds = [];
     /** @var int[] */
     private array $purchaseIds = [];
+    /** @var int[] */
+    private array $vatClassificationIds = [];
+    /** @var int[] Měny vytvořené v testu (EUR pro kurzové scénáře) — úklid v tearDown. */
+    private array $createdCurrencyIds = [];
     /** Původní plátcovství supplier-a — test vynucuje plátce (viz setUp). */
     private ?array $origVatFlags = null;
 
@@ -97,10 +101,10 @@ final class KhDphTaxScenariosTest extends TestCase
         // řádků — reálné nastavení dodavatele v dev DB by testy rozbilo. Vynutit
         // plátce a v tearDown vrátit (IO režim kryje IdentifiedPersonDphTest).
         $flags = $pdo->query(
-            "SELECT is_vat_payer, is_identified FROM supplier WHERE id = {$this->supplierId}"
+            "SELECT is_vat_payer, is_identified, dic FROM supplier WHERE id = {$this->supplierId}"
         )->fetch(\PDO::FETCH_ASSOC) ?: [];
         $this->origVatFlags = $flags;
-        $pdo->prepare('UPDATE supplier SET is_vat_payer = 1, is_identified = 0 WHERE id = ?')
+        $pdo->prepare("UPDATE supplier SET is_vat_payer = 1, is_identified = 0, dic = 'CZ12345678' WHERE id = ?")
             ->execute([$this->supplierId]);
     }
 
@@ -111,10 +115,11 @@ final class KhDphTaxScenariosTest extends TestCase
         }
         $pdo = $this->db->pdo();
         if ($this->origVatFlags !== null && $this->supplierId > 0) {
-            $pdo->prepare('UPDATE supplier SET is_vat_payer = ?, is_identified = ? WHERE id = ?')
+            $pdo->prepare('UPDATE supplier SET is_vat_payer = ?, is_identified = ?, dic = ? WHERE id = ?')
                 ->execute([
                     (int) ($this->origVatFlags['is_vat_payer'] ?? 1),
                     (int) ($this->origVatFlags['is_identified'] ?? 0),
+                    $this->origVatFlags['dic'] ?? null,
                     $this->supplierId,
                 ]);
         }
@@ -128,6 +133,15 @@ final class KhDphTaxScenariosTest extends TestCase
         }
         foreach (array_merge($this->clientIds['customers'], $this->clientIds['vendors']) as $id) {
             $pdo->prepare('DELETE FROM clients WHERE id = ?')->execute([$id]);
+        }
+        foreach ($this->vatClassificationIds as $id) {
+            $pdo->prepare('DELETE FROM vat_classifications WHERE id = ? AND supplier_id = ?')
+                ->execute([$id, $this->supplierId]);
+        }
+        // Měny až po fakturách (FK invoices.currency_id).
+        foreach ($this->createdCurrencyIds as $id) {
+            $pdo->prepare('DELETE FROM currencies WHERE id = ? AND supplier_id = ?')
+                ->execute([$id, $this->supplierId]);
         }
         $this->db->close(); // uvolni MySQL connection (kumulace přes běh → max_connections)
     }
@@ -704,6 +718,125 @@ final class KhDphTaxScenariosTest extends TestCase
     }
 
     /**
+     * JÁDRO OPRAVY: služba ze 3. země (§ 24, kód 24) se samovyměřením patří na ř.12
+     * DPHDP3 (+ zrcadlo ř.43), ale do KH oddílu A.2 NE.
+     *
+     * VetaA2 se neobejde bez `k_stat` a `vatid_dod` — XSD u `k_stat` píše „kód státu,
+     * který přidělil DIČ REGISTRACE K DPH dodavatele … viz tabulka Daňová identifikační
+     * čísla členských států EU". Dodavatel ze 3. země takové číslo nemá, řádek by odešel
+     * prázdný a EPO podání odmítne („chybí stát a DIČ"). Že kontrolní součet `celk_zd_a2`
+     * jmenuje i ř.12/13, nic nemění: na těch řádcích sedí i dodavatelé z EU, kteří
+     * k_stat i vatid_dod mají.
+     *
+     * Regrese hlídá OBOJÍ směr — KH se vyprázdní, přiznání zůstane naplněné.
+     */
+    public function testThirdCountryServiceStaysInDphButNotInKhA2(): void
+    {
+        $usId = $this->countryId('US');
+        if ($usId === 0) {
+            $this->markTestSkipped('US není v číselníku countries.');
+        }
+        $d = fn (int $day) => sprintf('%04d-%02d-%02d', self::YEAR, self::MONTH, $day);
+        $usVend = $this->client('US poskytovatel', $usId, 'US12-3456789', vendor: true);
+        // Kód 24 (služba ze 3. země, ř.12), RC, fakturováno bez DPH (vat=0).
+        $this->purchase('P-2099-1401', $usVend, '24', false, 'invoice', $d(10), $d(10), [[10000, 0, 21]]);
+
+        // DPHDP3 — ř.12 samovyměření + ř.43 odpočet (net nula u plátce).
+        $dp = (new \SimpleXMLElement($this->dph->build($this->supplierId, self::YEAR, self::MONTH, 'monthly')['xml']))->DPHDP3;
+        $this->assertSame('10000', (string) $dp->Veta1['p_sl23_z'], 'ř.12 základ (dovoz služby 3. země)');
+        $this->assertSame('2100', (string) $dp->Veta1['dan_psl23_z'], 'ř.12 samovyměřená daň');
+        $this->assertSame('10000', (string) $dp->Veta4['nar_zdp23'], 'ř.43 mirror základ');
+        $this->assertSame('2100', (string) $dp->Veta4['od_zdp23'], 'ř.43 mirror odpočet');
+
+        // KH — ani A.2 (nejde sestavit platný řádek), ani B.1 (to je tuzemský § 92).
+        $kh = new \SimpleXMLElement($this->kh->build($this->supplierId, self::YEAR, self::MONTH)['xml']);
+        $this->assertCount(0, $kh->DPHKH1->VetaA2, 'služba ze 3. země NEPATŘÍ do KH A.2 (bez k_stat/vatid_dod)');
+        $this->assertCount(0, $kh->DPHKH1->VetaB1, 'NESMÍ být ani v B.1');
+        $this->assertSame('0.00', (string) $kh->DPHKH1->VetaC['celk_zd_a2'],
+            'celk_zd_a2 = 0, když se do A.2 nic nevykázalo');
+
+        // Kniha DPH tiskne u takového dokladu prázdný sloupec KH (shodně s výstupem účetní).
+        $book = $this->book->build($this->supplierId, self::YEAR, self::MONTH);
+        foreach ($book['sections'] as $s) {
+            foreach ($s['rows'] as $r) {
+                if (($r['original_doc_number'] ?? '') === 'P-2099-1401') {
+                    $this->assertSame('', (string) ($r['kh_section'] ?? ''), 'Kniha DPH: 3. země bez KH sekce');
+                }
+            }
+        }
+    }
+
+    /**
+     * Přísnější kritérium než „není z EU": dodavatel SE SÍDLEM V EU, který ale nemá
+     * použitelné DIČ registrace k DPH (neplátce, chybějící údaj na kontaktu), do A.2
+     * také nemůže — řádek by odešel s prázdným `vatid_dod` a EPO ho odmítne stejně
+     * jako u 3. země. Na rozdíl od 3. země je to ale typicky neúplný údaj → warning.
+     */
+    public function testEuSupplierWithoutVatIdExcludedFromA2WithWarning(): void
+    {
+        $d = fn (int $day) => sprintf('%04d-%02d-%02d', self::YEAR, self::MONTH, $day);
+        $vend = $this->client('DE dodavatel bez VAT ID', $this->deId, null, vendor: true);
+        $this->purchase('P-2099-1402', $vend, '24e', false, 'invoice', $d(11), $d(11), [[5000, 0, 21]]);
+
+        $res = $this->kh->build($this->supplierId, self::YEAR, self::MONTH);
+        $kh = (new \SimpleXMLElement($res['xml']))->DPHKH1;
+        $this->assertCount(0, $kh->VetaA2, 'EU dodavatel bez VAT ID nemůže do A.2');
+        $this->assertSame('0.00', (string) $kh->VetaC['celk_zd_a2'], 'celk_zd_a2 nesmí nést nevykázaný řádek');
+        $this->assertNotEmpty(
+            array_filter($res['warnings'], static fn (string $w): bool => str_contains($w, 'P-2099-1402')),
+            'chybějící EU VAT ID musí uživatel vidět jako varování'
+        );
+
+        // Samovyměření v přiznání zůstává (ř.5 služba z EU + zrcadlo ř.43).
+        $dp = (new \SimpleXMLElement($this->dph->build($this->supplierId, self::YEAR, self::MONTH, 'monthly')['xml']))->DPHDP3;
+        $this->assertSame('5000', (string) $dp->Veta1['p_sl23_e'], 'ř.5 základ zůstává');
+        $this->assertSame('1050', (string) $dp->Veta1['dan_psl23_e'], 'ř.5 samovyměřená daň zůstává');
+    }
+
+    /**
+     * Žádná VetaA2 nesmí odejít s prázdným `k_stat`/`vatid_dod` — přesně to EPO odmítá.
+     * Invariant nad CELÝM XML, ne nad jedním scénářem: kdyby budoucí změna klasifikace
+     * poslala do A.2 dodavatele bez EU registrace k DPH, spadne to tady.
+     */
+    public function testNoVetaA2IsEmittedWithoutCountryAndVatId(): void
+    {
+        $usId = $this->countryId('US');
+        $d = fn (int $day) => sprintf('%04d-%02d-%02d', self::YEAR, self::MONTH, $day);
+        if ($usId > 0) {
+            $us = $this->client('US poskytovatel', $usId, null, vendor: true);
+            $this->purchase('P-2099-1403', $us, '24', true, 'invoice', $d(12), $d(12), [[7000, 0, 21]]);
+        }
+        $de = $this->client('DE dodavatel', $this->deId, 'DE123456789', vendor: true);
+        $this->purchase('P-2099-1404', $de, '23', false, 'invoice', $d(12), $d(12), [[3000, 0, 21]]);
+
+        $xml = $this->kh->build($this->supplierId, self::YEAR, self::MONTH)['xml'];
+
+        // XML s reálným řádkem A.2 musí projít oficiálním XSD (dphkh1.xsd).
+        $xsd = dirname(__DIR__, 3) . '/xsd/dphkh1.xsd';
+        if (is_file($xsd)) {
+            $doc = new \DOMDocument();
+            $doc->loadXML($xml);
+            $prev = libxml_use_internal_errors(true);
+            $valid = $doc->schemaValidate($xsd);
+            $errors = array_map(static fn ($e): string => trim($e->message), libxml_get_errors());
+            libxml_clear_errors();
+            libxml_use_internal_errors($prev);
+            $this->assertTrue($valid, 'KH XML neprošlo dphkh1.xsd: ' . implode(' | ', $errors));
+        }
+
+        $kh = (new \SimpleXMLElement($xml))->DPHKH1;
+        $this->assertGreaterThan(0, $kh->VetaA2->count(), 'kontrola dává smysl jen s alespoň jednou větou A.2');
+        $sum = 0.0;
+        foreach ($kh->VetaA2 as $a2) {
+            $this->assertNotSame('', (string) $a2['k_stat'], 'VetaA2 bez k_stat = EPO podání odmítne');
+            $this->assertNotSame('', (string) $a2['vatid_dod'], 'VetaA2 bez vatid_dod = EPO podání odmítne');
+            $sum += (float) $a2['zakl_dane1'] + (float) $a2['zakl_dane2'];
+        }
+        $this->assertEqualsWithDelta($sum, (float) $kh->VetaC['celk_zd_a2'], 0.005,
+            'celk_zd_a2 musí sedět na součet skutečně emitovaných vět A.2');
+    }
+
+    /**
      * Regrese (daňový audit 2026-05-28): přijaté plnění bez nároku na odpočet
      * (kód 42, dphdp3_line=NULL) NESMÍ spadnout do KH B.2/B.3, přestože má
      * nenulový základ v sazbě 21 %. DPHDP3 ho rovněž vynechává.
@@ -768,9 +901,14 @@ final class KhDphTaxScenariosTest extends TestCase
      * Country-aware RC klasifikace vystavených plnění (fix 2026-05-29): příznak reverse_charge
      * se klasifikuje podle ZEMĚ odběratele —
      *   • tuzemský odběratel (CZ) → tuzemský §92a dodavatel → kód '25s' → DPHDP3 ř.25 (pln_rez_pren)
-     *   • zahraniční EU odběratel  → dodání zboží do JČS    → kód '20'  → DPHDP3 ř.20 (dod_zb)
+     *   • zahraniční EU odběratel  → plnění do JČS          → kód '22'  → DPHDP3 ř.21 (pln_sluzby)
      * Dříve oba končily na '20'/ř.20 → tuzemský RC (stavební práce ap.) se chybně vykázal jako
      * dodání do EU. Ani jeden nepřidává výstupní daň (ř.1).
+     *
+     * Fallback ve VatLedgerService zboží od služby nerozliší (jednotku položky vidí jen SSOT
+     * InvoiceRepository::defaultSaleClassificationCode) a od 2026-08 drží TÝŽ statistický
+     * default '22' jako SSOT — jinak by se doklad bez kódu vykázal jinak podle toho, kudy
+     * do výkazu vstoupil. Dodání zboží do JČS (kód '20', ř.20) si uživatel zvolí ručně.
      */
     public function testReverseChargeClassifiedByCustomerCountry(): void
     {
@@ -784,7 +922,8 @@ final class KhDphTaxScenariosTest extends TestCase
 
         $dp = (new \SimpleXMLElement($this->dph->build($this->supplierId, self::YEAR, self::MONTH, 'monthly')['xml']))->DPHDP3;
         $this->assertSame('12000', (string) $dp->Veta2['pln_rez_pren'], 'tuzemský RC → ř.25 (pln_rez_pren)');
-        $this->assertSame('34000', (string) $dp->Veta2['dod_zb'],       'EU RC → ř.20 (dod_zb)');
+        $this->assertSame('34000', (string) $dp->Veta2['pln_sluzby'], 'EU RC → ř.21 (pln_sluzby)');
+        $this->assertSame('', (string) $dp->Veta2['dod_zb'], 'bez ručního kódu nesmí fallback tvrdit dodání zboží (ř.20)');
         $this->assertSame('', (string) $dp->Veta1['obrat23'], 'RC plnění nepatří do ř.1 (výstupní daň)');
     }
 
@@ -928,6 +1067,52 @@ final class KhDphTaxScenariosTest extends TestCase
         $this->assertSame('5000',  (string) $dp->Veta2['pln_sluzby'], 'ř.21 služby do JČS');
         $this->assertNotNull($dp->Veta3, 'Veta3 (oddíl C) musí existovat pro třístranný obchod');
         $this->assertSame('7000',  (string) $dp->Veta3['tri_dozb'],   'ř.31 dodání zboží prostřední osobou');
+    }
+
+    /**
+     * Issue #199 — vydaná služba do JČS (Google AdSense pro Google Ireland Limited)
+     * v reverse charge (kód 22, § 9 odst. 1) se NESMÍ zahrnout do KH oddílu A.1.
+     * A.1 je vyhrazen POUZE tuzemskému přenesení §92 (kód 25s, kh_section='A.1').
+     * Přeshraniční B2B služba do EU patří jen na ř.21 přiznání + souhrnné hlášení
+     * kód 3 — do kontrolního hlášení vůbec.
+     *
+     * Reprodukce z issue zapíná na faktuře příznak reverse_charge=1 → is_rc=true.
+     * Dříve sale-větev collectSections() routovala do A.1 čistě podle is_rc (bez
+     * kontroly kh_section) → vznikal chybný VetaA1. Fix gate-uje A.1 na has_a1
+     * (kh_section='A.1'), symetricky k B.1 na přijaté straně.
+     */
+    public function testEuServiceReverseChargeNotInKhA1(): void
+    {
+        $skEu = (int) ($this->db->pdo()->query("SELECT COALESCE(is_eu,0) FROM countries WHERE iso2='SK' LIMIT 1")->fetchColumn() ?: 0);
+        if ($skEu !== 1) {
+            $this->markTestSkipped('SK není v countries označeno jako EU — SHV test přeskočen.');
+        }
+        $d = fn (int $day) => sprintf('%04d-%02d-%02d', self::YEAR, self::MONTH, $day);
+        $euCust = $this->client('Google Ireland Limited', $this->skId, 'SK2020202', customer: true);
+
+        // Kód 22 (služba do JČS) ručně zvolen + reverse_charge FLAG zapnutý — přesně jak
+        // to dělá reprodukce z issue #199 (plnění bez české DPH v režimu reverse charge).
+        $this->sale('2099062199', $euCust, '22', true, $d(10), $d(10), [[40000, 0, 21]]);
+
+        // ── KH: doklad NESMÍ být nikde (ani A.1, ani A.4/A.5) ──
+        $kh = new \SimpleXMLElement($this->kh->build($this->supplierId, self::YEAR, self::MONTH)['xml']);
+        $this->assertCount(0, $kh->DPHKH1->VetaA1, 'EU RC služba (kód 22) NESMÍ být v A.1 (issue #199)');
+        $this->assertCount(0, $kh->DPHKH1->VetaA4, 'EU RC služba nepatří do A.4');
+        $this->assertCount(0, $kh->DPHKH1->VetaA5, 'EU RC služba nepatří do A.5 (sumace)');
+        // VetaC: žádné uskutečněné tuzemské přenesení → rez_pren23 = 0.
+        $this->assertSame('0.00', (string) $kh->DPHKH1->VetaC['rez_pren23'], 'VetaC rez_pren23 = 0 (EU služba není A.1)');
+
+        // ── DPHDP3: patří na ř.21 (pln_sluzby), NE ř.25 (tuzemský PDP) ani ř.1 (výstup) ──
+        $dp = (new \SimpleXMLElement($this->dph->build($this->supplierId, self::YEAR, self::MONTH, 'monthly')['xml']))->DPHDP3;
+        $this->assertSame('40000', (string) $dp->Veta2['pln_sluzby'], 'ř.21 služby do JČS = 40000');
+        $this->assertSame('', (string) $dp->Veta2['pln_rez_pren'], 'ř.25 (tuzemský §92 PDP) musí zůstat prázdný');
+        $this->assertSame('', (string) $dp->Veta1['obrat23'], 'ř.1 výstupní daň prázdná (RC služba)');
+
+        // ── SHV: kód plnění 3 (služba §9/1) ──
+        $shv = $this->shv->build($this->supplierId, self::YEAR, self::MONTH);
+        $amountByType = [];
+        foreach ($shv['summary']['rows'] as $r) $amountByType[(string) $r['sh_type']] = (float) $r['amount'];
+        $this->assertEqualsWithDelta(40000, $amountByType['3'] ?? -1, 0.01, 'SHV kód 3 = služba do JČS');
     }
 
     /**
@@ -1121,8 +1306,9 @@ final class KhDphTaxScenariosTest extends TestCase
     }
 
     /**
-     * Audit 2026-07 (fix 7): Souhrnné hlášení — Řecko se vykazuje DPH kódem 'EL',
-     * ne ISO 'GR'. Platí pro k_stat i prefix VAT ID (VIES používá 'EL').
+     * Audit 2026-07 (fix 7) + issue #238: Souhrnné hlášení — Řecko se vykazuje DPH
+     * kódem 'EL', ne ISO 'GR' (VIES používá 'EL'). Kód země patří do k_stat; c_vat
+     * nese DIČ BEZ prefixu země.
      */
     public function testShGreeceReportedAsElNotGr(): void
     {
@@ -1135,8 +1321,8 @@ final class KhDphTaxScenariosTest extends TestCase
             $this->markTestSkipped('GR není označeno jako EU — SH test přeskočen.');
         }
         $d = fn (int $day) => sprintf('%04d-%02d-%02d', self::YEAR, self::MONTH, $day);
-        // Řecký odběratel, VAT ID BEZ prefixu → normalizeVatId prefix doplní (musí být EL).
-        $euCust = $this->client('Řecký odběratel', $grId, '123456789', customer: true);
+        // Řecký odběratel, DIČ i s ISO prefixem 'GR' → k_stat musí být EL a c_vat bez prefixu.
+        $euCust = $this->client('Řecký odběratel', $grId, 'GR123456789', customer: true);
         // Poskytnutí služby do JČS (kód 22 → SHV typ 3).
         $this->sale('2099067701', $euCust, '22', false, $d(10), $d(10), [[15000, 0, 0]]);
 
@@ -1145,7 +1331,103 @@ final class KhDphTaxScenariosTest extends TestCase
         $veta = $xml->DPHSHV->VetaR;
         $this->assertCount(1, $veta, 'SH: jeden řádek pro řeckého odběratele');
         $this->assertSame('EL', (string) $veta[0]['k_stat'], 'k_stat musí být DPH kód EL, ne ISO GR');
-        $this->assertSame('EL123456789', (string) $veta[0]['c_vat'], 'VAT ID prefix musí být EL, ne GR');
+        $this->assertSame('123456789', (string) $veta[0]['c_vat'], 'c_vat musí být DIČ BEZ prefixu (kód země je v k_stat)');
+    }
+
+    /**
+     * Issue #238 (body 1+2): řádné SH má shvies_forma="R" (EPO regex [RN], ne staré "B")
+     * a řádky VetaR NEmají atribut k_storno (ten je jen pro následné hlášení).
+     */
+    public function testShFormaIsRAndVetaRHasNoStorno(): void
+    {
+        $d = fn (int $day) => sprintf('%04d-%02d-%02d', self::YEAR, self::MONTH, $day);
+        $euCust = $this->client('SK odběratel', $this->skId, 'SK1234567', customer: true);
+        $this->sale('2099067711', $euCust, '22', false, $d(10), $d(10), [[15000, 0, 0]]);
+
+        $xml = new \SimpleXMLElement($this->shv->build($this->supplierId, self::YEAR, self::MONTH)['xml']);
+        $this->assertSame('R', (string) $xml->DPHSHV->VetaD['shvies_forma'], 'řádné SH → shvies_forma="R"');
+        $veta = $xml->DPHSHV->VetaR;
+        $this->assertCount(1, $veta);
+        $this->assertFalse(isset($veta[0]['k_storno']), 'řádné hlášení: VetaR nesmí mít k_storno');
+    }
+
+    /**
+     * Issue #238 (bod 3): c_vat nese DIČ BEZ prefixu země, kód země je v k_stat.
+     * SK2020122753 → k_stat="SK", c_vat="2020122753". Ověřuje i doklad zadaný BEZ prefixu.
+     */
+    public function testShSlovakVatIdPrefixStripped(): void
+    {
+        $d = fn (int $day) => sprintf('%04d-%02d-%02d', self::YEAR, self::MONTH, $day);
+        $withPrefix = $this->client('SK s prefixem', $this->skId, 'SK2020122753', customer: true);
+        $noPrefix   = $this->client('SK bez prefixu', $this->skId, '2020122888', customer: true);
+        $this->sale('2099067712', $withPrefix, '22', false, $d(10), $d(10), [[15000, 0, 0]]);
+        $this->sale('2099067713', $noPrefix,   '22', false, $d(11), $d(11), [[15000, 0, 0]]);
+
+        $xml = new \SimpleXMLElement($this->shv->build($this->supplierId, self::YEAR, self::MONTH)['xml']);
+        $vats = [];
+        foreach ($xml->DPHSHV->VetaR as $v) {
+            $this->assertSame('SK', (string) $v['k_stat']);
+            $vats[(string) $v['c_vat']] = true;
+        }
+        $this->assertArrayHasKey('2020122753', $vats, 'prefix SK musí být z c_vat stržen');
+        $this->assertArrayHasKey('2020122888', $vats, 'DIČ bez prefixu zůstává beze změny');
+    }
+
+    /**
+     * Issue #238 (bod 3): nestrhávat libovolná 2 písmena — francouzské DIČ má
+     * alfanumerickou vnitrostátní část. FR + "FRAB123456789" → c_vat "AB123456789"
+     * (stržen jen prefix FR, "AB" zůstává).
+     */
+    public function testShFrenchAlphanumericVatIdKeepsNationalPart(): void
+    {
+        $frId = $this->countryId('FR');
+        if ($frId === 0) {
+            $this->markTestSkipped('Země FR není v číselníku countries.');
+        }
+        $d = fn (int $day) => sprintf('%04d-%02d-%02d', self::YEAR, self::MONTH, $day);
+        $frCust = $this->client('FR odběratel', $frId, 'FRAB123456789', customer: true);
+        $this->sale('2099067714', $frCust, '22', false, $d(10), $d(10), [[15000, 0, 0]]);
+
+        $xml = new \SimpleXMLElement($this->shv->build($this->supplierId, self::YEAR, self::MONTH)['xml']);
+        $veta = $xml->DPHSHV->VetaR;
+        $this->assertCount(1, $veta);
+        $this->assertSame('FR', (string) $veta[0]['k_stat']);
+        $this->assertSame('AB123456789', (string) $veta[0]['c_vat'], 'strhává se jen prefix země, ne první 2 znaky');
+    }
+
+    /**
+     * Issue #238 (body 4+6): EUR dodávka bez kurzu se NEvykáže s náhradním kurzem 1.0.
+     * build() nehodí chybu, ale vrátí doklad v `missing_rates` + varování; base se
+     * počítá uloženým kurzem, když je k dispozici.
+     */
+    public function testShMissingExchangeRateFlaggedNotSilentlyOne(): void
+    {
+        $d = fn (int $day) => sprintf('%04d-%02d-%02d', self::YEAR, self::MONTH, $day);
+        $eur = $this->eurCurrencyId();
+        $euCust = $this->client('SK EUR odběratel', $this->skId, 'SK7777777', customer: true);
+        // EUR faktura BEZ zafixovaného kurzu (exchange_rate NULL).
+        $this->sale('2099067715', $euCust, '22', false, $d(10), $d(10), [[1000, 0, 0]], $eur, null);
+
+        $res = $this->shv->build($this->supplierId, self::YEAR, self::MONTH);
+        $this->assertNotEmpty($res['missing_rates'], 'EUR bez kurzu musí být v missing_rates');
+        $this->assertSame('sale', $res['missing_rates'][0]['source']);
+        $this->assertSame('EUR', $res['missing_rates'][0]['currency']);
+        $this->assertTrue(
+            (bool) array_filter($res['warnings'], static fn ($w) => str_contains($w, 'kurz')),
+            'náhled musí varovat o chybějícím kurzu',
+        );
+
+        // Se zafixovaným kurzem (25.0) už chybějící kurz není a base_czk = 1000 × 25.
+        $eur2 = $this->eurCurrencyId();
+        $euCust2 = $this->client('SK EUR s kurzem', $this->skId, 'SK8888888', customer: true);
+        $this->sale('2099067716', $euCust2, '22', false, $d(12), $d(12), [[1000, 0, 0]], $eur2, 25.0);
+        $res2 = $this->shv->build($this->supplierId, self::YEAR, self::MONTH);
+        $row = null;
+        foreach ($res2['summary']['rows'] as $r) {
+            if ($r['vat_id'] === '8888888') { $row = $r; break; }
+        }
+        $this->assertNotNull($row, 'řádek s kurzem musí být v summary');
+        $this->assertEqualsWithDelta(25000.0, $row['amount'], 0.01, 'base_czk = 1000 EUR × 25.0');
     }
 
     /**
@@ -1204,6 +1486,427 @@ final class KhDphTaxScenariosTest extends TestCase
             'kvartál jen se službami nesmí varovat');
     }
 
+    /**
+     * Audit KH/DPH 2026-07 (C1) — mixed-section faktura: doklad, kde JEDNA položka je
+     * v režimu přenesení (§92, kód 25s/5 → A.1/B.1) a DRUHÁ je běžné tuzemské zdanitelné
+     * plnění (kód 1/40 → A.4/B.2). Do RC sekce smí jít JEN základ RC položek, běžná
+     * položka musí samostatně do A.4/A.5 resp. B.2/B.3 — dřív spadl celý base_total do
+     * jedné sekce a běžná položka z A.4/B.2 zmizela (KH×DPHDP3 křížová kontrola nesedla).
+     */
+    public function testMixedSectionInvoiceSplitsRcAndDomestic(): void
+    {
+        $d = fn (int $day) => sprintf('%04d-%02d-%02d', self::YEAR, self::MONTH, $day);
+        $cust = $this->client('Mixed odběratel', $this->czId, 'CZ24242424', customer: true);
+        $vend = $this->client('Mixed dodavatel', $this->czId, 'CZ25252525', vendor: true);
+
+        // VYSTAVENÁ: položka §92 RC (25s → A.1, ř.25) 100 000 + běžná 21 % (1 → A.4, ř.1) 50 000.
+        $this->sale('2099061301', $cust, null, false, $d(10), $d(10), [
+            [100000, 0, 21, '25s'],
+            [50000, 10500, 21, '1'],
+        ]);
+        // PŘIJATÁ: položka §92 RC příjemce (5 → B.1, ř.10) 80 000 + běžná odpočet (40 → B.2, ř.40) 20 000.
+        $this->purchase('P-2099-1301', $vend, null, false, 'invoice', $d(11), $d(11), [
+            [80000, 0, 21, '5'],
+            [20000, 4200, 21, '40'],
+        ]);
+
+        $kh = new \SimpleXMLElement($this->kh->build($this->supplierId, self::YEAR, self::MONTH)['xml']);
+        $root = $kh->DPHKH1;
+
+        // A.1 = jen RC část (100 000), NE base_total 150 000.
+        $this->assertCount(1, $root->VetaA1, 'A.1: 1 řádek (RC část vystavené)');
+        $this->assertSame('100000.00', (string) $root->VetaA1[0]['zakl_dane1'], 'A.1 = jen §92 položka, ne celý doklad');
+        // A.4 = běžná zdanitelná část téhož dokladu (50 000 / 10 500).
+        $this->assertCount(1, $root->VetaA4, 'A.4: běžná položka mixed dokladu tu musí být');
+        $this->assertSame('50000.00', (string) $root->VetaA4[0]['zakl_dane1'], 'A.4 = jen běžná položka');
+        $this->assertSame('10500.00', (string) $root->VetaA4[0]['dan1']);
+        // B.1 = jen RC část (80 000) + samovyměřená daň 16 800.
+        $this->assertCount(1, $root->VetaB1, 'B.1: RC část přijaté');
+        $this->assertSame('80000.00', (string) $root->VetaB1[0]['zakl_dane1'], 'B.1 = jen §92 položka');
+        $this->assertSame('16800.00', (string) $root->VetaB1[0]['dan1'], 'B.1 samovyměřená daň 80000×21 %');
+        // B.2 = běžná odpočtová část (20 000 / 4 200).
+        $this->assertCount(1, $root->VetaB2, 'B.2: běžná položka mixed dokladu');
+        $this->assertSame('20000.00', (string) $root->VetaB2[0]['zakl_dane1'], 'B.2 = jen běžná položka');
+        $this->assertSame('4200.00', (string) $root->VetaB2[0]['dan1']);
+        // VetaC rekapitulace dle XSD: pln_rez_pren = A.1; rez_pren23/5 = B.1 dle sazby.
+        $this->assertSame('100000.00', (string) $root->VetaC['pln_rez_pren'], 'VetaC pln_rez_pren = jen A.1');
+        $this->assertSame('80000.00', (string) $root->VetaC['rez_pren23'], 'VetaC rez_pren23 = B.1 v základní sazbě');
+        $this->assertSame('0.00', (string) $root->VetaC['rez_pren5']);
+        $this->assertSame('50000.00', (string) $root->VetaC['obrat23'], 'VetaC obrat23 = běžná vystavená');
+        $this->assertSame('20000.00', (string) $root->VetaC['pln23'], 'VetaC pln23 = běžná přijatá');
+
+        // ── Křížová kontrola s DPHDP3: KH sekce == řádky přiznání ──
+        $dp = (new \SimpleXMLElement($this->dph->build($this->supplierId, self::YEAR, self::MONTH, 'monthly')['xml']))->DPHDP3;
+        $this->assertSame('100000', (string) $dp->Veta2['pln_rez_pren'], 'DPHDP3 ř.25 = KH A.1 (100 000)');
+        $this->assertSame('50000', (string) $dp->Veta1['obrat23'], 'DPHDP3 ř.1 základ = KH A.4 (50 000)');
+        $this->assertSame('10500', (string) $dp->Veta1['dan23'], 'DPHDP3 ř.1 daň = KH A.4 daň');
+        $this->assertSame('80000', (string) $dp->Veta1['rez_pren23'], 'DPHDP3 ř.10 = KH B.1 (80 000)');
+        $this->assertSame('20000', (string) $dp->Veta4['pln23'], 'DPHDP3 ř.40 = KH B.2 (20 000)');
+    }
+
+    /**
+     * Audit KH/DPH 2026-07 (S1) — reverse charge prodej do 3. ZEMĚ (mimo EU) bez ručně
+     * zvoleného kódu se NESMÍ auto-klasifikovat jako tuzemský §92 (kód 25s → KH A.1 + ř.25).
+     * Plnění s místem plnění mimo EU (bez české DPH) do KH nepatří.
+     */
+    public function testThirdCountryReverseChargeSaleNotInKhA1(): void
+    {
+        $usId = $this->countryId('US');
+        if ($usId === 0) {
+            $this->markTestSkipped('US není v číselníku countries.');
+        }
+        $d = fn (int $day) => sprintf('%04d-%02d-%02d', self::YEAR, self::MONTH, $day);
+        $usCust = $this->client('US odběratel RC', $usId, null, customer: true);
+        // RC prodej do 3. země BEZ explicitního kódu → fallback klasifikace (nesmí '25s'/A.1).
+        $this->sale('2099061401', $usCust, null, true, $d(10), $d(10), [[40000, 0, 0]]);
+
+        $kh = new \SimpleXMLElement($this->kh->build($this->supplierId, self::YEAR, self::MONTH)['xml']);
+        $this->assertCount(0, $kh->DPHKH1->VetaA1, '3. země RC prodej NESMÍ být v KH A.1 (S1)');
+        $this->assertSame('0.00', (string) $kh->DPHKH1->VetaC['rez_pren23'], 'VetaC rez_pren23 = 0');
+
+        $dp = (new \SimpleXMLElement($this->dph->build($this->supplierId, self::YEAR, self::MONTH, 'monthly')['xml']))->DPHDP3;
+        $this->assertSame('', (string) $dp->Veta2['pln_rez_pren'], 'ř.25 (tuzemský §92) musí být prázdný');
+        $this->assertSame('40000', (string) $dp->Veta2['pln_vyvoz'], 'fallback kód 26 → ř.22 (mimo KH)');
+    }
+
+    public function testVetaCSeparatesReducedDomesticReverseCharge(): void
+    {
+        $d = sprintf('%04d-%02d-10', self::YEAR, self::MONTH);
+        $vendor = $this->client('Dodavatel RC 12', $this->czId, 'CZ12121212', vendor: true);
+        $this->purchase('P-RC-12', $vendor, '5', false, 'invoice', $d, $d, [[10000, 0, 12]]);
+
+        $root = (new \SimpleXMLElement($this->kh->build($this->supplierId, self::YEAR, self::MONTH)['xml']))->DPHKH1;
+        $this->assertSame('0.00', (string) $root->VetaC['rez_pren23']);
+        $this->assertSame('10000.00', (string) $root->VetaC['rez_pren5']);
+    }
+
+    public function testReverseChargeProportionalDeductionKeepsFullSelfAssessment(): void
+    {
+        $d = sprintf('%04d-%02d-11', self::YEAR, self::MONTH);
+        $vendor = $this->client('Dodavatel RC poměr', $this->czId, 'CZ34343434', vendor: true);
+        $this->purchase('P-RC-75', $vendor, '5', false, 'invoice', $d, $d, [[10000, 0, 21]],
+            vatDeduction: 'proportional', vatDeductionPercent: 50.0);
+
+        $dp = (new \SimpleXMLElement($this->dph->build($this->supplierId, self::YEAR, self::MONTH, 'monthly')['xml']))->DPHDP3;
+        $this->assertSame('10000', (string) $dp->Veta1['rez_pren23']);
+        $this->assertSame('2100', (string) $dp->Veta1['dan_rpren23']);
+        $this->assertSame('5000', (string) $dp->Veta4['nar_zdp23']);
+        $this->assertSame('1050', (string) $dp->Veta4['od_zdp23']);
+
+        $kh = (new \SimpleXMLElement($this->kh->build($this->supplierId, self::YEAR, self::MONTH)['xml']))->DPHKH1;
+        $this->assertSame('10000.00', (string) $kh->VetaB1[0]['zakl_dane1']);
+        $this->assertSame('2100.00', (string) $kh->VetaB1[0]['dan1']);
+    }
+
+    public function testThirdCountryServiceNotInKhButSelfAssessedInDph(): void
+    {
+        $usId = $this->countryId('US');
+        if ($usId === 0) $this->markTestSkipped('US není v číselníku countries.');
+        $d = sprintf('%04d-%02d-12', self::YEAR, self::MONTH);
+        $vendor = $this->client('US poskytovatel', $usId, null, vendor: true);
+        $this->purchase('US-SVC-24', $vendor, '24', true, 'invoice', $d, $d, [[20000, 0, 21]]);
+
+        // KH — dodavatel ze 3. země nemá DIČ registrace k DPH v členském státě, takže
+        // z plnění nejde sestavit platný řádek A.2 (k_stat/vatid_dod). Nevykazuje se.
+        $kh = (new \SimpleXMLElement($this->kh->build($this->supplierId, self::YEAR, self::MONTH)['xml']))->DPHKH1;
+        $this->assertCount(0, $kh->VetaA2, 'US služba (§ 24) NEPATŘÍ do KH A.2');
+        $this->assertSame('0.00', (string) $kh->VetaC['celk_zd_a2'], 'celk_zd_a2 = 0 (nic se do A.2 nevykázalo)');
+
+        // Samovyměření v DPHDP3 (ř.12) zůstává beze změny — mění se jen KH.
+        $dp = (new \SimpleXMLElement($this->dph->build($this->supplierId, self::YEAR, self::MONTH, 'monthly')['xml']))->DPHDP3;
+        $this->assertSame('20000', (string) $dp->Veta1['p_sl23_z']);
+        $this->assertSame('20000', (string) $dp->Veta4['nar_zdp23'], 'ř.43 mirror základ zůstává');
+    }
+
+    public function testInvalidDomesticRcDicIsWarnedAndExcludedFromVetaC(): void
+    {
+        $d = sprintf('%04d-%02d-13', self::YEAR, self::MONTH);
+        $customer = $this->client('RC bez DIČ', $this->czId, 'NEPLATNE', customer: true);
+        $vendor = $this->client('RC dodavatel bez DIČ', $this->czId, null, vendor: true);
+        $corruptCustomer = $this->client('RC poškozené DIČ', $this->czId, 'CZ12X34', customer: true);
+        $longVendor = $this->client('RC dlouhé DIČ', $this->czId, 'CZ12345678901', vendor: true);
+        $this->sale('RC-BAD-DIC-S', $customer, '25s', false, $d, $d, [[10000, 0, 21]]);
+        $this->purchase('RC-BAD-DIC-P', $vendor, '5', false, 'invoice', $d, $d, [[9000, 0, 21]]);
+        $this->sale('RC-CORRUPT-DIC', $corruptCustomer, '25s', false, $d, $d, [[8000, 0, 21]]);
+        $this->purchase('RC-LONG-DIC', $longVendor, '5', false, 'invoice', $d, $d, [[7000, 0, 21]]);
+
+        $result = $this->kh->build($this->supplierId, self::YEAR, self::MONTH);
+        $kh = (new \SimpleXMLElement($result['xml']))->DPHKH1;
+        $this->assertCount(0, $kh->VetaA1);
+        $this->assertCount(0, $kh->VetaB1);
+        $this->assertSame('0.00', (string) $kh->VetaC['pln_rez_pren']);
+        $this->assertSame('0.00', (string) $kh->VetaC['rez_pren23']);
+        $this->assertStringContainsString('platné české DIČ', implode(' | ', $result['warnings']));
+    }
+
+    public function testCreditNoteAndUnclassifiedZeroRateProduceWarnings(): void
+    {
+        $d = sprintf('%04d-%02d-14', self::YEAR, self::MONTH);
+        $customer = $this->client('Odběratel warning', $this->czId, 'CZ56565656', customer: true);
+        $this->sale('CN-WARN', $customer, '1', false, $d, $d, [[-1000, -210, 21]]);
+        $creditId = end($this->invoiceIds);
+        $this->db->pdo()->prepare("UPDATE invoices SET invoice_type = 'credit_note' WHERE id = ?")->execute([$creditId]);
+        $this->sale('ZERO-WARN', $customer, null, false, $d, $d, [[500, 0, 0]]);
+
+        $result = $this->dph->build($this->supplierId, self::YEAR, self::MONTH, 'monthly');
+        $warnings = implode(' | ', $result['warnings']);
+        $this->assertStringContainsString('doručení opravného daňového dokladu', $warnings);
+        $this->assertStringContainsString('neklasifikovaný řádek se sazbou 0 %', $warnings);
+        $dp = (new \SimpleXMLElement($result['xml']))->DPHDP3;
+        $this->assertSame('', (string) $dp->Veta4['pln_osv']);
+    }
+
+    public function testKhSpecialAttributesComeFromVatClassification(): void
+    {
+        $this->insertVatClassification('T90', 'sale', '1', 'A.4', 21.0, '2', 'P');
+        $this->insertVatClassification('T74', 'purchase', '40', 'B.2', 21.0, null, 'P');
+        $d = sprintf('%04d-%02d-15', self::YEAR, self::MONTH);
+        $customer = $this->client('Odběratel režim', $this->czId, 'CZ67676767', customer: true);
+        $vendor = $this->client('Dodavatel oprava', $this->czId, 'CZ78787878', vendor: true);
+        $this->sale('KH-REGIME', $customer, 'T90', false, $d, $d, [[5000, 1050, 21]]);
+        $this->purchase('KH-DEBT', $vendor, 'T74', false, 'invoice', $d, $d, [[5000, 1050, 21]]);
+
+        $kh = (new \SimpleXMLElement($this->kh->build($this->supplierId, self::YEAR, self::MONTH)['xml']))->DPHKH1;
+        $this->assertSame('2', (string) $kh->VetaA4[0]['kod_rezim_pl']);
+        $this->assertSame('P', (string) $kh->VetaA4[0]['zdph_44']);
+        $this->assertSame('P', (string) $kh->VetaB2[0]['zdph_44']);
+    }
+
+    public function testKhRejectsMixedSpecialAttributesOnOneDocument(): void
+    {
+        $this->insertVatClassification('T90M', 'sale', '1', 'A.4', 21.0, '2', null);
+        $d = sprintf('%04d-%02d-16', self::YEAR, self::MONTH);
+        $customer = $this->client('Odběratel smíšený režim', $this->czId, 'CZ90909090', customer: true);
+        $this->sale('KH-MIXED-REGIME', $customer, null, false, $d, $d, [
+            [10000, 2100, 21, '1'],
+            [10000, 2100, 21, 'T90M'],
+        ]);
+
+        $result = $this->kh->build($this->supplierId, self::YEAR, self::MONTH);
+        $kh = (new \SimpleXMLElement($result['xml']))->DPHKH1;
+        $this->assertCount(0, $kh->VetaA4);
+        $this->assertSame('0.00', (string) $kh->VetaC['obrat23']);
+        $this->assertStringContainsString('rozdílný režim plnění', implode(' | ', $result['warnings']));
+    }
+
+    public function testShRoundsUpAndQuarterlyDeadlineUsesQuarterEnd(): void
+    {
+        $customer = $this->client('EU SH zaokrouhlení', $this->skId, 'SK8989898', customer: true);
+        $d = sprintf('%04d-04-15', self::YEAR);
+        $this->sale('SH-CEIL', $customer, '22', false, $d, $d, [[100.20, 0, 0]]);
+
+        $result = $this->shv->build($this->supplierId, self::YEAR, 4, 'quarterly');
+        $sh = (new \SimpleXMLElement($result['xml']))->DPHSHV;
+        $this->assertSame('101', (string) $sh->VetaR[0]['pln_hodnota']);
+        // 25.07.2099 je sobota → § 33/4 DŘ posouvá lhůtu na pondělí 27.07. (CzechWorkingDays).
+        $this->assertSame(sprintf('%04d-07-27', self::YEAR), $result['summary']['submission_deadline']);
+    }
+
+    /**
+     * Oprava 2026-07 — přijatý dobropis je v DB uložen KLADNĚ (document_kind='credit_note'),
+     * evidence DPH mu musí obrátit znaménko: pár faktura + dobropis na stejnou částku
+     * se v KH B.3 i na ř. 40 přiznání vynuluje. Dřív se dobropis PŘIČETL (odpočet
+     * chybně vzrostl o dvojnásobek dobropisu).
+     */
+    public function testPurchaseCreditNotePairNetsToZero(): void
+    {
+        $vendor = $this->client('CZ dodavatel — dobropis pár', $this->czId, 'CZ55544433', vendor: true);
+        $d = sprintf('%04d-%02d-05', self::YEAR, self::MONTH);
+        $this->purchase('PCN-INV', $vendor, '40', false, 'invoice', $d, $d, [[2654.79, 557.51, 21.0]]);
+        $this->purchase('PCN-CN', $vendor, '40', false, 'credit_note', $d, $d, [[2654.79, 557.51, 21.0]]);
+
+        $kh = (new \SimpleXMLElement($this->kh->build($this->supplierId, self::YEAR, self::MONTH)['xml']))->DPHKH1;
+        $this->assertCount(1, $kh->VetaB3, 'oba doklady pod 10 000 → sumace B.3');
+        $this->assertSame('0.00', (string) $kh->VetaB3[0]['zakl_dane1'], 'faktura + dobropis = 0');
+        $this->assertSame('0.00', (string) $kh->VetaB3[0]['dan1']);
+
+        $dph = (new \SimpleXMLElement($this->dph->build($this->supplierId, self::YEAR, self::MONTH, 'monthly')['xml']))->DPHDP3;
+        $this->assertSame('0', (string) $dph->Veta4[0]['pln23'], 'ř. 40: základ fakturou +, dobropisem − = 0');
+        $this->assertSame('0', (string) $dph->Veta4[0]['odp_tuz23_nar']);
+    }
+
+    /**
+     * Dobropis nad 10 000 Kč vč. DPH (abs hodnota) → samostatný ZÁPORNÝ řádek v B.2
+     * (opravy se v KH vykazují jednotlivě se znaménkem), ne sumace B.3.
+     */
+    public function testPurchaseCreditNoteOverLimitIsStandaloneNegativeB2Row(): void
+    {
+        $vendor = $this->client('CZ dodavatel — velký dobropis', $this->czId, 'CZ66655544', vendor: true);
+        $d = sprintf('%04d-%02d-12', self::YEAR, self::MONTH);
+        $this->purchase('PCN-BIG', $vendor, '40', false, 'credit_note', $d, $d, [[20000.0, 4200.0, 21.0]]);
+
+        $kh = (new \SimpleXMLElement($this->kh->build($this->supplierId, self::YEAR, self::MONTH)['xml']))->DPHKH1;
+        $this->assertCount(1, $kh->VetaB2, 'abs(−24 200) > 10 000 → samostatný řádek B.2');
+        $this->assertCount(0, $kh->VetaB3);
+        $this->assertSame('-20000.00', (string) $kh->VetaB2[0]['zakl_dane1']);
+        $this->assertSame('-4200.00', (string) $kh->VetaB2[0]['dan1']);
+        $this->assertSame('-20000.00', (string) $kh->VetaC[0]['pln23'], 'rekapitulace propisuje znaménko');
+    }
+
+    /**
+     * Vydaný dobropis je v DB už ZÁPORNÝ (záporné quantity, viz CancelInvoiceAction) —
+     * evidence ho NESMÍ negovat podruhé. Nad limit → samostatný záporný řádek A.4.
+     */
+    public function testIssuedCreditNoteKeepsNegativeSignInA4(): void
+    {
+        $customer = $this->client('CZ odběratel — vydaný dobropis', $this->czId, 'CZ77788899', customer: true);
+        $d = sprintf('%04d-%02d-18', self::YEAR, self::MONTH);
+        $this->sale('FCN-BIG', $customer, '1', false, $d, $d, [[-15000.0, -3150.0, 21.0]], invoiceType: 'credit_note');
+
+        $kh = (new \SimpleXMLElement($this->kh->build($this->supplierId, self::YEAR, self::MONTH)['xml']))->DPHKH1;
+        $this->assertCount(1, $kh->VetaA4, 'abs(−18 150) > 10 000 → samostatný řádek A.4');
+        $this->assertSame('-15000.00', (string) $kh->VetaA4[0]['zakl_dane1'], 'bez dvojité negace');
+        $this->assertSame('-3150.00', (string) $kh->VetaA4[0]['dan1']);
+
+        $dph = (new \SimpleXMLElement($this->dph->build($this->supplierId, self::YEAR, self::MONTH, 'monthly')['xml']))->DPHDP3;
+        $this->assertSame('-15000', (string) $dph->Veta1[0]['obrat23'], 'ř. 1 nese záporný základ dobropisu');
+    }
+
+    /**
+     * Zálohová výzva (advance) není daňový doklad → zůstává mimo KH i přiznání,
+     * i po zavedení znaménkové logiky dobropisů.
+     */
+    public function testPurchaseAdvanceStaysExcludedFromReports(): void
+    {
+        $vendor = $this->client('CZ dodavatel — záloha', $this->czId, 'CZ88899900', vendor: true);
+        $d = sprintf('%04d-%02d-07', self::YEAR, self::MONTH);
+        $this->purchase('PADV-1', $vendor, '40', false, 'advance', $d, $d, [[3875.91, 813.94, 21.0]]);
+
+        $kh = (new \SimpleXMLElement($this->kh->build($this->supplierId, self::YEAR, self::MONTH)['xml']))->DPHKH1;
+        $this->assertCount(0, $kh->VetaB2);
+        $this->assertCount(0, $kh->VetaB3, 'záloha nesmí do B.3');
+    }
+
+    /**
+     * BUG 3 (2026-07) — následné KH (khdph_forma='N') s datem zjištění důvodů;
+     * u DP3 jen opravné 'O' (dodatečné D/E jsou vypnuté — § 141/2 DŘ vyžaduje
+     * vykázání rozdílů proti poslední známé dani a builder umí jen plné hodnoty
+     * období; viz review PR #245 bod 2). Bez d_zjist musí build následného KH selhat.
+     */
+    public function testSubmissionFormAttributesAndDzjist(): void
+    {
+        $khXml = new \SimpleXMLElement(
+            $this->kh->build($this->supplierId, self::YEAR, self::MONTH, 'monthly', 'N', '05.08.2099')['xml']
+        );
+        $this->assertSame('N', (string) $khXml->DPHKH1->VetaD['khdph_forma']);
+        $this->assertSame('05.08.2099', (string) $khXml->DPHKH1->VetaD['d_zjist']);
+
+        // Opravné DP3 (O) projde, volitelně vyplněný d_zjist se propustí.
+        $dphXml = new \SimpleXMLElement(
+            $this->dph->build($this->supplierId, self::YEAR, self::MONTH, 'monthly', 'O', '05.08.2099')['xml']
+        );
+        $this->assertSame('O', (string) $dphXml->DPHDP3->VetaD['dapdph_forma']);
+        $this->assertSame('05.08.2099', (string) $dphXml->DPHDP3->VetaD['d_zjist']);
+
+        // Dodatečné formy D/E builder odmítá, dokud neumí rozdíly dle § 141/2 DŘ.
+        foreach (['D', 'E'] as $additional) {
+            try {
+                $this->dph->build($this->supplierId, self::YEAR, self::MONTH, 'monthly', $additional, '05.08.2099');
+                $this->fail("forma '{$additional}' musí být na DP3 odmítnuta");
+            } catch (\InvalidArgumentException $e) {
+                $this->assertStringContainsString('Neplatná forma', $e->getMessage());
+            }
+        }
+
+        // Řádné podání d_zjist neemituje.
+        $regular = new \SimpleXMLElement($this->kh->build($this->supplierId, self::YEAR, self::MONTH)['xml']);
+        $this->assertSame('B', (string) $regular->DPHKH1->VetaD['khdph_forma']);
+        $this->assertNull($regular->DPHKH1->VetaD['d_zjist']);
+
+        $this->expectException(\InvalidArgumentException::class);
+        $this->kh->build($this->supplierId, self::YEAR, self::MONTH, 'monthly', 'N');
+    }
+
+    /**
+     * Audit KH/DPH 2026-07 (S3) — pořízení zboží z JČS (kód 23, RC) se SNÍŽENOU 12% sazbou
+     * (knihy/potraviny) patří na ř.4 (p_zb5) + mirror ř.44 (nar_zdp5), NE na ř.3/ř.43 (21%).
+     * KH oddíl A.2 bucketuje přímo dle sazby (dan2) — s remapem řádků sedí přiznání i KH.
+     */
+    public function testEuAcquisitionReducedRateLandsOnLine4(): void
+    {
+        $d = fn (int $day) => sprintf('%04d-%02d-%02d', self::YEAR, self::MONTH, $day);
+        $euVend = $this->client('EU dodavatel 12%', $this->deId, 'DE444444444', vendor: true);
+        // Kód 23 (pořízení z JČS), RC, řádek se skutečnou 12% sazbou.
+        $this->purchase('P-2099-1201', $euVend, '23', true, 'invoice', $d(10), $d(10), [[10000, 0, 12]]);
+
+        $dp = (new \SimpleXMLElement($this->dph->build($this->supplierId, self::YEAR, self::MONTH, 'monthly')['xml']))->DPHDP3;
+        $this->assertSame('10000', (string) $dp->Veta1['p_zb5'], 'ř.4 (p_zb5) = 12% pořízení');
+        $this->assertSame('1200', (string) $dp->Veta1['dan_pzb5'], 'ř.4 daň 10000×12 %');
+        $this->assertSame('', (string) $dp->Veta1['p_zb23'], 'ř.3 (21%) musí být prázdný');
+        $this->assertSame('10000', (string) $dp->Veta4['nar_zdp5'], 'ř.44 mirror základ (12%)');
+        $this->assertSame('1200', (string) $dp->Veta4['od_zdp5'], 'ř.44 mirror odpočet');
+        $this->assertSame('', (string) $dp->Veta4['nar_zdp23'], 'ř.43 (21%) musí být prázdný');
+
+        $kh = new \SimpleXMLElement($this->kh->build($this->supplierId, self::YEAR, self::MONTH)['xml']);
+        $this->assertCount(1, $kh->DPHKH1->VetaA2, 'A.2: 12% pořízení z JČS');
+        $this->assertSame('10000.00', (string) $kh->DPHKH1->VetaA2[0]['zakl_dane2'], 'A.2 základ ve 12% sloupci');
+        $this->assertSame('1200.00', (string) $kh->DPHKH1->VetaA2[0]['dan2'], 'A.2 daň 12 %');
+        $this->assertSame('0.00', (string) $kh->DPHKH1->VetaA2[0]['zakl_dane1'], 'A.2 21% sloupec prázdný');
+    }
+
+    /**
+     * Audit KH/DPH 2026-07 (C3) — přijetí služby z EU (kód 24e, RC) BEZ nároku na odpočet
+     * (vat_deduction='none' — reprezentace ze zahraničí, § 72/4): výstupní samovyměření
+     * (ř.5) MUSÍ proběhnout, jen zrcadlový odpočet (ř.43) se odepře. Dřív se zahodil celý
+     * doklad → podhodnocená daň na výstupu (riziko doměrku).
+     */
+    public function testForeignServiceNoDeductionStillSelfAssessesOutput(): void
+    {
+        $d = fn (int $day) => sprintf('%04d-%02d-%02d', self::YEAR, self::MONTH, $day);
+        $euVend = $this->client('EU služba reprez.', $this->deId, 'DE555555555', vendor: true);
+        // Kód 24e (služba z EU, ř.5, A.2), RC dle kódu, bez nároku na odpočet.
+        $this->purchase('P-2099-1101', $euVend, '24e', false, 'invoice', $d(10), $d(10), [[10000, 0, 21]], vatDeduction: 'none');
+
+        $dp = (new \SimpleXMLElement($this->dph->build($this->supplierId, self::YEAR, self::MONTH, 'monthly')['xml']))->DPHDP3;
+        $this->assertSame('10000', (string) $dp->Veta1['p_sl23_e'], 'ř.5 základ i bez nároku');
+        $this->assertSame('2100', (string) $dp->Veta1['dan_psl23_e'], 'ř.5 samovyměřená daň na výstupu');
+        $this->assertSame('', (string) $dp->Veta4['nar_zdp23'], 'ř.43 mirror odpočet se u none NEuplatní');
+        $this->assertSame('2100', (string) $dp->Veta6['dan_zocelk'], 'ř.62 výstup = 2100');
+        $this->assertSame('0', (string) $dp->Veta6['odp_zocelk'], 'ř.63 odpočet = 0 (none)');
+        $this->assertSame('2100', (string) $dp->Veta6['dano_da'], 'ř.64 vlastní daň = 2100');
+
+        $kh = new \SimpleXMLElement($this->kh->build($this->supplierId, self::YEAR, self::MONTH)['xml']);
+        $this->assertCount(1, $kh->DPHKH1->VetaA2, 'A.2 eviduje i plnění bez nároku (samovyměření)');
+        $this->assertSame('2100.00', (string) $kh->DPHKH1->VetaA2[0]['dan1'], 'A.2 samovyměřená daň');
+
+        // Kniha DPH — výstupní samovyměření je, zrcadlový odpočet ř.43 NE (konzistence s DPHDP3).
+        $book = $this->book->build($this->supplierId, self::YEAR, self::MONTH);
+        $sec = [];
+        foreach ($book['sections'] as $s) $sec[$s['key']] = $s;
+        $this->assertArrayHasKey('43.005', $sec, 'Kniha: sekce ř.5 (výstupní samovyměření)');
+        $this->assertEqualsWithDelta(2100, $sec['43.005']['subtotal_vat'], 0.01);
+        $this->assertArrayNotHasKey('43.043', $sec, 'Kniha: mirror odpočet u none NESMÍ vzniknout');
+        $this->assertEqualsWithDelta(0, $book['totals']['received']['vat'], 0.01, 'žádný odpočet z none');
+        $this->assertEqualsWithDelta(2100, $book['totals']['vat_balance'], 0.01, 'výstup 2100 − odpočet 0');
+    }
+
+    /**
+     * Audit KH/DPH 2026-07 (C3 zpřesnění, doklad #230) — přijatý doklad s kódem reverse
+     * charge (24e), ale s UŽ NAÚČTOVANÝM DPH na položce (B2C spotřebitelský nákup ze
+     * zahraničí přes OSS, chybně oklasifikovaný jako RC — Google One) + vat_deduction='none'
+     * NESMÍ do DPH evidence: nejde o skutečné samovyměření (dodavatel DPH naúčtoval),
+     * jinak by se zahraniční DPH omylem přiznalo na výstup ř.5.
+     */
+    public function testForeignVatChargedNoneNotSelfAssessed(): void
+    {
+        $d = fn (int $day) => sprintf('%04d-%02d-%02d', self::YEAR, self::MONTH, $day);
+        $euVend = $this->client('Spotřebitelský SaaS (B2C)', $this->deId, 'DE666666666', vendor: true);
+        // Kód 24e (RC), ale položka NESE DPH (dodavatel B2C účtoval 21 % přes OSS), none.
+        $this->purchase('P-2099-1102', $euVend, '24e', false, 'invoice', $d(10), $d(10), [[5000, 1050, 21]], vatDeduction: 'none');
+
+        // Kniha DPH — doklad tam vůbec nesmí být (žádná sekce).
+        $book = $this->book->build($this->supplierId, self::YEAR, self::MONTH);
+        $this->assertCount(0, $book['sections'], 'B2C s naúčtovaným DPH + none NESMÍ do Knihy DPH');
+
+        // DPHDP3 — žádné výstupní samovyměření z tohoto dokladu.
+        $dp = (new \SimpleXMLElement($this->dph->build($this->supplierId, self::YEAR, self::MONTH, 'monthly')['xml']))->DPHDP3;
+        $this->assertSame('', (string) $dp->Veta1['p_sl23_e'], 'ř.5 prázdný (není samovyměření)');
+
+        // KH — žádný záznam A.2.
+        $kh = new \SimpleXMLElement($this->kh->build($this->supplierId, self::YEAR, self::MONTH)['xml']);
+        $this->assertCount(0, $kh->DPHKH1->VetaA2, 'KH A.2 prázdná');
+    }
+
     // ── helpers ──────────────────────────────────────────────────────────────
 
     private function countryId(string $iso2): int
@@ -1211,6 +1914,25 @@ final class KhDphTaxScenariosTest extends TestCase
         $stmt = $this->db->pdo()->prepare('SELECT id FROM countries WHERE iso2 = ? LIMIT 1');
         $stmt->execute([$iso2]);
         return (int) ($stmt->fetchColumn() ?: 0);
+    }
+
+    /** EUR měna pro tenanta — reuse existující, jinak vytvoř (úklid v tearDown). */
+    private function eurCurrencyId(): int
+    {
+        $pdo = $this->db->pdo();
+        $stmt = $pdo->prepare("SELECT id FROM currencies WHERE supplier_id = ? AND code = 'EUR' ORDER BY id LIMIT 1");
+        $stmt->execute([$this->supplierId]);
+        $id = (int) ($stmt->fetchColumn() ?: 0);
+        if ($id !== 0) {
+            return $id;
+        }
+        $pdo->prepare(
+            "INSERT INTO currencies (supplier_id, code, label, symbol, name_cs, name_en, decimals, is_active, is_default)
+             VALUES (?, 'EUR', 'EUR', '€', 'Euro', 'Euro', 2, 1, 0)"
+        )->execute([$this->supplierId]);
+        $id = (int) $pdo->lastInsertId();
+        $this->createdCurrencyIds[] = $id;
+        return $id;
     }
 
     private function client(string $name, int $countryId, ?string $dic, bool $customer = false, bool $vendor = false): int
@@ -1229,20 +1951,22 @@ final class KhDphTaxScenariosTest extends TestCase
 
     /**
      * @param list<array{0:float,1:float,2:float}> $items [base, vat, vat_rate_snapshot]
+     * @param string $invoiceType 'invoice' (default) / 'credit_note' — vydaný dobropis
+     *   se vkládá se ZÁPORNÝMI items (konvence CancelInvoiceAction)
      */
-    private function sale(string $varsymbol, int $clientId, ?string $code, bool $rc, string $issue, string $tax, array $items): void
+    private function sale(string $varsymbol, int $clientId, ?string $code, bool $rc, string $issue, string $tax, array $items, ?int $currencyId = null, ?float $exchangeRate = null, string $invoiceType = 'invoice'): void
     {
         [$base, $vat, $with] = $this->sumItems($items);
         $stmt = $this->db->pdo()->prepare(
             'INSERT INTO invoices
                 (supplier_id, varsymbol, invoice_type, client_id, issue_date, tax_date, due_date,
-                 currency_id, reverse_charge, total_without_vat, total_vat, total_with_vat,
+                 currency_id, exchange_rate, reverse_charge, total_without_vat, total_vat, total_with_vat,
                  status, vat_classification_code, created_by)
-             VALUES (?, ?, "invoice", ?, ?, ?, ?, ?, ?, ?, ?, ?, "issued", ?, ?)'
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "issued", ?, ?)'
         );
         $stmt->execute([
-            $this->supplierId, $varsymbol, $clientId, $issue, $tax, $issue,
-            $this->currencyId, $rc ? 1 : 0, $base, $vat, $with, $code, $this->userId,
+            $this->supplierId, $varsymbol, $invoiceType, $clientId, $issue, $tax, $issue,
+            $currencyId ?? $this->currencyId, $exchangeRate, $rc ? 1 : 0, $base, $vat, $with, $code, $this->userId,
         ]);
         $id = (int) $this->db->pdo()->lastInsertId();
         $this->invoiceIds[] = $id;
@@ -1284,19 +2008,41 @@ final class KhDphTaxScenariosTest extends TestCase
     }
 
     /**
-     * @param list<array{0:float,1:float,2:float}> $items
+     * @param list<array{0:float,1:float,2:float,3?:?string}> $items
+     *   [base, vat, vat_rate_snapshot, ?vat_classification_code] — 4. prvek (volitelný)
+     *   nastaví per-položkový klasifikační kód (pro mixed-section faktury).
      */
     private function insertItems(string $table, string $fk, int $id, array $items): void
     {
         $stmt = $this->db->pdo()->prepare(
             "INSERT INTO {$table}
                 ({$fk}, description, quantity, unit, unit_price_without_vat, vat_rate_id,
-                 vat_rate_snapshot, total_without_vat, total_vat, total_with_vat, order_index)
-             VALUES (?, 'Test položka', 1, 'ks', ?, ?, ?, ?, ?, ?, ?)"
+                 vat_rate_snapshot, total_without_vat, total_vat, total_with_vat, order_index,
+                 vat_classification_code)
+             VALUES (?, 'Test položka', 1, 'ks', ?, ?, ?, ?, ?, ?, ?, ?)"
         );
         foreach ($items as $i => $it) {
             [$base, $vat, $snapshot] = $it;
-            $stmt->execute([$id, $base, $this->vatRateId, $snapshot, $base, $vat, $base + $vat, $i]);
+            $stmt->execute([$id, $base, $this->vatRateId, $snapshot, $base, $vat, $base + $vat, $i, $it[3] ?? null]);
         }
+    }
+
+    private function insertVatClassification(
+        string $code,
+        string $direction,
+        string $line,
+        string $khSection,
+        float $rate,
+        ?string $regime,
+        ?string $badDebt,
+    ): void {
+        $stmt = $this->db->pdo()->prepare(
+            'INSERT INTO vat_classifications
+                (supplier_id, code, label, direction, dphdp3_line, kh_section, vat_rate,
+                 is_reverse_charge, kh_regime_code, kh_bad_debt, display_order, archived)
+             VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, 999, 0)'
+        );
+        $stmt->execute([$this->supplierId, $code, "Test {$code}", $direction, $line, $khSection, $rate, $regime, $badDebt]);
+        $this->vatClassificationIds[] = (int) $this->db->pdo()->lastInsertId();
     }
 }
