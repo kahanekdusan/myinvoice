@@ -24,7 +24,7 @@ services:
       cz.dusankahanek.myinvoice.role: production-slot
       cz.dusankahanek.myinvoice.slot: ${MYINVOICE_SLOT_NAME:?MYINVOICE_SLOT_NAME is required}
     healthcheck:
-      test: ["CMD-SHELL", "wget --quiet --tries=1 --spider --header='X-Forwarded-Proto: https' http://127.0.0.1/api/health"]
+      test: ["CMD", "curl", "--fail", "--silent", "--show-error", "--max-time", "3", "--header", "X-Forwarded-Proto: https", "http://127.0.0.1/api/health"]
       interval: 5s
       timeout: 3s
       retries: 30

@@ -114,14 +114,14 @@ function Set-GatewayUpstream {
 function Stop-ContainerCron {
     param([string]$Container)
     Invoke-Checked {
-        docker exec $Container sh -lc 'pkill crond 2>/dev/null || true'
+        docker exec $Container sh -lc 'pkill -x crond 2>/dev/null || true; pkill -x cron 2>/dev/null || true'
     } "Could not stop cron in $Container."
 }
 
 function Start-ContainerCron {
     param([string]$Container)
     Invoke-Checked {
-        docker exec $Container sh -lc 'pkill crond 2>/dev/null || true; export -p > /etc/myinvoice-cron.env; chmod 0640 /etc/myinvoice-cron.env; chown root:www-data /etc/myinvoice-cron.env 2>/dev/null || true; crond'
+        docker exec $Container sh -lc 'pkill -x crond 2>/dev/null || true; pkill -x cron 2>/dev/null || true; export -p > /etc/myinvoice-cron.env; chmod 0640 /etc/myinvoice-cron.env; chown root:www-data /etc/myinvoice-cron.env 2>/dev/null || true; if command -v cron >/dev/null 2>&1; then cron; elif command -v crond >/dev/null 2>&1; then crond; else exit 127; fi; pgrep -x cron >/dev/null 2>&1 || pgrep -x crond >/dev/null 2>&1'
     } "Could not start cron in $Container."
 }
 

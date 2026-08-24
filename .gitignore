@@ -22,6 +22,7 @@ manual/generated.bak/
 manual/manual.pdf
 publish.cmd
 last_deploy.log
+ops/cloudflared/tunnel-token
 
 # OS junk
 .DS_Store

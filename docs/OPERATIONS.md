@@ -33,14 +33,16 @@ Provozní soubory se secrets jsou mimo Git v `C:\docker\fakturace\stacks`:
 
 | Projekt | Účel | Aplikace | DB | Image | Data |
 | --- | --- | --- | --- | --- | --- |
-| `myinvoice` | produkce | `0.0.0.0:8088` | `127.0.0.1:3310` | digest z `production` | stávající produkční volumes |
+| `myinvoice` | produkční DB a původní rollback web | `0.0.0.0:8088` | `127.0.0.1:3310` | původní upstream image | stávající produkční volumes |
+| `myinvoice_blue` / `myinvoice_green` | aktivní a kandidátní produkční slot | jen přes gateway | sdílená `myinvoice-db-1` | digest z `production` | sdílený `myinvoice_app-data` |
 | `myinvoice_dev` | vlastní vývoj | `127.0.0.1:8090` | `127.0.0.1:3311` | lokální/development | stávající vývojové volumes |
 | `myinvoice_master` | čistý upstream muster | `127.0.0.1:8100` | `127.0.0.1:3312` | `radekhulan/myinvoice:4.56.1` | kopie produkčních dat |
 | `myinvoice_gateway` | stabilní veřejná brána | `127.0.0.1:8087` | — | `caddy:2.11.4` připnutý digestem | bez aplikačních dat |
+| `myinvoice_cloudflared` | Cloudflare konektor | bez host portu | — | připnutý cloudflared digest | lokální ignorovaný tokenový soubor |
 
 Master a development mají cron vypnutý a SMTP přesměrované na uzavřený lokální port. Reálná data ani `.env` se nikdy necommitují.
 
-Cloudflare Tunnel směruje na `http://myinvoice-gateway:8080` přes externí síť `public-gateway`. Gateway je současně připojená k produkční síti a aktivní upstream načítá z `C:\docker\fakturace\stacks\gateway\upstream.caddy`. Atomická změna souboru a `caddy reload` přepne ověřenou blue/green instanci bez restartu gateway a bez přerušení již obsluhovaných spojení.
+Cloudflare Tunnel směruje na `http://myinvoice-gateway:8080` přes externí síť `public-gateway`. Gateway je současně připojená k produkční síti a aktivní upstream načítá z `C:\docker\fakturace\stacks\gateway\upstream.caddy`. Atomická změna souboru a `caddy reload` přepne ověřenou blue/green instanci bez restartu gateway a bez přerušení již obsluhovaných spojení. Spravovaný konektor má compose v `ops/cloudflared`; token čte jen z lokálního souboru `tunnel-token`, který je ignorovaný Gitem. Postup bezpečné rotace je v `ops/cloudflared/README.md`.
 
 Kandidátní slot startuje s `MYINVOICE_ENABLE_CRON=0`. Po úspěšném lokálním i veřejném healthchecku deployment zastaví cron předchozího slotu a spustí jej v novém. Předchozí webový kontejner zůstává běžet bez cronu jako okamžitý rollback; databázový a aplikační volume sdílí oba sloty a nikdy se při přepnutí nemažou.
 
