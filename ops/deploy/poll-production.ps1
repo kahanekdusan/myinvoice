@@ -40,6 +40,20 @@ function Invoke-DockerChecked {
     if ($LASTEXITCODE -ne 0) { throw $Failure }
 }
 
+function Get-ProductionHead {
+    $remote = "https://github.com/$repository.git"
+    $ref = "refs/heads/$expectedBranch"
+    $result = @(& git ls-remote --exit-code $remote $ref)
+    if ($LASTEXITCODE -ne 0 -or $result.Count -ne 1) {
+        throw "Could not resolve the unique remote ref $ref."
+    }
+    $sha = [string](($result[0] -split '\s+')[0])
+    if ($sha -notmatch '^[0-9a-f]{40}$') {
+        throw "Git returned an invalid production SHA: $sha"
+    }
+    return $sha
+}
+
 $mutex = [System.Threading.Mutex]::new($false, 'Global\MyInvoiceProductionWatcher')
 $lockTaken = $false
 
@@ -60,6 +74,15 @@ try {
     $deployScriptSha256 = (Get-FileHash -LiteralPath $deployScript -Algorithm SHA256).Hash.ToLowerInvariant()
     if ($deployScriptSha256 -ne $expectedDeployScriptSha256) {
         throw "Trusted local deployment script hash mismatch: $deployScriptSha256"
+    }
+
+    $branchSha = Get-ProductionHead
+    if (Test-Path -LiteralPath $stateFile) {
+        $state = Get-Content -LiteralPath $stateFile -Raw | ConvertFrom-Json
+        if ($state.deployed_sha -eq $branchSha) {
+            Write-AgentLog "Production SHA $branchSha is already deployed."
+            exit 0
+        }
     }
 
     $headers = @{
@@ -88,19 +111,9 @@ try {
         throw "Workflow returned an invalid commit SHA: $sha"
     }
 
-    $branch = Invoke-RestMethod -Uri "$apiBase/branches/$expectedBranch" -Headers $headers -Method Get
-    $branchSha = [string]$branch.commit.sha
     if ($branchSha -ne $sha) {
         Write-AgentLog "Successful run $($run.id) is not for current production HEAD; deployment is blocked."
         exit 0
-    }
-
-    if (Test-Path -LiteralPath $stateFile) {
-        $state = Get-Content -LiteralPath $stateFile -Raw | ConvertFrom-Json
-        if ($state.deployed_sha -eq $sha) {
-            Write-AgentLog "Production SHA $sha is already deployed."
-            exit 0
-        }
     }
 
     if ($CheckOnly) {
@@ -143,6 +156,24 @@ try {
     Move-Item -LiteralPath $temporaryState -Destination $stateFile -Force
     Write-AgentLog "Deployment state recorded for SHA $sha."
 } catch {
+    $statusCode = $null
+    $rateLimitRemaining = $null
+    $response = $_.Exception.Response
+    if ($response) {
+        try { $statusCode = [int]$response.StatusCode } catch {}
+        try {
+            $rateLimitRemaining = [string]($response.Headers.GetValues('X-RateLimit-Remaining') | Select-Object -First 1)
+        } catch {
+            try { $rateLimitRemaining = [string]$response.Headers['X-RateLimit-Remaining'] } catch {}
+        }
+    }
+    if ($statusCode -eq 403 -and (
+        $rateLimitRemaining -eq '0' -or
+        [string]$_.ErrorDetails.Message -match 'rate limit exceeded'
+    )) {
+        Write-AgentLog 'GitHub API rate limit reached; deployment was safely deferred to the next cycle.'
+        exit 0
+    }
     Write-AgentLog "ERROR: $($_.Exception.Message)"
     throw
 } finally {
