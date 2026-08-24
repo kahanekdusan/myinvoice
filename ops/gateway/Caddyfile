@@ -1,0 +1,8 @@
+{
+	auto_https off
+	admin localhost:2019
+}
+
+:8080 {
+	import /etc/caddy/upstream.caddy
+}

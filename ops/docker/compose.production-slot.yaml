@@ -1,0 +1,41 @@
+services:
+  app:
+    image: ${MYINVOICE_SLOT_IMAGE:?MYINVOICE_SLOT_IMAGE is required}
+    container_name: ${MYINVOICE_SLOT_CONTAINER:?MYINVOICE_SLOT_CONTAINER is required}
+    restart: unless-stopped
+    volumes:
+      - ${CFG_PATH:?CFG_PATH is required}:/var/www/html/cfg.php:ro
+      - app-data:/data
+    environment:
+      TZ: Europe/Prague
+      MYINVOICE_APP_ENV: production
+      MYINVOICE_APP_DEBUG: "false"
+      MYINVOICE_APP_URL: https://faktury.dusankahanek.cz
+      MYINVOICE_DATA_DIR: /data
+      MYINVOICE_ENABLE_CRON: "0"
+      MYINVOICE_DB_HOST: myinvoice-db-1
+      MYINVOICE_DB_PORT: "3306"
+      MYINVOICE_DB_NAME: ${DB_NAME:-myinvoice}
+      MYINVOICE_DB_USER: ${DB_USER:-myinvoice}
+      MYINVOICE_DB_PASS: ${DB_PASSWORD:?DB_PASSWORD is required}
+    networks:
+      - production
+    labels:
+      cz.dusankahanek.myinvoice.role: production-slot
+      cz.dusankahanek.myinvoice.slot: ${MYINVOICE_SLOT_NAME:?MYINVOICE_SLOT_NAME is required}
+    healthcheck:
+      test: ["CMD-SHELL", "wget --quiet --tries=1 --spider --header='X-Forwarded-Proto: https' http://127.0.0.1/api/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 20s
+
+networks:
+  production:
+    external: true
+    name: myinvoice_default
+
+volumes:
+  app-data:
+    external: true
+    name: myinvoice_app-data

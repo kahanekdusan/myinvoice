@@ -1,0 +1,27 @@
+services:
+  gateway:
+    image: caddy@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648
+    container_name: myinvoice-gateway
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8087:8080"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./upstream.caddy:/etc/caddy/upstream.caddy:ro
+    networks:
+      - public-gateway
+      - production
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1:8080/api/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
+networks:
+  public-gateway:
+    external: true
+    name: public-gateway
+  production:
+    external: true
+    name: myinvoice_default

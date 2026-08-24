@@ -36,8 +36,13 @@ Provozní soubory se secrets jsou mimo Git v `C:\docker\fakturace\stacks`:
 | `myinvoice` | produkce | `0.0.0.0:8088` | `127.0.0.1:3310` | digest z `production` | stávající produkční volumes |
 | `myinvoice_dev` | vlastní vývoj | `127.0.0.1:8090` | `127.0.0.1:3311` | lokální/development | stávající vývojové volumes |
 | `myinvoice_master` | čistý upstream muster | `127.0.0.1:8100` | `127.0.0.1:3312` | `radekhulan/myinvoice:4.56.1` | kopie produkčních dat |
+| `myinvoice_gateway` | stabilní veřejná brána | `127.0.0.1:8087` | — | `caddy:2.11.4` připnutý digestem | bez aplikačních dat |
 
 Master a development mají cron vypnutý a SMTP přesměrované na uzavřený lokální port. Reálná data ani `.env` se nikdy necommitují.
+
+Cloudflare Tunnel směruje na `http://myinvoice-gateway:8080` přes externí síť `public-gateway`. Gateway je současně připojená k produkční síti a aktivní upstream načítá z `C:\docker\fakturace\stacks\gateway\upstream.caddy`. Atomická změna souboru a `caddy reload` přepne ověřenou blue/green instanci bez restartu gateway a bez přerušení již obsluhovaných spojení.
+
+Kandidátní slot startuje s `MYINVOICE_ENABLE_CRON=0`. Po úspěšném lokálním i veřejném healthchecku deployment zastaví cron předchozího slotu a spustí jej v novém. Předchozí webový kontejner zůstává běžet bez cronu jako okamžitý rollback; databázový a aplikační volume sdílí oba sloty a nikdy se při přepnutí nemažou.
 
 Ruční kontrola:
 
