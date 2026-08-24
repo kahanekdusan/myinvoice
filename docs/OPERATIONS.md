@@ -4,7 +4,7 @@
 
 - `master` je beze změn shodný s `radekhulan/myinvoice:master`. Vlastní commity sem nepatří.
 - `development` obsahuje všechny vlastní změny a pravidelně do sebe slučuje nový upstream `master`.
-- `production` je přesně commit, který má být nasazen. Push do této větve nejprve sestaví neměnný GHCR image a potom spustí deployment na označeném self-hosted runneru.
+- `production` je přesně commit, který má být nasazen. Push do této větve sestaví neměnný GHCR image. Pevný lokální watcher potom ověří úspěšný běh, aktuální HEAD větve, revision label a digest image a teprve pak spustí lokální deployment.
 
 Aktualizace upstreamu:
 
@@ -50,5 +50,15 @@ Invoke-WebRequest https://faktury.dusankahanek.cz/ -SkipHttpErrorCheck
 ## Produkční ochrany
 
 Deployment přijímá jen neměnný odkaz `ghcr.io/kahanekdusan/myinvoice@sha256:...`. Před změnou image vytvoří v `C:\docker\fakturace\stacks\production\backups` konzistentní SQL dump, archiv `/data` a SHA-256 součty. Po migraci musí lokální i veřejná adresa vrátit HTTP 200; jinak se aplikace vrátí na předchozí image. Produkční DB volume se nemaže ani nevytváří znovu.
+
+Veřejný fork z bezpečnostních důvodů nepoužívá self-hosted GitHub runner. GitHub-hosted runner pouze sestaví image. Na produkčním počítači běží každých pět minut `C:\docker\fakturace\deploy-agent\poll-production.ps1`; tato pevná lokální kopie nespouští workflow ani checkout z GitHubu. Stav posledního úspěšného nasazení ukládá do `state.json` a provozní záznam do `logs\watcher.log`.
+
+Instalační adresář watcheru obsahuje auditované kopie:
+
+- `poll-production.ps1`
+- `deploy-production.ps1`
+- `SHA256SUMS.txt`
+
+Plánovaná úloha běží jen v interaktivní relaci uživatele, pod kterým běží Docker Desktop. Před prvním automatickým deploymentem musí být GHCR balíček veřejně čitelný a Cloudflare Tunnel musí být přepnut přes lokální blue/green gateway; do té doby se používá jen režim `-CheckOnly`.
 
 První bezpečnostní snapshot před reorganizací je uložen mimo Git v `C:\docker\fakturace\_safety\20260824-180913`.

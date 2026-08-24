@@ -1,4 +1,4 @@
-name: Build and deploy production
+name: Build production image
 
 on:
   push:
@@ -36,18 +36,9 @@ jobs:
           tags: |
             ghcr.io/kahanekdusan/myinvoice:production
             ghcr.io/kahanekdusan/myinvoice:sha-${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/kahanekdusan/myinvoice
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=sha-${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-
-  deploy:
-    name: Deploy on Docker host
-    needs: build
-    runs-on: [self-hosted, Windows, X64, myinvoice-production]
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v6
-      - name: Deploy digest with backup, migration and rollback
-        shell: powershell
-        run: >-
-          .\ops\deploy\deploy-production.ps1
-          -ImageRef "ghcr.io/kahanekdusan/myinvoice@${{ needs.build.outputs.digest }}"
