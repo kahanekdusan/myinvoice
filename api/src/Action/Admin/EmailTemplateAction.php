@@ -157,7 +157,7 @@ final class EmailTemplateAction
     private function defaultSubject(string $code, string $locale): string
     {
         $cs = [
-            'invoice_send'      => 'Faktura {{ invoice.varsymbol }}',
+            'invoice_send'      => '{{ subject }}',
             'invoice_payment_thanks' => 'Děkujeme za úhradu faktury {{ invoice.varsymbol }}',
             'invoice_reminder'  => 'Upomínka — faktura {{ invoice.varsymbol }} ({{ days_overdue }} dní po splatnosti)',
             'proforma_reminder' => 'Připomínka — záloha {{ invoice.varsymbol }} ({{ days_overdue }} dní po splatnosti)',
@@ -170,7 +170,7 @@ final class EmailTemplateAction
             'work_report_access_code' => 'Ověřovací kód pro náhled výkazu práce — MyInvoice.cz',
         ];
         $en = [
-            'invoice_send'      => 'Invoice {{ invoice.varsymbol }}',
+            'invoice_send'      => '{{ subject }}',
             'invoice_payment_thanks' => 'Thank you for your payment — invoice {{ invoice.varsymbol }}',
             'invoice_reminder'  => 'Reminder — invoice {{ invoice.varsymbol }} ({{ days_overdue }} days overdue)',
             'proforma_reminder' => 'Reminder — proforma {{ invoice.varsymbol }} ({{ days_overdue }} days overdue)',

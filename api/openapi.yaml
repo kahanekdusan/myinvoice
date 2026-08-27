@@ -1260,23 +1260,19 @@ paths:
       description: |
         Použij když potřebuješ obejít veřejný link — např. zákazník schválil
         telefonicky a chceš to v systému zaznamenat. Audit log loguje, kdo
-        rozhodnutí vložil ručně.
+        rozhodnutí vložil ručně. Stav `expired` lze nastavit jen cenové nabídce.
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
-              required: [approval_status]
+              required: [status]
               properties:
-                approval_status:
+                status:
                   type: string
-                  enum: [none, requested, approved, rejected]
-                approval_decided_by_email:
-                  type: string
-                  format: email
-                  description: Kdo schválil (pro audit)
-                approval_rejection_reason:
+                  enum: [none, approved, expired, rejected]
+                rejection_reason:
                   type: string
                   description: Důvod (pokud `rejected`)
       responses:
@@ -1553,7 +1549,8 @@ paths:
       summary: Pošle upomínku po splatnosti
       description: |
         Šablona `invoice_reminder` (per locale, per supplier override). Klient
-        nemá vliv na obsah — text je z nastavení.
+        nemá vliv na obsah — text je z nastavení. Cenové nabídky
+        (`invoice_type=proforma`, `numbering_type=quote`) jsou vždy odmítnuty.
       responses:
         '200':
           description: OK
@@ -1565,7 +1562,7 @@ paths:
                   ok: { type: boolean }
                   reminder_count: { type: integer, description: Kolikátá upomínka }
         '409':
-          description: Faktura není po splatnosti / je již zaplacená
+          description: Faktura není po splatnosti, je již zaplacená nebo jde o cenovou nabídku
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
@@ -1900,13 +1897,36 @@ paths:
       description: |
         Kopíruje hlavičku + položky + work-report. Nový draft má dnešní
         `issue_date`, prázdný `number`, status `draft`. Vhodné pro periodicky
-        opakované faktury (předplatné, paušál).
+        opakované faktury (předplatné, paušál). Při převodu cenové nabídky
+        na fakturu nebo zálohovou fakturu musí být nabídka ve stavu `approved`;
+        nový draft se automaticky naváže přes `parent_invoice_id`.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                increment_month_in_descriptions: { type: boolean, default: false }
+                issue_date: { type: string, format: date }
+                target_invoice_type: { type: string, enum: [invoice, proforma] }
+                target_numbering_type: { type: string, enum: [default, quote] }
+                parent_invoice_id: { type: [integer, "null"], format: int64 }
       responses:
         '201':
           description: Vytvořen nový draft
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/Invoice' }
+              schema:
+                type: object
+                required: [draft_id]
+                properties:
+                  draft_id: { type: integer, format: int64 }
+        '409':
+          description: Cenová nabídka není schválená nebo už má navazující doklad
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
 
   /api/v1/invoices/{id}/issue-final:
     parameters:
@@ -1982,7 +2002,8 @@ paths:
       summary: Hromadné odeslání upomínek
       description: |
         Pošle upomínku pro všechny faktury v `ids` (nebo všechny po splatnosti
-        pokud `ids` chybí). Vhodné pro cron job „každý pondělí ráno upomínky".
+        pokud `ids` chybí). Cenové nabídky jsou vždy vyřazeny. Vhodné pro cron
+        job „každý pondělí ráno upomínky".
       requestBody:
         content:
           application/json:
@@ -6011,7 +6032,7 @@ components:
         language: { type: string, enum: [cs, en], description: "Jazyk PDF/emailů" }
         reverse_charge: { type: boolean }
         prices_include_vat: { type: boolean, description: "Ceny položek zadané včetně DPH (DPH se počítá shora koeficientem). Per-doklad, migrace 0083." }
-        auto_send_reminders: { type: boolean, description: "Per-faktura přepínač automatických upomínek (migrace 0088). False = cron tuto fakturu přeskočí, i když má dodavatel i klient upomínky zapnuté." }
+        auto_send_reminders: { type: boolean, description: "Per-faktura přepínač automatických upomínek (migrace 0088). False = cron tuto fakturu přeskočí, i když má dodavatel i klient upomínky zapnuté. U cenové nabídky je vždy false." }
         client_ic: { type: [string, "null"], description: "Denormalizováno z klienta" }
         client_dic: { type: [string, "null"] }
         revenue_category_id: { type: [integer, "null"], description: "FK do /revenue-categories — kategorie tržby pro CRM/Grafy" }
@@ -6070,7 +6091,7 @@ components:
         bank_bic: { type: [string, "null"] }
         approval_status:
           type: [string, "null"]
-          enum: [none, requested, approved, rejected, null]
+          enum: [none, requested, approved, expired, rejected, null]
         public_token: { type: [string, "null"], description: "Token trvalého veřejného odkazu „web faktura\" (/invoice/{token}); null dokud odkaz nevznikl. Viz POST /invoices/{id}/public-link." }
         public_viewed_at: { type: [string, "null"], format: date-time, description: "Poslední zobrazení web faktury klientem (anonymní přístup); null = klient ji zatím neotevřel." }
         items:
@@ -6161,7 +6182,7 @@ components:
         language: { type: string, enum: [cs, en], description: "Default = language klienta (cs)" }
         reverse_charge: { type: boolean, description: "Přenesená daňová povinnost. Default = z klienta." }
         prices_include_vat: { type: boolean, default: false, description: "Ceny položek zadané včetně DPH (DPH shora koeficientem)." }
-        auto_send_reminders: { type: boolean, default: true, description: "Per-faktura přepínač automatických upomínek (migrace 0088). False = cron tuto fakturu přeskočí." }
+        auto_send_reminders: { type: boolean, default: true, description: "Per-faktura přepínač automatických upomínek (migrace 0088). False = cron tuto fakturu přeskočí. U cenové nabídky server hodnotu vždy vynutí na false." }
         revenue_category_id: { type: [integer, "null"], description: "Kategorie tržby. Když chybí, na create se odvodí z defaultu projektu/klienta." }
         vat_classification_code: { type: [string, "null"], description: "Hlavičkový default klasifikace plnění; auto-default podle sazby/RC/země, pokud prázdné." }
         varsymbol:

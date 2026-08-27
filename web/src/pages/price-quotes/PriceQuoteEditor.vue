@@ -514,6 +514,7 @@ async function submit() {
       due_date: form.value.due_date,
       currency_id: form.value.currency_id,
       reverse_charge: form.value.reverse_charge,
+      auto_send_reminders: false,
       language: form.value.language,
       note_above_items: form.value.note_above_items || null,
       note_below_items: form.value.note_below_items || null,

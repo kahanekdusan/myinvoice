@@ -1,6 +1,7 @@
 {% extends '_layout.html.twig' %}
 
 {% block content %}
+{% set currency_display = is_quote and invoice.currency == 'CZK' ? 'Kč' : invoice.currency %}
 <h1 style="margin:0 0 16px;font-size:22px;font-weight:600;color:#15131D;">
   {% if is_test %}<span style="color:#E8A547;">[TEST] </span>{% endif %}{{ greeting }}
 </h1>
@@ -18,7 +19,7 @@
     <td style="padding:16px 20px;">
       <table role="presentation" cellpadding="0" cellspacing="0" style="width:100%;font-size:14px;color:#403B52;">
         <tr>
-          <td style="padding:4px 0;color:#7A748C;width:42%;">Variable symbol</td>
+          <td style="padding:4px 0;color:#7A748C;width:42%;">{% if is_quote %}Quote number{% else %}Variable symbol{% endif %}</td>
           <td style="padding:4px 0;font-family:monospace;font-weight:600;color:#15131D;">{{ invoice.varsymbol }}</td>
         </tr>
         <tr>
@@ -26,13 +27,13 @@
           <td style="padding:4px 0;">{{ invoice.issue_date|date('M j, Y') }}</td>
         </tr>
         <tr>
-          <td style="padding:4px 0;color:#7A748C;">Due date</td>
+          <td style="padding:4px 0;color:#7A748C;">{% if is_quote %}Validity{% else %}Due date{% endif %}</td>
           <td style="padding:4px 0;font-weight:600;">{{ invoice.due_date|date('M j, Y') }}</td>
         </tr>
         <tr>
-          <td style="padding:8px 0 0;color:#7A748C;border-top:1px solid #E5E0F4;">{% if is_paid %}Paid{% else %}Amount due{% endif %}</td>
-          <td style="padding:8px 0 0;border-top:1px solid #E5E0F4;font-size:18px;font-weight:700;color:{% if is_paid %}#2E7D32{% else %}{{ accent }}{% endif %};font-family:monospace;">
-            {{ amount_to_pay|number_format(2, '.', ',') }} {{ invoice.currency }}{% if is_paid %} ✓{% endif %}
+          <td style="padding:8px 0 0;color:#7A748C;border-top:1px solid #E5E0F4;">{% if is_quote %}Total price{% elseif is_paid %}Paid{% else %}Amount due{% endif %}</td>
+          <td style="padding:8px 0 0;border-top:1px solid #E5E0F4;font-size:18px;font-weight:700;color:{% if is_paid and not is_quote %}#2E7D32{% else %}{{ accent }}{% endif %};font-family:monospace;">
+            {{ (is_quote ? document_total : amount_to_pay)|number_format(2, '.', ',') }} {{ currency_display }}{% if is_paid and not is_quote %} ✓{% endif %}
           </td>
         </tr>
       </table>
@@ -40,7 +41,7 @@
   </tr>
 </table>
 
-{% if is_paid %}
+{% if not is_quote and is_paid %}
 <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="margin:24px 0 8px;">
   <tr>
     <td style="padding:14px 18px;background:#E8F5E9;border-left:3px solid #2E7D32;border-radius:4px;font-size:14px;color:#1B5E20;">
@@ -52,7 +53,7 @@
     </td>
   </tr>
 </table>
-{% elseif payment_method == 'card' %}
+{% elseif not is_quote and payment_method == 'card' %}
 <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="margin:24px 0 8px;">
   <tr>
     <td style="padding:14px 18px;background:#FFF8E1;border-left:3px solid #E8A547;border-radius:4px;font-size:14px;color:#5D4500;">
@@ -60,7 +61,7 @@
     </td>
   </tr>
 </table>
-{% elseif payment_method == 'cash' %}
+{% elseif not is_quote and payment_method == 'cash' %}
 <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="margin:24px 0 8px;">
   <tr>
     <td style="padding:14px 18px;background:#FFF8E1;border-left:3px solid #E8A547;border-radius:4px;font-size:14px;color:#5D4500;">
@@ -70,7 +71,7 @@
 </table>
 {% endif %}
 
-{% if qr_data_uri %}
+{% if qr_data_uri and not is_quote %}
 <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="margin:32px 0 8px;">
   <tr>
     <td align="center">
@@ -87,12 +88,12 @@
 </table>
 {% endif %}
 
-{% if invoice_view_url %}
+{% if invoice_view_url and not is_quote %}
 <p style="margin:16px 0 8px;font-size:14px;color:#5A5470;">
-  Please open your invoice using the secure link below{% if qr_data_uri %}. You can use the QR code above for payment{% endif %}.
+  Please open the document using the secure link below{% if qr_data_uri %}. You can use the QR code above for payment{% endif %}.
 </p>
 <p style="margin:12px 0 16px;">
-  <a href="{{ invoice_view_url }}" style="display:inline-block;padding:11px 16px;border-radius:6px;background:#3B2D83;color:#ffffff;text-decoration:none;font-weight:600;">Open invoice</a>
+  <a href="{{ invoice_view_url }}" style="display:inline-block;padding:11px 16px;border-radius:6px;background:#3B2D83;color:#ffffff;text-decoration:none;font-weight:600;">Open document</a>
 </p>
 <p style="margin:0 0 8px;font-size:12px;color:#7A748C;word-break:break-all;">{{ invoice_view_url }}</p>
 {% endif %}

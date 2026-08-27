@@ -10,6 +10,7 @@ use MyInvoice\Middleware\AuthMiddleware;
 use MyInvoice\Repository\InvoiceRepository;
 use MyInvoice\Service\ActivityLogger;
 use MyInvoice\Service\Invoice\AutoIssueAndSendService;
+use MyInvoice\Service\Invoice\QuoteLifecyclePolicy;
 use MyInvoice\Service\IpMatcher;
 use Psr\Http\Message\ResponseInterface as Response;
 use Psr\Http\Message\ServerRequestInterface as Request;
@@ -17,9 +18,10 @@ use Psr\Http\Message\ServerRequestInterface as Request;
 /**
  * PUT /api/invoices/{id}/approval-status (admin only)
  *
- * Body: { status: 'none' | 'requested' | 'approved' | 'rejected', rejection_reason?: string }
+ * Body: { status: 'none' | 'approved' | 'expired' | 'rejected', rejection_reason?: string }
  *
  * - status='approved' → spustí AutoIssueAndSendService (vystaví fakturu + pošle klientovi)
+ * - status='expired'  → uloží propadnutí; povoleno jen pro cenovou nabídku
  * - status='rejected' → uloží rejection_reason
  * - status='none'     → reset (zruší token, vymaže timestamps)
  * - status='requested' → tady NE — k tomu slouží RequestApprovalAction (potřebuje token+email)
@@ -50,8 +52,11 @@ final class UpdateApprovalStatusAction
 
         $body = (array) ($request->getParsedBody() ?? []);
         $newStatus = (string) ($body['status'] ?? '');
-        if (!in_array($newStatus, ['none', 'approved', 'rejected'], true)) {
-            return Json::error($response, 'invalid_status', 'Status musí být none|approved|rejected.', 422);
+        if (!in_array($newStatus, QuoteLifecyclePolicy::allowedManualStatuses($invoice), true)) {
+            $allowed = QuoteLifecyclePolicy::isQuote($invoice)
+                ? 'none|approved|expired|rejected'
+                : 'none|approved|rejected';
+            return Json::error($response, 'invalid_status', "Status musí být $allowed.", 422);
         }
 
         $reason = isset($body['rejection_reason']) ? trim((string) $body['rejection_reason']) : null;
@@ -81,6 +86,15 @@ final class UpdateApprovalStatusAction
             return Json::ok($response, ['invoice' => $this->repo->find($id)]);
         }
 
+        if ($newStatus === 'expired') {
+            $this->repo->setApprovalDecision($id, 'expired', (string) ($user['email'] ?? null), null);
+            $this->logger->log('invoice.quote_expired', $user['id'] ?? null, 'invoice', $id, [
+                'by' => 'admin',
+                'decided_by_email' => $user['email'] ?? null,
+            ], $ip, $ua);
+            return Json::ok($response, ['invoice' => $this->repo->find($id)]);
+        }
+
         // approved → uložit status (volitelný komentář sdílí sloupec rejection_reason).
         // U cenové nabídky tím jen nastavíme stav; auto-issue + send dává smysl
         // pouze pro workflow schválení výkazu na běžné faktuře.
@@ -92,8 +106,7 @@ final class UpdateApprovalStatusAction
             'comment' => $approveComment,
         ], $ip, $ua);
 
-        $isQuote = ($invoice['invoice_type'] ?? null) === 'proforma'
-            && ($invoice['numbering_type'] ?? 'default') === 'quote';
+        $isQuote = QuoteLifecyclePolicy::isQuote($invoice);
         if ($isQuote) {
             return Json::ok($response, [
                 'invoice' => $this->repo->find($id),

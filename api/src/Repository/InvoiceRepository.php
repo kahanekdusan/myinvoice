@@ -6,6 +6,7 @@ namespace MyInvoice\Repository;
 
 use MyInvoice\Infrastructure\Database\Connection;
 use MyInvoice\Service\Invoice\CzkRecap;
+use MyInvoice\Service\Invoice\QuoteLifecyclePolicy;
 use PDO;
 
 /**
@@ -814,6 +815,12 @@ final class InvoiceRepository
             . ($hasReminders ? ' ?,' : '')
             . ' ?)';
 
+        $numberingType = (($data['numbering_type'] ?? 'default') === 'quote') ? 'quote' : 'default';
+        $isQuote = QuoteLifecyclePolicy::isQuote([
+            'invoice_type' => (string) ($data['invoice_type'] ?? 'invoice'),
+            'numbering_type' => $numberingType,
+        ]);
+
         $params = [
             (string) ($data['invoice_type'] ?? 'invoice'),
             isset($data['parent_invoice_id']) ? (int) $data['parent_invoice_id'] : null,
@@ -834,7 +841,7 @@ final class InvoiceRepository
             self::clampDiscountPercent($data['discount_percent'] ?? 0),
             $manualVarsymbol,
             $paymentMethod,
-            (($data['numbering_type'] ?? 'default') === 'quote') ? 'quote' : 'default',
+            $numberingType,
             !empty($data['vat_classification_code']) ? (string) $data['vat_classification_code'] : null,
             !empty($data['revenue_category']) ? (string) $data['revenue_category'] : null,
             $revenueCategoryId,
@@ -844,7 +851,9 @@ final class InvoiceRepository
             $params[] = self::normalizeExemptReason($data['income_tax_exempt_reason'] ?? null);
         }
         if ($hasReminders) {
-            $params[] = array_key_exists('auto_send_reminders', $data) ? ((int) (bool) $data['auto_send_reminders']) : 1;
+            $params[] = $isQuote
+                ? 0
+                : (array_key_exists('auto_send_reminders', $data) ? ((int) (bool) $data['auto_send_reminders']) : 1);
         }
         $params[] = $userId;
 
@@ -889,7 +898,7 @@ final class InvoiceRepository
 
         $hasExempt = $this->supportsIncomeTaxExempt();
         $hasReminders = $this->supportsAutoSendReminders();
-        $currentStmt = $this->db->pdo()->prepare('SELECT supplier_id, branding_profile_id, numbering_type FROM invoices WHERE id = ?');
+        $currentStmt = $this->db->pdo()->prepare('SELECT supplier_id, branding_profile_id, invoice_type, numbering_type FROM invoices WHERE id = ?');
         $currentStmt->execute([$id]);
         $current = $currentStmt->fetch(PDO::FETCH_ASSOC);
         if ($current === false) {
@@ -901,6 +910,11 @@ final class InvoiceRepository
         $numberingType = array_key_exists('numbering_type', $data)
             ? (($data['numbering_type'] ?? 'default') === 'quote' ? 'quote' : 'default')
             : (($current['numbering_type'] ?? 'default') === 'quote' ? 'quote' : 'default');
+        $invoiceType = $hasType ? (string) $data['invoice_type'] : (string) $current['invoice_type'];
+        $isQuote = QuoteLifecyclePolicy::isQuote([
+            'invoice_type' => $invoiceType,
+            'numbering_type' => $numberingType,
+        ]);
 
         $sql = 'UPDATE invoices SET
                 client_id = ?, project_id = ?, branding_profile_id = ?,
@@ -941,7 +955,9 @@ final class InvoiceRepository
             $params[] = self::normalizeExemptReason($data['income_tax_exempt_reason'] ?? null);
         }
         if ($hasReminders) {
-            $params[] = array_key_exists('auto_send_reminders', $data) ? ((int) (bool) $data['auto_send_reminders']) : 1;
+            $params[] = $isQuote
+                ? 0
+                : (array_key_exists('auto_send_reminders', $data) ? ((int) (bool) $data['auto_send_reminders']) : 1);
         }
         $params[] = $numberingType;
         if ($hasVarsymbol) $params[] = $manualVarsymbol;
@@ -1472,7 +1488,7 @@ final class InvoiceRepository
      */
     public function setApprovalDecision(int $invoiceId, string $newStatus, ?string $decidedBy, ?string $rejectionReason): void
     {
-        if (!in_array($newStatus, ['approved', 'rejected'], true)) {
+        if (!in_array($newStatus, ['approved', 'expired', 'rejected'], true)) {
             throw new \InvalidArgumentException("Invalid approval status: $newStatus");
         }
         $this->db->pdo()->prepare(
@@ -1676,8 +1692,10 @@ final class InvoiceRepository
     public function setNumberingType(int $invoiceId, string $numberingType): void
     {
         $normalized = $numberingType === 'quote' ? 'quote' : 'default';
-        $this->db->pdo()->prepare('UPDATE invoices SET numbering_type = ? WHERE id = ?')
-            ->execute([$normalized, $invoiceId]);
+        $sql = $normalized === 'quote' && $this->supportsAutoSendReminders()
+            ? 'UPDATE invoices SET numbering_type = ?, auto_send_reminders = 0 WHERE id = ?'
+            : 'UPDATE invoices SET numbering_type = ? WHERE id = ?';
+        $this->db->pdo()->prepare($sql)->execute([$normalized, $invoiceId]);
     }
 
     /** Zaznamená alespoň desetisekundové zobrazení měřeného odkazu. */
@@ -1765,7 +1783,7 @@ final class InvoiceRepository
 
         $whereSql = implode(' AND ', $where);
         $limitSql = $perPage > 0 ? ' LIMIT ? OFFSET ?' : '';
-        $sql = "SELECT i.id, i.varsymbol, i.invoice_type, i.status, i.supplier_id,
+        $sql = "SELECT i.id, i.varsymbol, i.invoice_type, i.numbering_type, i.status, i.supplier_id,
                        i.client_id, i.project_id, i.currency_id, i.language,
                        i.total_with_vat, i.amount_to_pay,
                        i.approval_status, i.approval_token, i.approval_token_expires_at,

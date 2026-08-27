@@ -193,7 +193,7 @@ final class SmtpMicrosoftOauthAction
         curl_close($ch);
 
         if (!is_string($raw) || $httpCode < 200 || $httpCode >= 300) {
-            $detail = $curlErr !== '' ? $curlErr : 'HTTP ' . $httpCode;
+            $detail = self::tokenExchangeErrorDetail($raw, $httpCode, $curlErr);
             return $this->html($response, 502, 'Token exchange selhal', 'Nepodařilo se získat token od Microsoftu: ' . htmlspecialchars($detail, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8'));
         }
 
@@ -230,8 +230,7 @@ final class SmtpMicrosoftOauthAction
             'token_type' => is_array($json) ? (string) ($json['token_type'] ?? '') : '',
         ], $ip, $request->getHeaderLine('User-Agent'));
 
-        return $this->html($response, 200, 'Microsoft OAuth dokončen',
-            'Refresh token byl úspěšně uložen do cfg.local.php. Můžeš zavřít toto okno a otestovat SMTP odeslání v aplikaci.');
+        return self::oauthSuccessRedirect($response);
     }
 
     private function createState(int $userId, string $redirectUri): string
@@ -278,11 +277,55 @@ final class SmtpMicrosoftOauthAction
     private function resolveRedirectUri(): string
     {
         $configured = rtrim($this->cfg('smtp.oauth.microsoft.redirect_uri', ''), '/');
-        if ($configured !== '') {
-            return $configured;
+        $redirectUri = $configured;
+        if ($redirectUri === '') {
+            $appUrl = rtrim($this->cfg('app.url', ''), '/');
+            $redirectUri = $appUrl . '/api/admin/smtp/oauth/microsoft/callback';
         }
-        $appUrl = rtrim($this->cfg('app.url', ''), '/');
-        return $appUrl . '/api/admin/smtp/oauth/microsoft/callback';
+
+        return self::enforceMicrosoftRedirectScheme($redirectUri);
+    }
+
+    private static function enforceMicrosoftRedirectScheme(string $redirectUri): string
+    {
+        $scheme = strtolower((string) parse_url($redirectUri, PHP_URL_SCHEME));
+        $host = strtolower((string) parse_url($redirectUri, PHP_URL_HOST));
+        if ($scheme !== 'http' || $host === '' || $host === 'localhost') {
+            return $redirectUri;
+        }
+
+        return (string) preg_replace('/^http:\/\//i', 'https://', $redirectUri, 1);
+    }
+
+    private static function tokenExchangeErrorDetail(mixed $raw, int $httpCode, string $curlError): string
+    {
+        if ($curlError !== '') {
+            return $curlError;
+        }
+
+        $detail = 'HTTP ' . $httpCode;
+        $payload = is_string($raw) ? json_decode($raw, true) : null;
+        if (!is_array($payload)) {
+            return $detail;
+        }
+
+        $error = trim((string) ($payload['error'] ?? ''));
+        $description = trim((string) ($payload['error_description'] ?? ''));
+        $message = trim($error . ($error !== '' && $description !== '' ? ': ' : '') . $description);
+        if ($message === '') {
+            return $detail;
+        }
+
+        $message = preg_replace('/[\x00-\x1F\x7F]+/u', ' ', $message) ?? $message;
+        return $detail . ' — ' . mb_substr($message, 0, 1000);
+    }
+
+    private static function oauthSuccessRedirect(Response $response): Response
+    {
+        return $response
+            ->withStatus(303)
+            ->withHeader('Location', '/admin/integrations?tab=microsoft')
+            ->withHeader('Cache-Control', 'no-store');
     }
 
     private function cfg(string $path, string $default): string

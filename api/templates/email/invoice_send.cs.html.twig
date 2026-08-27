@@ -1,6 +1,7 @@
 {% extends '_layout.html.twig' %}
 
 {% block content %}
+{% set currency_display = is_quote and invoice.currency == 'CZK' ? 'Kč' : invoice.currency %}
 <h1 style="margin:0 0 16px;font-size:22px;font-weight:600;color:#15131D;">
   {% if is_test %}<span style="color:#E8A547;">[TEST] </span>{% endif %}{{ greeting }}
 </h1>
@@ -18,7 +19,7 @@
     <td style="padding:16px 20px;">
       <table role="presentation" cellpadding="0" cellspacing="0" style="width:100%;font-size:14px;color:#403B52;">
         <tr>
-          <td style="padding:4px 0;color:#7A748C;width:42%;">Variabilní symbol</td>
+          <td style="padding:4px 0;color:#7A748C;width:42%;">{% if is_quote %}Číslo nabídky{% else %}Variabilní symbol{% endif %}</td>
           <td style="padding:4px 0;font-family:monospace;font-weight:600;color:#15131D;">{{ invoice.varsymbol }}</td>
         </tr>
         <tr>
@@ -26,13 +27,13 @@
           <td style="padding:4px 0;">{{ invoice.issue_date|date('j.n.Y') }}</td>
         </tr>
         <tr>
-          <td style="padding:4px 0;color:#7A748C;">Splatnost</td>
+          <td style="padding:4px 0;color:#7A748C;">{% if is_quote %}Platnost{% else %}Splatnost{% endif %}</td>
           <td style="padding:4px 0;font-weight:600;">{{ invoice.due_date|date('j.n.Y') }}</td>
         </tr>
         <tr>
-          <td style="padding:8px 0 0;color:#7A748C;border-top:1px solid #E5E0F4;">{% if is_paid %}Uhrazeno{% else %}K úhradě{% endif %}</td>
-          <td style="padding:8px 0 0;border-top:1px solid #E5E0F4;font-size:18px;font-weight:700;color:{% if is_paid %}#2E7D32{% else %}{{ accent }}{% endif %};font-family:monospace;">
-            {{ amount_to_pay|number_format(2, ',', ' ') }} {{ invoice.currency }}{% if is_paid %} ✓{% endif %}
+          <td style="padding:8px 0 0;color:#7A748C;border-top:1px solid #E5E0F4;">{% if is_quote %}Cena celkem{% elseif is_paid %}Uhrazeno{% else %}K úhradě{% endif %}</td>
+          <td style="padding:8px 0 0;border-top:1px solid #E5E0F4;font-size:18px;font-weight:700;color:{% if is_paid and not is_quote %}#2E7D32{% else %}{{ accent }}{% endif %};font-family:monospace;">
+            {{ (is_quote ? document_total : amount_to_pay)|number_format(2, ',', ' ') }} {{ currency_display }}{% if is_paid and not is_quote %} ✓{% endif %}
           </td>
         </tr>
       </table>
@@ -40,11 +41,11 @@
   </tr>
 </table>
 
-{% if is_paid %}
+{% if not is_quote and is_paid %}
 <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="margin:24px 0 8px;">
   <tr>
     <td style="padding:14px 18px;background:#E8F5E9;border-left:3px solid #2E7D32;border-radius:4px;font-size:14px;color:#1B5E20;">
-      <strong>Faktura již byla uhrazena.</strong>
+      <strong>Doklad již byl uhrazen.</strong>
       {% if payment_method == 'card' %} Platba proběhla platební kartou online — neplaťte prosím znovu.
       {% elseif payment_method == 'cash' %} Platba proběhla v hotovosti.
       {% else %} Neplaťte prosím znovu.
@@ -52,15 +53,15 @@
     </td>
   </tr>
 </table>
-{% elseif payment_method == 'card' %}
+{% elseif not is_quote and payment_method == 'card' %}
 <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="margin:24px 0 8px;">
   <tr>
     <td style="padding:14px 18px;background:#FFF8E1;border-left:3px solid #E8A547;border-radius:4px;font-size:14px;color:#5D4500;">
-      <strong>Úhrada platební kartou.</strong> Bankovní převod ani QR kód se pro tuto fakturu nepoužije.
+      <strong>Úhrada platební kartou.</strong> Bankovní převod ani QR kód se pro tento doklad nepoužije.
     </td>
   </tr>
 </table>
-{% elseif payment_method == 'cash' %}
+{% elseif not is_quote and payment_method == 'cash' %}
 <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="margin:24px 0 8px;">
   <tr>
     <td style="padding:14px 18px;background:#FFF8E1;border-left:3px solid #E8A547;border-radius:4px;font-size:14px;color:#5D4500;">
@@ -70,7 +71,7 @@
 </table>
 {% endif %}
 
-{% if qr_data_uri %}
+{% if qr_data_uri and not is_quote %}
 <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="margin:32px 0 8px;">
   <tr>
     <td align="center">
@@ -87,12 +88,12 @@
 </table>
 {% endif %}
 
-{% if invoice_view_url %}
+{% if invoice_view_url and not is_quote %}
 <p style="margin:16px 0 8px;font-size:14px;color:#5A5470;">
-  Fakturu otevřete přes bezpečný odkaz níže{% if qr_data_uri %}. QR kód výše můžete použít pro platbu{% endif %}.
+  Doklad otevřete přes bezpečný odkaz níže{% if qr_data_uri %}. QR kód výše můžete použít pro platbu{% endif %}.
 </p>
 <p style="margin:12px 0 16px;">
-  <a href="{{ invoice_view_url }}" style="display:inline-block;padding:11px 16px;border-radius:6px;background:#3B2D83;color:#ffffff;text-decoration:none;font-weight:600;">Otevřít fakturu</a>
+  <a href="{{ invoice_view_url }}" style="display:inline-block;padding:11px 16px;border-radius:6px;background:#3B2D83;color:#ffffff;text-decoration:none;font-weight:600;">Otevřít doklad</a>
 </p>
 <p style="margin:0 0 8px;font-size:12px;color:#7A748C;word-break:break-all;">{{ invoice_view_url }}</p>
 {% endif %}
@@ -105,7 +106,7 @@
 
 {% if is_test %}
 <p style="margin:24px 0 0;padding:12px;background:#FDF6E9;border-left:2px solid #E8A547;font-size:13px;color:#8B6420;">
-  <strong>Tohle je TEST email.</strong> Klient ho nedostal. Vystavená faktura zůstává nedotčená.
+  <strong>Tohle je testovací e-mail.</strong> Klient ho nedostal. Doklad zůstává beze změny.
 </p>
 {% endif %}
 {% endblock %}

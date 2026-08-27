@@ -69,19 +69,14 @@ final class InvoiceEmailVarsBuilder
     {
         $type = (string) $invoice['invoice_type'];
         $varsymbol = (string) ($invoice['varsymbol'] ?? '');
+        $isQuote = $this->isPriceQuote($invoice);
         // Částka k úhradě v e-mailu = zbývající dluh — částečné úhrady (#89) se odečítají
         // (upomínka po částečné platbě musí chtít jen zbytek).
         $amount = round(
             (float) ($invoice['amount_to_pay'] ?? $invoice['total_with_vat']) - (float) ($invoice['paid_total'] ?? 0),
             2,
         );
-
-        $typeLabel = match ($type) {
-            'proforma'     => $locale === 'en' ? 'proforma invoice' : 'zálohovou fakturu',
-            'credit_note'  => $locale === 'en' ? 'credit note' : 'opravný daňový doklad',
-            'tax_document' => $locale === 'en' ? 'tax document for payment received' : 'daňový doklad k přijaté platbě',
-            default        => $locale === 'en' ? 'invoice' : 'fakturu',
-        };
+        $documentTotal = round((float) ($invoice['total_with_vat'] ?? $invoice['totals']['with_vat'] ?? $amount), 2);
 
         // Pozn.: dříve se `intro` skládal s embedovaným <strong>č. {VS}</strong> a v šabloně
         // se renderoval `{{ intro|raw }}` — to bypassovalo Twig autoescape a umožnilo HTML
@@ -92,12 +87,31 @@ final class InvoiceEmailVarsBuilder
         // ho nepoužívají.
         if ($locale === 'en') {
             $greeting = 'Hello,';
-            $intro_prefix = "your {$typeLabel} is available online";
-            $intro_plain = "your {$typeLabel} No. {$varsymbol} is available via a secure link below.";
+            $typeLabel = match (true) {
+                $isQuote              => 'price quote',
+                $type === 'proforma'  => 'proforma invoice',
+                $type === 'credit_note' => 'credit note',
+                $type === 'tax_document' => 'tax document for payment received',
+                default               => 'invoice',
+            };
+            $intro_prefix = "Here is your {$typeLabel}";
+            $intro_plain = "Here is your {$typeLabel} No. {$varsymbol}.";
         } else {
             $greeting = 'Dobrý den,';
-            $intro_prefix = "Vaše {$typeLabel} je připravena online";
-            $intro_plain = "Vaše {$typeLabel} č. {$varsymbol} je dostupná přes bezpečný odkaz níže.";
+            // Celé akuzativní tvary jsou záměrně explicitní. Skládání přes univerzální
+            // „Vaše ... je připravena" vedlo k textům typu „Vaše zálohovou fakturu" a
+            // selhávalo i u mužského „opravný daňový doklad".
+            $typeLabel = match (true) {
+                $isQuote                => 'cenovou nabídku',
+                $type === 'proforma'    => 'zálohovou fakturu',
+                $type === 'credit_note' => 'opravný daňový doklad',
+                $type === 'tax_document' => 'daňový doklad k přijaté platbě',
+                default                 => 'fakturu',
+            };
+            $intro_prefix = $isQuote
+                ? "V příloze zasíláme {$typeLabel}"
+                : "Zasíláme vám {$typeLabel}";
+            $intro_plain = "{$intro_prefix} č. {$varsymbol}.";
         }
         // Legacy `intro` value — autoescape-safe (žádné raw <strong>); custom email
         // template overrides v DB mohou používat `{{ intro }}` (bez |raw) a dostanou
@@ -112,6 +126,8 @@ final class InvoiceEmailVarsBuilder
             'invoice'        => $invoice,
             'client_name'    => $invoice['client_company_name'] ?? '',
             'amount_to_pay'  => $amount,
+            'document_total' => $documentTotal,
+            'is_quote'       => $isQuote,
             'is_test'        => $isTest,
             'subject'        => $this->buildSubject($invoice, $isTest, $locale),
             'qr_data_uri'    => $this->paymentQrDataUri($invoice),
@@ -129,6 +145,10 @@ final class InvoiceEmailVarsBuilder
      */
     public function paymentQrDataUri(array $invoice): ?string
     {
+        // Cenová nabídka není výzva k platbě. Nesmí dostat QR ani v e-mailu,
+        // ani ve veřejném náhledu staršího odkazu.
+        if ($this->isPriceQuote($invoice)) return null;
+
         // QR na zbývající částku — po částečné úhradě (#89) se platí jen zbytek.
         $remaining = round((float) ($invoice['amount_to_pay'] ?? 0) - (float) ($invoice['paid_total'] ?? 0), 2);
         if (empty($invoice['varsymbol'])) return null;
@@ -169,24 +189,33 @@ final class InvoiceEmailVarsBuilder
         $supplier = $this->resolveSupplierName($invoice, false);
         $prefix = $isTest ? '[TEST] ' : '';
         $type = (string) ($invoice['invoice_type'] ?? 'invoice');
+        $isQuote = $this->isPriceQuote($invoice);
 
         // Předmět odpovídá typu dokladu (stejně jako text v těle e-mailu) —
         // zálohová faktura ani opravný daňový doklad nejsou „Faktura".
         if ($locale === 'en') {
             $label = match ($type) {
-                'proforma'    => 'Proforma invoice',
-                'credit_note' => 'Credit note',
-                default       => 'Invoice',
+                'proforma'     => $isQuote ? 'Price quote' : 'Proforma invoice',
+                'credit_note'  => 'Credit note',
+                'tax_document' => 'Tax document for payment received',
+                default        => 'Invoice',
             };
         } else {
             $label = match ($type) {
-                'proforma'    => 'Zálohová faktura',
-                'credit_note' => 'Opravný daňový doklad',
-                default       => 'Faktura',
+                'proforma'     => $isQuote ? 'Cenová nabídka' : 'Zálohová faktura',
+                'credit_note'  => 'Opravný daňový doklad',
+                'tax_document' => 'Daňový doklad k přijaté platbě',
+                default        => 'Faktura',
             };
         }
 
         return "{$prefix}{$label} {$varsymbol}" . ($supplier ? " — {$supplier}" : '');
+    }
+
+    private function isPriceQuote(array $invoice): bool
+    {
+        return ($invoice['invoice_type'] ?? '') === 'proforma'
+            && ($invoice['numbering_type'] ?? 'default') === 'quote';
     }
 
     /**

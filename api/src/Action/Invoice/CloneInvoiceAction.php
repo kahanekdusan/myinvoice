@@ -10,6 +10,7 @@ use MyInvoice\Middleware\AuthMiddleware;
 use MyInvoice\Repository\InvoiceRepository;
 use MyInvoice\Service\ActivityLogger;
 use MyInvoice\Service\IpMatcher;
+use MyInvoice\Service\Invoice\QuoteLifecyclePolicy;
 use Psr\Http\Message\ResponseInterface as Response;
 use Psr\Http\Message\ServerRequestInterface as Request;
 
@@ -38,7 +39,8 @@ final class CloneInvoiceAction
     public function __invoke(Request $request, Response $response, array $args): Response
     {
         $id = (int) ($args['id'] ?? 0);
-        if (!SupplierGuard::owns($request, $this->repo->find($id))) {
+        $invoice = $this->repo->find($id);
+        if (!SupplierGuard::owns($request, $invoice)) {
             return Json::error($response, 'not_found', 'Faktura nenalezena.', 404);
         }
         $body = (array) ($request->getParsedBody() ?? []);
@@ -49,6 +51,18 @@ final class CloneInvoiceAction
         $parentInvoiceId = array_key_exists('parent_invoice_id', $body) && $body['parent_invoice_id'] !== null
             ? (int) $body['parent_invoice_id']
             : null;
+
+        $quoteViolation = QuoteLifecyclePolicy::conversionViolation(
+            $invoice,
+            $targetInvoiceType,
+            $targetNumberingType,
+        );
+        if ($quoteViolation !== null) {
+            return Json::error($response, $quoteViolation['code'], $quoteViolation['message'], 409);
+        }
+        if (QuoteLifecyclePolicy::isConversion($invoice, $targetInvoiceType, $targetNumberingType)) {
+            $parentInvoiceId = $id;
+        }
 
         $user = (array) $request->getAttribute(AuthMiddleware::ATTR_USER, []);
         $userId = (int) ($user['id'] ?? 0);

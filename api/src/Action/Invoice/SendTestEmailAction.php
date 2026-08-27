@@ -73,12 +73,19 @@ final class SendTestEmailAction
         $emailAttachments = [
             ['path' => $pdfPath, 'name' => basename($pdfPath), 'contentType' => 'application/pdf'],
         ];
-        $publicToken = $this->repo->rotatePublicViewToken($id);
-        $invoiceViewUrl = $this->linkFactory->build($publicToken);
+        $isQuote = ($invoice['invoice_type'] ?? '') === 'proforma'
+            && ($invoice['numbering_type'] ?? 'default') === 'quote';
+        $invoiceViewUrl = null;
+        if (!$isQuote) {
+            $publicToken = $this->repo->rotatePublicViewToken($id);
+            $invoiceViewUrl = $this->linkFactory->build($publicToken);
+        }
 
         $locale = (string) ($invoice['language'] ?? 'cs');
         $vars = $this->varsBuilder->build($invoice, true, $locale);
-        $vars['invoice_view_url'] = $invoiceViewUrl;
+        if ($invoiceViewUrl !== null) {
+            $vars['invoice_view_url'] = $invoiceViewUrl;
+        }
 
         $smtpResponse = '';
         try {
@@ -106,7 +113,7 @@ final class SendTestEmailAction
         $ip = $this->ipMatcher->clientIpFromRequest($request->getServerParams());
         $this->logger->log('email.sent_test', $user['id'] ?? null, 'invoice', $id, [
             'to'            => $testRecipient,
-            'delivery_mode' => 'public_link',
+            'delivery_mode' => $isQuote ? 'attachment' : 'public_link',
             'invoice_view_url' => $invoiceViewUrl,
             'smtp_response' => $smtpResponse,
         ], $ip, $request->getHeaderLine('User-Agent'));

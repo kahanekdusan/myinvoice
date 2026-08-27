@@ -271,7 +271,7 @@ async function bulkSend() {
   }
 }
 
-async function bulkUpdateQuoteStatus(status: Extract<ApprovalStatus, 'none' | 'approved' | 'rejected'>) {
+async function bulkUpdateQuoteStatus(status: Extract<ApprovalStatus, 'none' | 'approved' | 'expired' | 'rejected'>) {
   const list = quoteStateSelected.value
   if (list.length === 0) {
     toast.warning(t('invoice.quote_state.bulk_no_eligible'))
@@ -540,6 +540,12 @@ const monthOptions = computed(() => (tm('common.months_short') as unknown as str
           :disabled="bulkBusy"
           class="cursor-pointer inline-flex items-center gap-1.5 h-9 px-3 border border-danger-500 text-danger-500 hover:bg-danger-50 disabled:opacity-50 text-sm font-medium rounded-md">
           {{ bulkBusy ? '…' : t('invoice.quote_state.bulk_set_rejected', { n: quoteStateSelected.length }) }}
+        </button>
+        <button v-if="(quoteStateSelected.length > 0) && isAdmin"
+          @click="bulkUpdateQuoteStatus('expired')"
+          :disabled="bulkBusy"
+          class="cursor-pointer inline-flex items-center gap-1.5 h-9 px-3 border border-warning-500 text-warning-600 hover:bg-warning-50 disabled:opacity-50 text-sm font-medium rounded-md">
+          {{ bulkBusy ? '…' : t('invoice.quote_state.bulk_set_expired', { n: quoteStateSelected.length }) }}
         </button>
         <button v-if="(markPayableSelected.length > 0) && auth.canWrite"
           @click="bulkMarkPaid"

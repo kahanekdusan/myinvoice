@@ -258,7 +258,7 @@ export interface ApprovalInboxItem {
   currency: string
   total_with_vat: number
   amount_to_pay: number
-  approval_status: 'none' | 'requested' | 'approved' | 'rejected'
+  approval_status: 'none' | 'requested' | 'approved' | 'expired' | 'rejected'
   approval_token: string | null
   approval_token_expires_at: string | null
   approval_requested_at: string | null

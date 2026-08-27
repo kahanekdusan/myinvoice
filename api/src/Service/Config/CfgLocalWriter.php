@@ -58,6 +58,9 @@ final class CfgLocalWriter
     {
         $path = rtrim($rootDir, '/\\') . DIRECTORY_SEPARATOR . 'cfg.local.php';
 
+        if (is_file($path)) {
+            self::invalidateOpcache($path);
+        }
         $existing = is_file($path) ? require $path : [];
         if (!is_array($existing)) {
             throw new \RuntimeException('cfg.local.php existuje, ale nevrací pole.');
@@ -78,6 +81,9 @@ final class CfgLocalWriter
         if ($bytes === false) {
             throw new \RuntimeException("cfg.local.php nelze zapsat na {$path} (zkontroluj práva souboru/adresáře).");
         }
+
+        @chmod($path, 0600);
+        self::invalidateOpcache($path);
     }
 
     /**
@@ -99,5 +105,12 @@ final class CfgLocalWriter
             $ref = &$ref[$segment];
         }
         return $data;
+    }
+
+    private static function invalidateOpcache(string $path): void
+    {
+        if (function_exists('opcache_invalidate')) {
+            @opcache_invalidate($path, true);
+        }
     }
 }

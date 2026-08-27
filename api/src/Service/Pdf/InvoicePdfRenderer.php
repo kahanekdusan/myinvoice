@@ -308,6 +308,8 @@ final class InvoicePdfRenderer
 
         $logoPath = $this->resolveLogoPath($supplierData, (int) ($invoice['supplier_id'] ?? 0));
 
+        $parentReference = $this->parentReference($invoice);
+
         $vars = [
             'invoice'           => $invoice,
             'quote_number_display' => $this->quoteNumberDisplay($invoice),
@@ -324,7 +326,8 @@ final class InvoicePdfRenderer
             'locale'            => $locale,
             'doc_type_label'    => $this->docTypeLabel($invoice, $locale, $supplierData),
             'doc_title'         => $this->docTitle($invoice),
-            'parent_varsymbol'  => $this->parentVarsymbol($invoice),
+            'parent_varsymbol'  => $parentReference['varsymbol'] ?? null,
+            'parent_is_quote'   => $parentReference['is_quote'] ?? false,
             'work_report'       => $includeWorkReport
                 ? $this->workReports->findByInvoice((int) $invoice['id'])
                 : null,
@@ -600,12 +603,23 @@ final class InvoicePdfRenderer
         return "$t $vs";
     }
 
-    private function parentVarsymbol(array $invoice): ?string
+    /** @return array{varsymbol:string,is_quote:bool}|null */
+    private function parentReference(array $invoice): ?array
     {
         if (!$invoice['parent_invoice_id']) return null;
-        $stmt = $this->db->pdo()->prepare('SELECT varsymbol FROM invoices WHERE id = ?');
+        $stmt = $this->db->pdo()->prepare(
+            'SELECT varsymbol, invoice_type, numbering_type FROM invoices WHERE id = ?'
+        );
         $stmt->execute([$invoice['parent_invoice_id']]);
-        return $stmt->fetchColumn() ?: null;
+        $parent = $stmt->fetch(PDO::FETCH_ASSOC);
+        $varsymbol = trim((string) ($parent['varsymbol'] ?? ''));
+        if ($varsymbol === '') return null;
+
+        return [
+            'varsymbol' => $varsymbol,
+            'is_quote'  => ($parent['invoice_type'] ?? '') === 'proforma'
+                && ($parent['numbering_type'] ?? 'default') === 'quote',
+        ];
     }
 
     private function resolveLogoPath(array $supplier, int $supplierIdFallback = 0): ?string

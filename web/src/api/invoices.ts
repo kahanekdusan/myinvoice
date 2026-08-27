@@ -2,7 +2,7 @@ import { api } from './client'
 
 export type InvoiceType = 'invoice' | 'proforma' | 'credit_note' | 'cancellation' | 'tax_document'
 export type InvoiceStatus = 'draft' | 'issued' | 'sent' | 'reminded' | 'paid' | 'cancelled'
-export type ApprovalStatus = 'none' | 'requested' | 'approved' | 'rejected'
+export type ApprovalStatus = 'none' | 'requested' | 'approved' | 'expired' | 'rejected'
 /** Odvozený platební stav (#89) — počítá se z paid_total vs. amount_to_pay; null pro draft/cancelled. */
 export type PaymentStatus = 'unpaid' | 'partially_paid' | 'paid' | 'overpaid'
 

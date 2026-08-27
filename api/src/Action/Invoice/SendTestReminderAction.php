@@ -12,6 +12,7 @@ use MyInvoice\Middleware\AuthMiddleware;
 use MyInvoice\Repository\InvoiceRepository;
 use MyInvoice\Service\ActivityLogger;
 use MyInvoice\Service\Invoice\PublicInvoiceLinkFactory;
+use MyInvoice\Service\Invoice\QuoteLifecyclePolicy;
 use MyInvoice\Service\IpMatcher;
 use MyInvoice\Service\Mail\InvoiceEmailVarsBuilder;
 use MyInvoice\Service\Mail\Mailer;
@@ -48,6 +49,10 @@ final class SendTestReminderAction
         $invoice = $this->repo->find($id);
         if (!SupplierGuard::owns($request, $invoice)) {
             return Json::error($response, 'not_found', 'Faktura nenalezena.', 404);
+        }
+        $quoteViolation = QuoteLifecyclePolicy::reminderViolation($invoice);
+        if ($quoteViolation !== null) {
+            return Json::error($response, $quoteViolation['code'], $quoteViolation['message'], 409);
         }
         if (!in_array($invoice['invoice_type'], ['invoice', 'proforma'], true)) {
             return Json::error($response, 'invalid_type', 'Upomínat lze jen běžnou fakturu nebo proformu.', 409);

@@ -457,3 +457,19 @@ tabulkou práce vytiskne i tabulka **Materiál** (popis, množství, MJ, cena/MJ
 celkem). Položka „Materiál" ve faktuře je **proklik** na tuto tabulku (stejně jako
 položka práce). Ve schvalovacím e-mailu i na schvalovací stránce zákazník vidí
 obě části a schvaluje je **najednou**.
+
+## 10.12 Cenová nabídka → faktura
+
+Cenovou nabídku nejprve vystav a odešli klientovi. Admin pak v detailu nabídky
+nastaví stav **Schválená**, **Propadnutá** nebo **Zamítnutá**. Navazující
+vydanou fakturu nebo zálohovou fakturu lze vytvořit pouze ze **schválené**
+cenové nabídky. Nový doklad vznikne jako koncept, převezme položky i režim
+cen s DPH / bez DPH a zůstane propojený se zdrojovou nabídkou.
+
+Stav **Propadnutá** lze nastavit ručně. Nabídka po datu platnosti se také
+zobrazuje jako propadnutá automaticky, pokud z ní dosud nevznikl navazující
+doklad. Z propadnuté nebo zamítnuté nabídky nelze fakturu vytvořit; nejprve
+je nutné vrátit stav na **Schválená**.
+
+Cenová nabídka není platební doklad, proto z ní systém nikdy neodesílá
+ruční, testovací ani automatické upomínky.

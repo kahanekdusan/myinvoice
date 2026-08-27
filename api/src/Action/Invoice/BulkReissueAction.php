@@ -11,6 +11,7 @@ use MyInvoice\Middleware\AuthMiddleware;
 use MyInvoice\Repository\InvoiceRepository;
 use MyInvoice\Service\ActivityLogger;
 use MyInvoice\Service\Invoice\InvoiceCalculator;
+use MyInvoice\Service\Invoice\QuoteLifecyclePolicy;
 use MyInvoice\Service\IpMatcher;
 use Psr\Http\Message\ResponseInterface as Response;
 use Psr\Http\Message\ServerRequestInterface as Request;
@@ -119,6 +120,10 @@ final class BulkReissueAction
         if ($type !== 'proforma' && $numberingType === 'quote') {
             throw new \RuntimeException('Číslování quote lze použít jen pro proforma doklad.');
         }
+        $isQuote = QuoteLifecyclePolicy::isQuote([
+            'invoice_type' => $type,
+            'numbering_type' => $numberingType,
+        ]);
 
         // Splatnost: stejná priorita jako u nové faktury (InvoiceDefaults::apply) —
         // zakázka → klient → dodavatel → 7. Bez tohoto fallbacku dostal klon faktury
@@ -207,7 +212,7 @@ final class BulkReissueAction
                 $source['revenue_category_id'] ?? null,
             ];
             if ($hasReminders) {
-                $params[] = !empty($source['auto_send_reminders']) ? 1 : 0;
+                $params[] = $isQuote ? 0 : (!empty($source['auto_send_reminders']) ? 1 : 0);
             }
             $params[] = $userId;
             $stmt->execute($params);

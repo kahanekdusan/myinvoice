@@ -442,6 +442,7 @@ const quoteDisplayTypeLabel = computed(() => isQuote.value ? quoteTypeLabel() : 
 const canCreateInvoiceFromQuote = computed(() =>
   !!invoice.value
   && isQuote.value
+  && invoice.value.approval_status === 'approved'
   && !isDraft.value
   && invoice.value.status !== 'cancelled'
   && !invoice.value.final_invoice
@@ -451,6 +452,7 @@ const canCreateInvoiceFromQuote = computed(() =>
 const canCreateAdvanceFromQuote = computed(() =>
   !!invoice.value
   && isQuote.value
+  && invoice.value.approval_status === 'approved'
   && !isDraft.value
   && invoice.value.status !== 'cancelled'
   && !invoice.value.final_invoice
@@ -465,6 +467,12 @@ const canManageQuoteStatus = computed(() =>
   && invoice.value.status !== 'cancelled'
   && !invoice.value.final_invoice
   && !invoice.value.advance_invoice
+)
+
+const approvalStatusOptions = computed<ApprovalStatus[]>(() =>
+  isQuote.value
+    ? ['none', 'approved', 'expired', 'rejected']
+    : ['none', 'approved', 'rejected'],
 )
 
 function openSendModal() {
@@ -1124,7 +1132,7 @@ async function updateApprovalStatus() {
         <h3 class="text-lg font-semibold mb-3">{{ isQuote ? t('invoice.quote_state.modal_title') : t('invoice.approval.modal_title') }}</h3>
         <p class="text-sm text-neutral-600 mb-3">{{ isQuote ? t('invoice.quote_state.modal_hint') : t('invoice.approval.modal_hint') }}</p>
         <div class="space-y-2 mb-4">
-          <label v-for="opt in (['none','approved','rejected'] as const)" :key="opt"
+          <label v-for="opt in approvalStatusOptions" :key="opt"
             class="flex items-start gap-2 p-3 border rounded-md cursor-pointer"
             :class="approvalStatusDraft === opt ? 'border-primary-500 bg-primary-50' : 'border-neutral-200'">
             <input type="radio" v-model="approvalStatusDraft" :value="opt" class="mt-1" />
