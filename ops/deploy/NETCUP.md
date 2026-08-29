@@ -1,7 +1,8 @@
 # netcup production delivery
 
 The `production` branch remains the only production release source. A push to
-that branch builds an immutable GHCR image on a GitHub-hosted runner. The
+that branch builds an immutable GHCR image through
+`build-netcup-production.yml` on a GitHub-hosted runner. The
 optional `deploy-candidate` job can then ask `srv01` to pull that exact digest
 into the inactive slot.
 
@@ -56,6 +57,11 @@ Manual workflow dispatch is accepted only when the selected ref is
 `production`; another ref skips the build. The mutable `production` tag is
 therefore never produced from a feature/development ref. srv01 still consumes
 only the immutable digest output, never that mutable tag.
+
+The workflow intentionally has a different filename from the legacy NUC
+`deploy-production.yml`. The existing NUC watcher trusts only that legacy path;
+after this change it finds no successful legacy run for the new production HEAD
+and safely defers. Do not point the NUC watcher at the netcup workflow.
 
 Until that command is installed and independently reviewed,
 `NETCUP_MYINVOICE_CANDIDATE_ENABLED` must remain absent or false. Production

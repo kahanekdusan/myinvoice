@@ -1,4 +1,4 @@
-name: Build production image
+name: Build netcup production image
 
 on:
   push:
