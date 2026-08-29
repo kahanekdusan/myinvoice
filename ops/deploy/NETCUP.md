@@ -28,7 +28,13 @@ approval. Configure:
   host-key line.
 
 Do not reuse an administrator key, a shell-capable generic deploy account, or a
-GHCR write token on the server.
+GHCR write token on the server. The public key in `authorized_keys` must use
+OpenSSH `restrict` plus a root-owned forced-command gate, for example
+`command="/usr/local/sbin/netcup-myinvoice-ssh-gate",restrict`. The account must
+not belong to the `docker` group and its sudo rule must allow only the root-owned
+MyInvoice gate/deploy program. The forced command must validate
+`SSH_ORIGINAL_COMMAND` against the exact contract below and reject every other
+command; port, agent, X11 and PTY forwarding remain disabled.
 
 ## Required server contract
 
@@ -45,6 +51,11 @@ platform preflight, deploy only the inactive profile with
 `MYINVOICE_ENABLE_CRON=0`, and perform internal health checks. It must never
 switch the gateway, run a scheduler, touch Cloudflare, or stop/delete NUC
 objects in `candidate` mode.
+
+Manual workflow dispatch is accepted only when the selected ref is
+`production`; another ref skips the build. The mutable `production` tag is
+therefore never produced from a feature/development ref. srv01 still consumes
+only the immutable digest output, never that mutable tag.
 
 Until that command is installed and independently reviewed,
 `NETCUP_MYINVOICE_CANDIDATE_ENABLED` must remain absent or false. Production
