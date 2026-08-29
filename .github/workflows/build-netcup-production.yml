@@ -1,0 +1,97 @@
+name: Build netcup production image
+
+on:
+  push:
+    branches: [production]
+  workflow_dispatch:
+
+concurrency:
+  group: myinvoice-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    name: Build immutable production image
+    if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/production'
+    runs-on: ubuntu-latest
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          build-args: SKIP_FRONTEND_TYPECHECK=0
+          tags: |
+            ghcr.io/kahanekdusan/myinvoice:production
+            ghcr.io/kahanekdusan/myinvoice:sha-${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/kahanekdusan/myinvoice
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=sha-${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy-candidate:
+    name: Deploy inactive candidate on srv01
+    if: >-
+      github.event_name == 'push' &&
+      vars.NETCUP_MYINVOICE_CANDIDATE_ENABLED == 'true'
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    environment: netcup-myinvoice-candidate
+    steps:
+      - name: Require successful CI for the exact production commit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          run_count="$(gh run list \
+            --repo "$GITHUB_REPOSITORY" \
+            --workflow ci.yml \
+            --commit "$SOURCE_SHA" \
+            --event push \
+            --status success \
+            --json headSha \
+            --jq '[.[] | select(.headSha == env.SOURCE_SHA)] | length')"
+          test "$run_count" -ge 1
+
+      - name: Configure verified SSH access
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.NETCUP_MYINVOICE_SSH_PRIVATE_KEY }}
+          SSH_HOST_KEY: ${{ secrets.NETCUP_MYINVOICE_SSH_HOST_KEY }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/netcup_myinvoice
+          printf '%s\n' "$SSH_HOST_KEY" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/netcup_myinvoice ~/.ssh/known_hosts
+
+      - name: Deploy immutable image to inactive slot only
+        env:
+          DEPLOY_HOST: ${{ vars.NETCUP_MYINVOICE_DEPLOY_HOST }}
+          DEPLOY_PORT: ${{ vars.NETCUP_MYINVOICE_DEPLOY_PORT || '22' }}
+          DEPLOY_USER: ${{ vars.NETCUP_MYINVOICE_DEPLOY_USER || 'deploy-myinvoice' }}
+          IMAGE_REF: ghcr.io/kahanekdusan/myinvoice@${{ needs.build.outputs.digest }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          test -n "$DEPLOY_HOST"
+          ssh -i ~/.ssh/netcup_myinvoice -p "$DEPLOY_PORT" \
+            -o BatchMode=yes -o StrictHostKeyChecking=yes \
+            "$DEPLOY_USER@$DEPLOY_HOST" \
+            "sudo /usr/local/sbin/netcup-myinvoice-deploy candidate '$IMAGE_REF' '$SOURCE_SHA'"
