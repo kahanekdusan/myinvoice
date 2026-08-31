@@ -300,6 +300,7 @@ final class Config
             'MYINVOICE_AUTH_PASSWORDLESS_LOGIN' => ['auth.passwordless_login.enabled', 'bool'],
 
             // SMTP
+            'MYINVOICE_SMTP_TRANSPORT'  => ['smtp.transport', 'string'],
             'MYINVOICE_SMTP_HOST'       => ['smtp.host', 'string'],
             'MYINVOICE_SMTP_PORT'       => ['smtp.port', 'int'],
             'MYINVOICE_SMTP_ENCRYPTION' => ['smtp.encryption', 'string'],

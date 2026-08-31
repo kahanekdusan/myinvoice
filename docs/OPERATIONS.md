@@ -1,71 +1,43 @@
-# Provozní model forku
+# Fork operations
 
-## Větve
+## Branches
 
-- `master` je beze změn shodný s `radekhulan/myinvoice:master`. Vlastní commity sem nepatří.
-- `development` obsahuje všechny vlastní změny a pravidelně do sebe slučuje nový upstream `master`.
-- `production` je přesně commit, který má být nasazen. Push do této větve sestaví neměnný GHCR image. Pevný lokální watcher potom ověří úspěšný běh, aktuální HEAD větve, revision label a digest image a teprve pak spustí lokální deployment.
+- `master` mirrors `radekhulan/myinvoice:master`; custom commits do not belong
+  there.
+- `development` contains reviewed local development changes.
+- `production` is updated only by a reviewed Pull Request with green required
+  checks. A merge builds an immutable GHCR image on a GitHub-hosted runner.
 
-Aktualizace upstreamu:
+Source moves between the desktop and Mac only through Git feature branches.
+Runtime env files, cfg files, Docker volumes, database dumps and customer data
+are never synchronized through Git.
 
-```powershell
-git fetch upstream --tags
-git switch master
-git merge --ff-only upstream/master
-git push origin master
-git switch development
-git merge --no-ff master
+## Local Docker development
+
+The only supported local stack is `ops/docker/compose.local.yaml`, operated by
+`cmd/docker-local.sh` on macOS/Linux or `cmd/docker-local.ps1` on Windows. See
+`docs/LOCAL_DEVELOPMENT.md` for commands and guarantees.
+
+Local development uses only synthetic/test data. It never mounts or imports the
+production database, production `/data`, production cfg, Graph/OAuth secrets or
+customer documents. The app and DB bind to loopback, cron is disabled and mail
+is forced to a closed local sink.
+
+Except for the explicit `ops/docker/compose.local.yaml` contract, historical
+Windows/NUC files under `ops/docker/`, `ops/deploy/` and `ops/gateway/` are not
+local-development or srv01 templates. Do not run them.
+
+## Production
+
+Production runs only on srv01. No source build and no long-lived development
+slot runs there. Changes follow this path:
+
+```text
+feature branch -> Pull Request -> green CI -> production merge
+-> immutable private GHCR digest -> restricted srv01 deployment gate
 ```
 
-Po vyřešení konfliktů musí projít backendové testy, `pnpm exec vue-tsc --noEmit`, `pnpm test:pwa` a `pnpm build`. Vlastní databázové migrace používají řadu `9000+`, aby nekolidovaly s upstreamem.
-
-Nasazení ověřeného development commitu:
-
-```powershell
-git switch production
-git merge --ff-only development
-git push origin production
-```
-
-## Docker stacky
-
-Provozní soubory se secrets jsou mimo Git v `C:\docker\fakturace\stacks`:
-
-| Projekt | Účel | Aplikace | DB | Image | Data |
-| --- | --- | --- | --- | --- | --- |
-| `myinvoice` | produkční DB a původní rollback web | `0.0.0.0:8088` | `127.0.0.1:3310` | původní upstream image | stávající produkční volumes |
-| `myinvoice_blue` / `myinvoice_green` | aktivní a kandidátní produkční slot | jen přes gateway | sdílená `myinvoice-db-1` | digest z `production` | sdílený `myinvoice_app-data` |
-| `myinvoice_dev` | vlastní vývoj | `127.0.0.1:8090` | `127.0.0.1:3311` | lokální/development | stávající vývojové volumes |
-| `myinvoice_master` | čistý upstream muster | `127.0.0.1:8100` | `127.0.0.1:3312` | `radekhulan/myinvoice:4.56.1` | kopie produkčních dat |
-| `myinvoice_gateway` | stabilní veřejná brána | `127.0.0.1:8087` | — | `caddy:2.11.4` připnutý digestem | bez aplikačních dat |
-| `myinvoice_cloudflared` | Cloudflare konektor | bez host portu | — | připnutý cloudflared digest | lokální ignorovaný tokenový soubor |
-
-Master a development mají cron vypnutý a SMTP přesměrované na uzavřený lokální port. Reálná data ani `.env` se nikdy necommitují.
-
-Cloudflare Tunnel směruje na `http://myinvoice-gateway:8080` přes externí síť `public-gateway`. Gateway je současně připojená k produkční síti a aktivní upstream načítá z `C:\docker\fakturace\stacks\gateway\upstream.caddy`. Atomická změna souboru a `caddy reload` přepne ověřenou blue/green instanci bez restartu gateway a bez přerušení již obsluhovaných spojení. Spravovaný konektor má compose v `ops/cloudflared`; token čte jen z lokálního souboru `tunnel-token`, který je ignorovaný Gitem. Postup bezpečné rotace je v `ops/cloudflared/README.md`.
-
-Kandidátní slot startuje s `MYINVOICE_ENABLE_CRON=0`. Po úspěšném lokálním i veřejném healthchecku deployment zastaví cron předchozího slotu a spustí jej v novém. Předchozí webový kontejner zůstává běžet bez cronu jako okamžitý rollback; databázový a aplikační volume sdílí oba sloty a nikdy se při přepnutí nemažou.
-
-Ruční kontrola:
-
-```powershell
-Invoke-WebRequest http://127.0.0.1:8090/ -SkipHttpErrorCheck
-Invoke-WebRequest http://127.0.0.1:8100/ -SkipHttpErrorCheck
-Invoke-WebRequest https://faktury.dusankahanek.cz/ -SkipHttpErrorCheck
-```
-
-## Produkční ochrany
-
-Deployment přijímá jen neměnný odkaz `ghcr.io/kahanekdusan/myinvoice@sha256:...`. Před změnou image vytvoří v `C:\docker\fakturace\stacks\production\backups` konzistentní SQL dump, archiv `/data` a SHA-256 součty. Po migraci musí lokální i veřejná adresa vrátit HTTP 200; jinak se aplikace vrátí na předchozí image. Produkční DB volume se nemaže ani nevytváří znovu.
-
-Veřejný fork z bezpečnostních důvodů nepoužívá self-hosted GitHub runner. GitHub-hosted runner pouze sestaví image. Na produkčním počítači běží každých pět minut `C:\docker\fakturace\deploy-agent\poll-production.ps1`; tato pevná lokální kopie nespouští workflow ani checkout z GitHubu. Stav posledního úspěšného nasazení ukládá do `state.json` a provozní záznam do `logs\watcher.log`.
-
-Instalační adresář watcheru obsahuje auditované kopie:
-
-- `poll-production.ps1`
-- `deploy-production.ps1`
-- `SHA256SUMS.txt`
-
-Plánovaná úloha běží jen v interaktivní relaci uživatele, pod kterým běží Docker Desktop. Před prvním automatickým deploymentem musí být GHCR balíček veřejně čitelný a Cloudflare Tunnel musí být přepnut přes lokální blue/green gateway; do té doby se používá jen režim `-CheckOnly`.
-
-První bezpečnostní snapshot před reorganizací je uložen mimo Git v `C:\docker\fakturace\_safety\20260824-180913`.
+Direct edits, direct `docker compose up`, direct pushes to `production`, the
+old NUC watcher and a self-hosted GitHub runner are outside the supported
+production process. Runtime secrets remain root-owned on srv01 and outside Git.
+The NUC remains an unchanged rollback source until a separate explicit decision.
