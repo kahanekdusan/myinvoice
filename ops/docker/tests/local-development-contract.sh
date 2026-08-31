@@ -121,7 +121,15 @@ if grep -v 'APP_PORT=unset;DB_PASSWORD=unset;COMPOSE_PROJECT_NAME=unset' "$tmp/d
   exit 1
 fi
 grep -Fq 'ARGS=compose --project-name myinvoice_dev --env-file' "$tmp/docker.log"
-[ "$(stat -f '%Lp' "$mirror/.docker-local/development/runtime.env" 2>/dev/null || stat -c '%a' "$mirror/.docker-local/development/runtime.env")" = 600 ]
+if stat -c '%a' "$mirror/.docker-local/development/runtime.env" >/dev/null 2>&1; then
+  runtime_mode="$(stat -c '%a' "$mirror/.docker-local/development/runtime.env")"
+else
+  runtime_mode="$(stat -f '%Lp' "$mirror/.docker-local/development/runtime.env")"
+fi
+[ "$runtime_mode" = 600 ] || {
+  echo "runtime.env mode is $runtime_mode, expected 600" >&2
+  exit 1
+}
 
 if FAKE_DOCKER_LOG="$tmp/docker-remote.log" PATH="$tmp/fake-bin:$PATH" DOCKER_HOST=ssh://srv01.example \
   "$mirror/cmd/docker-local.sh" config >/dev/null 2>&1; then
