@@ -83,6 +83,21 @@ PHP);
         self::assertSame(3307, $cfg->get('db.port'));
     }
 
+    public function testLocalMailTransportEnvironmentOverrideIsAuthoritative(): void
+    {
+        $this->setEnv('MYINVOICE_SMTP_TRANSPORT', 'smtp');
+        $this->setEnv('MYINVOICE_SMTP_HOST', '127.0.0.1');
+        $this->setEnv('MYINVOICE_SMTP_PORT', '1');
+        $this->setEnv('MYINVOICE_SMTP_AUTH', 'false');
+
+        $cfg = Config::load($this->tmpDir);
+
+        self::assertSame('smtp', $cfg->get('smtp.transport'));
+        self::assertSame('127.0.0.1', $cfg->get('smtp.host'));
+        self::assertSame(1, $cfg->get('smtp.port'));
+        self::assertFalse($cfg->get('smtp.auth_enabled'));
+    }
+
     public function testSessionLockDefaultsToDisabledWithoutExplicitConfiguration(): void
     {
         $this->unsetEnv('MYINVOICE_SESSION_LOCK_AFTER_MINUTES');
