@@ -9,6 +9,7 @@ use MyInvoice\Repository\InvoiceRepository;
 use MyInvoice\Service\ActivityLogger;
 use MyInvoice\Service\Mail\InvoiceEmailVarsBuilder;
 use MyInvoice\Service\Mail\Mailer;
+use MyInvoice\Service\Mail\RecipientResolver;
 use MyInvoice\Infrastructure\Config\Config;
 use MyInvoice\Service\Pdf\InvoicePdfRenderer;
 use MyInvoice\Service\Validation\InvoiceAmountPolicy;
@@ -51,6 +52,11 @@ final class ReminderService
         $invoice = $this->repo->find($invoiceId);
         if ($invoice === null) {
             throw new \DomainException('Faktura nenalezena.');
+        }
+
+        $quoteViolation = QuoteLifecyclePolicy::reminderViolation($invoice);
+        if ($quoteViolation !== null) {
+            throw new \DomainException($quoteViolation['message']);
         }
 
         if (!in_array($invoice['status'], ['issued', 'sent', 'reminded'], true)) {

@@ -19,6 +19,7 @@ declare(strict_types=1);
  *
  * Vybrané faktury: status IN ('issued','sent','reminded'),
  *                  invoice_type IN ('invoice','proforma'),
+ *                  cenové nabídky (numbering_type='quote') jsou vždy vyloučeny,
  *                  due_date < CURDATE() - INTERVAL N DAY,
  *                  (last_reminder_at IS NULL OR last_reminder_at < NOW() - INTERVAL cooldown DAY)
  *
@@ -71,6 +72,7 @@ $sql = "SELECT i.id, i.varsymbol, i.invoice_type, i.due_date, i.amount_to_pay, c
           JOIN supplier s ON s.id = i.supplier_id
          WHERE i.status IN ('issued','sent','reminded')
            AND i.invoice_type IN ('invoice','proforma')
+           AND COALESCE(i.numbering_type, 'default') <> 'quote'
            AND i.amount_to_pay > 0
            AND i.payment_method = 'bank_transfer'
            AND s.auto_send_reminders = 1

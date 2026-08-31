@@ -92,6 +92,17 @@ final class CfgLocalWriterTest extends TestCase
         self::assertTrue($config->get('auth.require_totp'));
     }
 
+    public function testWrittenCfgLocalIsOwnerOnlyOnPosix(): void
+    {
+        if (DIRECTORY_SEPARATOR === '\\') {
+            self::markTestSkipped('Windows chmod nepodporuje POSIX oprávnění.');
+        }
+
+        CfgLocalWriter::setKeys($this->tmpRoot, ['auth.require_totp' => true]);
+
+        self::assertSame(0600, fileperms($this->tmpRoot . '/cfg.local.php') & 0777);
+    }
+
     public function testThrowsWhenExistingCfgLocalDoesNotReturnArray(): void
     {
         file_put_contents($this->tmpRoot . '/cfg.local.php', "<?php return 'not-an-array';");

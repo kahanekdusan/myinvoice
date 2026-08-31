@@ -168,6 +168,7 @@ final class IssueInvoiceAction
                 client_snapshot   = ?,
                 supplier_snapshot = ?,
                 bank_snapshot     = ?,
+                auto_send_reminders = CASE WHEN ? = "quote" THEN 0 ELSE auto_send_reminders END,
                 status            = ?,
                 paid_at           = ?
              WHERE id = ? AND status = "draft"'
@@ -179,6 +180,7 @@ final class IssueInvoiceAction
                 json_encode($snapshots['client'],   JSON_UNESCAPED_UNICODE),
                 json_encode($snapshots['supplier'], JSON_UNESCAPED_UNICODE),
                 $snapshots['bank'] !== null ? json_encode($snapshots['bank'], JSON_UNESCAPED_UNICODE) : null,
+                $effectiveNumberingType,
                 $autoPaid ? 'paid' : 'issued',
                 // Daňový doklad k přijaté platbě: paid_at = den přijetí úplaty (tax_date/DUZP),
                 // ne den vystavení dokladu — kasové reporty mají vidět skutečné inkaso.

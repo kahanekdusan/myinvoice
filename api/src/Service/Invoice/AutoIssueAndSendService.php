@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace MyInvoice\Service\Invoice;
 
+use MyInvoice\Infrastructure\Config\Config;
 use MyInvoice\Infrastructure\Database\Connection;
 use MyInvoice\Repository\InvoiceRepository;
 use MyInvoice\Service\ActivityLogger;
@@ -35,6 +36,7 @@ final class AutoIssueAndSendService
         private readonly SnapshotBuilder $snapshots,
         private readonly PublicInvoiceLinkFactory $linkFactory,
         private readonly InvoicePdfRenderer $renderer,
+        private readonly RecipientResolver $recipients,
         private readonly Mailer $mailer,
         private readonly InvoiceEmailVarsBuilder $varsBuilder,
         private readonly ActivityLogger $logger,

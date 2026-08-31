@@ -1,46 +1,73 @@
+name: myinvoice_dev
+
+# Canonical isolated local-development stack. Production and the legacy
+# general-purpose root Compose file are separate contracts.
 services:
   app:
-    image: ${APP_IMAGE:?APP_IMAGE is required}
-    pull_policy: ${APP_PULL_POLICY:-missing}
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+      args:
+        SKIP_FRONTEND_TYPECHECK: "${SKIP_FRONTEND_TYPECHECK:-1}"
+    image: myinvoice-development:local
+    pull_policy: never
     restart: unless-stopped
     depends_on:
       db:
         condition: service_healthy
     ports:
-      - "127.0.0.1:${APP_PORT:?APP_PORT is required}:80"
+      - "127.0.0.1:${APP_PORT:-8090}:80"
     volumes:
-      - ${CFG_PATH:?CFG_PATH is required}:/var/www/html/cfg.php:ro
       - app-data:/data
     environment:
       TZ: Europe/Prague
       MYINVOICE_APP_ENV: development
       MYINVOICE_APP_DEBUG: "false"
-      MYINVOICE_APP_URL: ${APP_URL:?APP_URL is required}
+      MYINVOICE_APP_URL: "http://localhost:${APP_PORT:-8090}"
+      MYINVOICE_PEPPER: "${MYINVOICE_PEPPER:?MYINVOICE_PEPPER is required}"
+      MYINVOICE_SECRET_KEY: "${MYINVOICE_SECRET_KEY:?MYINVOICE_SECRET_KEY is required}"
       MYINVOICE_DATA_DIR: /data
       MYINVOICE_ENABLE_CRON: "0"
+      MYINVOICE_SESSION_COOKIE_SECURE: "false"
+      MYINVOICE_SESSION_COOKIE_NAME: myinvoice_dev_session
       MYINVOICE_DB_HOST: db
       MYINVOICE_DB_PORT: "3306"
-      MYINVOICE_DB_NAME: ${DB_NAME:-myinvoice}
-      MYINVOICE_DB_USER: ${DB_USER:-myinvoice}
-      MYINVOICE_DB_PASS: ${DB_PASSWORD:?DB_PASSWORD is required}
-      # Fail closed for cloned real data: local stacks cannot send mail.
+      MYINVOICE_DB_NAME: myinvoice_dev
+      MYINVOICE_DB_USER: myinvoice_dev
+      MYINVOICE_DB_PASS: "${DB_PASSWORD:?DB_PASSWORD is required}"
+      MYINVOICE_SMTP_TRANSPORT: smtp
       MYINVOICE_SMTP_HOST: 127.0.0.1
       MYINVOICE_SMTP_PORT: "1"
       MYINVOICE_SMTP_AUTH: "false"
+    networks:
+      - app-net
+      - db-net
+    healthcheck:
+      test:
+        - CMD
+        - php
+        - -r
+        - "exit(@file_get_contents('http://127.0.0.1/api/health') === false ? 1 : 0);"
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 60s
 
   db:
-    image: mariadb:11
+    image: mariadb:11.8.7@sha256:78185355dd49b54dd6909072531ce8d7e06aa0eccd7aa5b23c93ebb7e34c5aaa
     restart: unless-stopped
     environment:
-      MARIADB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:?DB_ROOT_PASSWORD is required}
-      MARIADB_DATABASE: ${DB_NAME:-myinvoice}
-      MARIADB_USER: ${DB_USER:-myinvoice}
-      MARIADB_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD is required}
+      MARIADB_ROOT_PASSWORD: "${DB_ROOT_PASSWORD:?DB_ROOT_PASSWORD is required}"
+      MARIADB_DATABASE: myinvoice_dev
+      MARIADB_USER: myinvoice_dev
+      MARIADB_PASSWORD: "${DB_PASSWORD:?DB_PASSWORD is required}"
       TZ: Europe/Prague
     volumes:
       - db-data:/var/lib/mysql
     ports:
-      - "127.0.0.1:${DB_PORT:?DB_PORT is required}:3306"
+      - "127.0.0.1:${DB_PORT:-3311}:3306"
+    networks:
+      - db-net
     healthcheck:
       test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
       interval: 5s
@@ -48,10 +75,21 @@ services:
       retries: 30
       start_period: 20s
 
+networks:
+  app-net:
+    name: myinvoice-dev-app
+  db-net:
+    name: myinvoice-dev-db
+    internal: true
+
 volumes:
   app-data:
-    external: true
-    name: ${APP_VOLUME:?APP_VOLUME is required}
+    name: "myinvoice_dev_${LOCAL_GENERATION_ID:?LOCAL_GENERATION_ID is required}_app-data"
+    labels:
+      io.dusankahanek.myinvoice.scope: local-development
+      io.dusankahanek.myinvoice.generation: "${LOCAL_GENERATION_ID:?LOCAL_GENERATION_ID is required}"
   db-data:
-    external: true
-    name: ${DB_VOLUME:?DB_VOLUME is required}
+    name: "myinvoice_dev_${LOCAL_GENERATION_ID:?LOCAL_GENERATION_ID is required}_db-data"
+    labels:
+      io.dusankahanek.myinvoice.scope: local-development
+      io.dusankahanek.myinvoice.generation: "${LOCAL_GENERATION_ID:?LOCAL_GENERATION_ID is required}"

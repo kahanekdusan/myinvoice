@@ -10,6 +10,7 @@
 <body>
 
 {% set is_quote = invoice.invoice_type == 'proforma' and (invoice.numbering_type|default('default')) == 'quote' %}
+{% set currency_display = is_quote and invoice.currency == 'CZK' ? 'Kč' : invoice.currency %}
 
 {# ─── PAGE FOOTER (každá stránka) — attribution ─── #}
 <htmlpagefooter name="attribution">
@@ -45,7 +46,7 @@
         <div class="varsymbol-big">{{ invoice.varsymbol }}</div>
       {% endif %}
       {% if parent_varsymbol %}
-        <div class="parent-ref">{{ t('k faktuře', 'to invoice') }} {{ parent_varsymbol }}</div>
+        <div class="parent-ref">{{ parent_is_quote|default(false) ? t('k CN', 'to quote') : t('k faktuře', 'to invoice') }} {{ parent_varsymbol }}</div>
       {% endif %}
       {% if isdoc_attachment %}
         {# Vizuální badge — samotný embedded ISDOC soubor přidává mPDF přes
@@ -136,7 +137,7 @@
     <td class="meta-value">{{ invoice.due_date|date(date_format) }}</td>
     {% if not is_quote %}
       <td class="meta-label">{{ t('Měna', 'Currency') }}</td>
-      <td class="meta-value mono">{{ invoice.currency }}</td>
+      <td class="meta-value mono">{{ currency_display }}</td>
     {% else %}
       <td></td><td></td>
     {% endif %}
@@ -282,6 +283,7 @@
 {# ─── SUMACE + QR/BANK ─── #}
 <table class="totals">
   <tr>
+    {% if not is_quote %}
     <td class="left">
       {# QR + bankovní spojení sloučené do jednoho podbarveného „platebního" panelu —
          vizuální kotva dokladu. Renderuje se jen když je co platit/ukázat. #}
@@ -297,7 +299,6 @@
             </div>
             {% endif %}
           </td>
-          {% endif %}
           <td class="pay-info">
             {% if is_paid %}
               <div class="bank-label" style="color:#2E7D32;margin-bottom:1.5mm;">{{ t('UHRAZENO', 'PAID') }}</div>
@@ -356,18 +357,19 @@
       </table>
       {% endif %}
     </td>
-    <td class="right">
+    {% endif %}
+    <td class="right{% if is_quote %} quote-right{% endif %}">
       <table class="totals-table">
         {% if supplier.is_vat_payer and invoice.invoice_type != 'proforma' %}
         {% for b in invoice.vat_breakdown %}
         <tr>
           <td class="tot-label">{{ t('Základ', 'Base') }} {{ b.rate|number_format(b.rate == b.rate|round(0) ? 0 : 2, decimal_sep, thousand_sep) }}&nbsp;%</td>
-          <td class="tot-num nowrap">{{ b.base|number_format(2, decimal_sep, thousand_sep) }} {{ invoice.currency }}</td>
+          <td class="tot-num nowrap">{{ b.base|number_format(2, decimal_sep, thousand_sep) }} {{ currency_display }}</td>
         </tr>
         {% if b.vat > 0 %}
         <tr>
           <td class="tot-label">{{ t('DPH', 'VAT') }} {{ b.rate|number_format(b.rate == b.rate|round(0) ? 0 : 2, decimal_sep, thousand_sep) }}&nbsp;%</td>
-          <td class="tot-num nowrap">{{ b.vat|number_format(2, decimal_sep, thousand_sep) }} {{ invoice.currency }}</td>
+          <td class="tot-num nowrap">{{ b.vat|number_format(2, decimal_sep, thousand_sep) }} {{ currency_display }}</td>
         </tr>
         {% endif %}
         {% endfor %}
@@ -375,19 +377,19 @@
         {% if invoice.vat_breakdown|length > 1 %}
         <tr class="subtotal">
           <td class="tot-label">{{ t('Celkem bez DPH', 'Total without VAT') }}</td>
-          <td class="tot-num nowrap">{{ invoice.totals.without_vat|number_format(2, decimal_sep, thousand_sep) }} {{ invoice.currency }}</td>
+          <td class="tot-num nowrap">{{ invoice.totals.without_vat|number_format(2, decimal_sep, thousand_sep) }} {{ currency_display }}</td>
         </tr>
         <tr class="subtotal">
           <td class="tot-label">{{ t('DPH celkem', 'Total VAT') }}</td>
-          <td class="tot-num nowrap">{{ invoice.totals.vat|number_format(2, decimal_sep, thousand_sep) }} {{ invoice.currency }}</td>
+          <td class="tot-num nowrap">{{ invoice.totals.vat|number_format(2, decimal_sep, thousand_sep) }} {{ currency_display }}</td>
         </tr>
         {% endif %}
         {% endif %}
         <tr class="grand">
           <td class="tot-label">{{ t('Celkem', 'Total') }}</td>
-          <td class="tot-num nowrap">{{ invoice.totals.with_vat|number_format(2, decimal_sep, thousand_sep) }} {{ invoice.currency }}</td>
+          <td class="tot-num nowrap">{{ invoice.totals.with_vat|number_format(2, decimal_sep, thousand_sep) }} {{ currency_display }}</td>
         </tr>
-        {% if invoice.advance_paid_amount > 0 %}
+        {% if not is_quote and invoice.advance_paid_amount > 0 %}
         <tr class="advance">
           {% if invoice.invoice_type == 'tax_document' %}
           {# Daňový doklad k přijaté platbě — „záloha" je sama přijatá platba. #}
@@ -395,30 +397,30 @@
           {% else %}
           <td class="tot-label">{{ t('Odečet zálohy', 'Advance deduction') }}</td>
           {% endif %}
-          <td class="tot-num nowrap">−{{ invoice.advance_paid_amount|number_format(2, decimal_sep, thousand_sep) }} {{ invoice.currency }}</td>
+          <td class="tot-num nowrap">−{{ invoice.advance_paid_amount|number_format(2, decimal_sep, thousand_sep) }} {{ currency_display }}</td>
         </tr>
         <tr class="to-pay">
           <td class="tot-label">{{ t('K úhradě', 'Amount due') }}</td>
-          <td class="tot-num nowrap">{{ invoice.amount_to_pay|number_format(2, decimal_sep, thousand_sep) }} {{ invoice.currency }}</td>
+          <td class="tot-num nowrap">{{ invoice.amount_to_pay|number_format(2, decimal_sep, thousand_sep) }} {{ currency_display }}</td>
         </tr>
         {% endif %}
         {# Částečné úhrady (#89): evidované platby snižují výzvu k platbě — znovu
            stažené PDF nesmí chtít celou částku (QR výše zní na tentýž zbytek). #}
-        {% if (invoice.paid_total ?? 0) > 0 and invoice.status != 'paid' %}
+        {% if not is_quote and (invoice.paid_total ?? 0) > 0 and invoice.status != 'paid' %}
         <tr class="advance">
           <td class="tot-label">{{ t('Uhrazeno', 'Paid to date') }}</td>
-          <td class="tot-num nowrap">−{{ invoice.paid_total|number_format(2, decimal_sep, thousand_sep) }} {{ invoice.currency }}</td>
+          <td class="tot-num nowrap">−{{ invoice.paid_total|number_format(2, decimal_sep, thousand_sep) }} {{ currency_display }}</td>
         </tr>
         <tr class="to-pay">
           <td class="tot-label">{{ t('Zbývá uhradit', 'Remaining amount due') }}</td>
-          <td class="tot-num nowrap">{{ (invoice.amount_to_pay - invoice.paid_total)|number_format(2, decimal_sep, thousand_sep) }} {{ invoice.currency }}</td>
+          <td class="tot-num nowrap">{{ (invoice.amount_to_pay - invoice.paid_total)|number_format(2, decimal_sep, thousand_sep) }} {{ currency_display }}</td>
         </tr>
         {% endif %}
         {% if invoice.czk_recap %}
         <tr class="rate-note">
           <td colspan="2" class="rate-note-cell">
             {{ t('Kurz ČNB', 'CNB rate') }}:
-            {{ invoice.czk_recap.rate|number_format(3, decimal_sep, thousand_sep) }}&nbsp;CZK / 1&nbsp;{{ invoice.currency }}
+            {{ invoice.czk_recap.rate|number_format(3, decimal_sep, thousand_sep) }}&nbsp;CZK / 1&nbsp;{{ currency_display }}
             ({{ invoice.czk_recap.rate_date }})
           </td>
         </tr>
@@ -435,7 +437,7 @@
       {{ t('Přepočet do CZK', 'Conversion to CZK') }}
       <span class="czk-recap-rate">
         {{ t('kurz ČNB', 'CNB rate') }}:
-        {{ invoice.czk_recap.rate|number_format(3, decimal_sep, thousand_sep) }}&nbsp;CZK / 1&nbsp;{{ invoice.currency }}
+        {{ invoice.czk_recap.rate|number_format(3, decimal_sep, thousand_sep) }}&nbsp;CZK / 1&nbsp;{{ currency_display }}
         ({{ invoice.czk_recap.rate_date }})
       </span>
     </td>
@@ -561,15 +563,15 @@
       <td>{{ it.description|nl2br }}</td>
       {% if wr_has_dates %}<td class="nowrap">{% if it.work_date %}{{ it.work_date|date(date_format) }}{% endif %}</td>{% endif %}
       <td class="num nowrap">{{ it.hours|number_format(hours_dec, decimal_sep, thousand_sep) }}</td>
-      <td class="num nowrap">{{ it.rate|number_format(rate_dec, decimal_sep, thousand_sep) }} {{ invoice.currency }}</td>
-      <td class="num nowrap">{{ it.total_amount|number_format(total_dec, decimal_sep, thousand_sep) }} {{ invoice.currency }}</td>
+      <td class="num nowrap">{{ it.rate|number_format(rate_dec, decimal_sep, thousand_sep) }} {{ currency_display }}</td>
+      <td class="num nowrap">{{ it.total_amount|number_format(total_dec, decimal_sep, thousand_sep) }} {{ currency_display }}</td>
     </tr>
     {% endfor %}
     <tr style="background:#F4F2F8;font-weight:bold;">
       <td style="text-align:right;" {% if wr_has_dates %}colspan="2"{% endif %}>{{ t('Celkem', 'Total') }}</td>
       <td class="num nowrap">{{ work_report.total_hours|number_format(hours_dec, decimal_sep, thousand_sep) }} h</td>
       <td></td>
-      <td class="num nowrap">{{ work_report.total_amount|number_format(total_dec, decimal_sep, thousand_sep) }} {{ invoice.currency }}</td>
+      <td class="num nowrap">{{ work_report.total_amount|number_format(total_dec, decimal_sep, thousand_sep) }} {{ currency_display }}</td>
     </tr>
   </tbody>
 </table>
@@ -598,18 +600,18 @@
       <td>{{ m.description|nl2br }}</td>
       <td class="num nowrap">{{ m.quantity|number_format(qty_dec, decimal_sep, thousand_sep) }}</td>
       <td class="nowrap">{{ m.unit }}</td>
-      <td class="num nowrap">{{ m.unit_price|number_format(mprice_dec, decimal_sep, thousand_sep) }} {{ invoice.currency }}</td>
-      <td class="num nowrap">{{ m.total_amount|number_format(mtotal_dec, decimal_sep, thousand_sep) }} {{ invoice.currency }}</td>
+      <td class="num nowrap">{{ m.unit_price|number_format(mprice_dec, decimal_sep, thousand_sep) }} {{ currency_display }}</td>
+      <td class="num nowrap">{{ m.total_amount|number_format(mtotal_dec, decimal_sep, thousand_sep) }} {{ currency_display }}</td>
     </tr>
     {% endfor %}
     <tr style="background:#F4F2F8;font-weight:bold;">
       <td style="text-align:right;" colspan="4">{% if supplier.is_vat_payer %}{{ t('Celkem bez DPH', 'Total excl. VAT') }}{% else %}{{ t('Celkem', 'Total') }}{% endif %}</td>
-      <td class="num nowrap">{{ work_report.material_total|number_format(supplier.is_vat_payer ? 2 : mtotal_dec, decimal_sep, thousand_sep) }} {{ invoice.currency }}</td>
+      <td class="num nowrap">{{ work_report.material_total|number_format(supplier.is_vat_payer ? 2 : mtotal_dec, decimal_sep, thousand_sep) }} {{ currency_display }}</td>
     </tr>
     {% if supplier.is_vat_payer %}
     <tr style="background:#F4F2F8;font-weight:bold;">
       <td style="text-align:right;" colspan="4">{{ t('Celkem s DPH', 'Total incl. VAT') }}{% if work_report.material_vat_rate is not null %} ({{ work_report.material_vat_rate|number_format(work_report.material_vat_rate == work_report.material_vat_rate|round(0) ? 0 : 2, decimal_sep, thousand_sep) }}&nbsp;%){% endif %}</td>
-      <td class="num nowrap">{{ work_report.material_total_with_vat|number_format(2, decimal_sep, thousand_sep) }} {{ invoice.currency }}</td>
+      <td class="num nowrap">{{ work_report.material_total_with_vat|number_format(2, decimal_sep, thousand_sep) }} {{ currency_display }}</td>
     </tr>
     {% endif %}
   </tbody>

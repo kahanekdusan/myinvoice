@@ -96,7 +96,7 @@ Vygenerované PDF obsahuje:
 
 1. **Hlavičku** — logo dodavatele, jméno, adresa, IČO, DIČ, kontakt
 2. **Adresát** — klient (firma + adresa + IČO + DIČ). U zemí s národním daňovým číslem se tiskne navíc s nativním labelem — slovenský klient má `IČO → DIČ → IČ DPH` (u neplátce jen IČO + DIČ), německý/rakouský Steuernummer, polský NIP, maďarský Adószám (viz [§ 13.2.1a](13_Klienti.md#1321a-slovensky-klient-a-narodni-danova-cisla))
-3. **Číslo faktury** + **typ** (Faktura / Proforma / Dobropis / Storno)
+3. **Číslo faktury** + **typ** (Faktura / Proforma / Dobropis / Storno). Faktura vytvořená z cenové nabídky uvádí pod číslem odkaz `k CN` a číslo původní nabídky.
 4. **Data** — vystaveno, DUZP, splatnost
 5. **Bankovní spojení** — číslo účtu / IBAN, BIC, banka, variabilní symbol
 6. **Položky** — tabulka (Popis / Množství / Cena / DPH / Celkem)

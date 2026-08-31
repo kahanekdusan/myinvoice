@@ -2233,12 +2233,14 @@
       "current_status": "Aktuální stav",
       "change_status": "Změnit stav",
       "modal_title": "Změnit stav cenové nabídky",
-      "modal_hint": "Odeslaná vzniká odesláním klientovi. Propadnutá a vyfakturovaná se dopočítávají automaticky.",
+      "modal_hint": "Odeslaná vzniká odesláním klientovi. Propadnutou lze nastavit ručně, vyfakturovaná vzniká navazujícím dokladem.",
       "option_none": "Koncept",
       "option_approved": "Schválená",
+      "option_expired": "Propadnutá",
       "option_rejected": "Zamítnutá",
       "modal_desc_none": "Vrátí nabídku zpět do konceptu.",
       "modal_desc_approved": "Označí nabídku jako schválenou bez vystavení dalšího dokladu.",
+      "modal_desc_expired": "Označí nabídku jako propadnutou a zablokuje vytvoření navazujícího dokladu.",
       "modal_desc_rejected": "Označí nabídku jako zamítnutou a uloží důvod.",
       "sent_at": "Odeslána",
       "valid_until": "Platnost do",
@@ -2246,10 +2248,11 @@
       "linked_advance_invoice": "Navazující zálohová faktura",
       "rejection_reason": "Důvod zamítnutí",
       "comment": "Poznámka",
-      "expired_hint": "Propadnutá se zobrazí automaticky po datu platnosti, pokud ještě nevznikl navazující doklad.",
+      "expired_hint": "Propadnutou lze nastavit ručně; po datu platnosti se zobrazí automaticky, pokud ještě nevznikl navazující doklad.",
       "invoiced_hint": "Vyfakturovaná se zobrazí automaticky po vystavení faktury nebo zálohové faktury z této nabídky.",
       "bulk_set_draft": "Koncept ({n})",
       "bulk_set_approved": "Schválit ({n})",
+      "bulk_set_expired": "Označit jako propadnuté ({n})",
       "bulk_set_rejected": "Zamítnout ({n})",
       "bulk_no_eligible": "Žádná z vybraných cenových nabídek není dostupná pro změnu stavu.",
       "bulk_status_success": "Stav byl změněn u {n} cenových nabídek.",
@@ -4596,7 +4599,7 @@
       "transport": "Transport",
       "sender_mailbox": "Odesílací schránka",
       "redirect_uri": "Redirect URI",
-      "post_connect_hint": "Po připojení zavři potvrzovací okno Microsoftu a vrať se sem. Stav propojení se projeví automaticky."
+      "post_connect_hint": "Po úspěšném připojení se sem vrátíš automaticky. Stav propojení se načte hned."
     }
   },
   "imports": {

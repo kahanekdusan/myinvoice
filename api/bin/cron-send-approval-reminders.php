@@ -36,6 +36,7 @@ use MyInvoice\Infrastructure\Database\Connection;
 use MyInvoice\Repository\InvoiceRepository;
 use MyInvoice\Service\ActivityLogger;
 use MyInvoice\Service\Cron\CronRun;
+use MyInvoice\Service\Invoice\QuoteLifecyclePolicy;
 use MyInvoice\Service\Mail\ApprovalEmailVarsBuilder;
 use MyInvoice\Service\Mail\Mailer;
 use MyInvoice\Service\Pdf\PdfArchiveService;
@@ -92,6 +93,13 @@ $candidates = $repo->listForApprovalInbox(
     statusFilter: 'requested',
     minDaysSince: $days,
     maxReminders: $maxReminders,
+);
+
+// Cenová nabídka nesmí odeslat žádný druh upomínky, ani připomínku
+// schválení výkazu, pokud by se do tohoto workflow dostala přes přímé API.
+$candidates = array_filter(
+    $candidates,
+    static fn (array $invoice): bool => !QuoteLifecyclePolicy::isQuote($invoice),
 );
 
 // Filter expired tokens — neposílat upomínku na link, který už nefunguje

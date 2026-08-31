@@ -46,12 +46,17 @@ snapshot nic neblokuje — kód mimo něj se uloží i odešle, jen s upozorněn
 
 ### Docker — vývoj v kontejnerech
 
+Pro tento fork je jedinou podporovanou cestou lokálního vývoje
+`docker-local.{sh,ps1}`. Ostatní Docker skripty v tabulce jsou zachované kvůli
+kompatibilitě obecné/upstream instalace a nesmějí se kombinovat s lokálním
+development stackem.
+
 | Skript | Co dělá |
 |---|---|
+| `docker-local.{sh,ps1}` | Jediný podporovaný lokální development bootstrap. Generuje chráněné lokální secrets, používá pouze loopback porty, odvozuje URL přímo z portu, vypíná cron a reálné odesílání pošty a čeká na healthcheck app i DB. |
 | `docker-build.{sh,ps1}` | `docker compose build app` — postaví image (default **alpine/nginx** z `Dockerfile.alpine`; volitelné `--no-cache`, `--pull`) |
 | `docker-install.{sh,ps1}` | First-run setup: vygeneruje `.env` + `cfg.docker.php`, **preferuje GHCR pull** (lokální build jen s `--build` / `MYINVOICE_INSTALL_MODE=source`), `up -d`, počká na DB healthcheck, spustí migrace, vypíše URL setup wizardu |
 | `docker-ghcr.{sh,ps1}` | One-click install **z pre-built image na GHCR** (`ghcr.io/radekhulan/myinvoice:latest` = alpine/nginx) — žádný local build. Stejně jako install vygeneruje `.env` + `cfg.docker.php`, místo `build` udělá `pull`, pak `up -d` + migrace |
-| `docker-dual-local.ps1` | Windows bootstrap pro **2 lokální varianty z jednoho repa**: vývoj na `development` + čistý upstream baseline (`upstream/master`) v samostatném worktree (`../myinvoice-upstream`). Umí `-Action up|status|down` |
 | `docker-migrate-project-data.ps1` | Přenese data mezi Docker project volumes (db-data + app-data), např. ze starého `myinvoice_dev` do nového `myinvoice`; umí i backup cílových volumes před přepisem a režim `-ListProjects` pro výpis dostupných prefixů |
 | `docker-db-sync.ps1` | Export/import SQL dumpu mezi dvěma PC (`-Action export|import|list-projects`), detekce DB kontejneru podle compose labelů, volitelně `-StartDb` a restart app po importu |
 | `docker-update.{sh,ps1}` | Update běžící instance — **detekuje režim z image běžícího kontejneru**: registry (`ghcr.io/...`) → `pull`, lokální build → `git pull` + rebuild; pak `up -d` + migrace + úklid dangling vrstev. Přebití `MYINVOICE_UPDATE_MODE=registry\|source`. (Existující Debian instalace se přechodem `:latest` na alpine zmigrují samy při příštím updatu — drop-in.) |
@@ -175,6 +180,22 @@ cmd\cron-send-reminders.cmd --days=5 --cooldown=14
 
 ## Docker
 
+### Lokální development tohoto forku
+
+Používej pouze bezpečný bootstrap nad `ops/docker/compose.local.yaml`; Compose
+nespouštěj přímo. Podrobnosti jsou v `docs/LOCAL_DEVELOPMENT.md`.
+
+```powershell
+.\cmd\docker-local.ps1 -Action up
+```
+
+```bash
+cmd/docker-local.sh up
+```
+
+Následující obecná instalační dokumentace se týká zachované upstream/legacy
+cesty nad kořenovým `docker-compose.yml`, nikoli lokálního vývoje tohoto forku.
+
 V rootu projektu je `Dockerfile` (multi-stage: node → composer → php:8.5-apache)
 a `docker-compose.yml` se službami **app** + **db** (MariaDB 11) + volitelně
 **redis** (profile).
@@ -236,38 +257,6 @@ docker compose -f docker-compose.production.yml down          # stop (data persi
 
 Pro **update** běžícího GHCR deploye stačí `cmd/docker-update.sh`
 (auto-detekuje registry mode = `pull` + `up -d` + migrace) — viz výše.
-
-### Dvě lokální varianty (development + upstream baseline)
-
-Pro porovnání "moje verze vs. čistý upstream" na jednom PC použij:
-
-```powershell
-.\cmd\docker-dual-local.ps1
-```
-
-Skript udělá:
-
-1. Přepne hlavní worktree na `development` (pokud je čistý a jsi jinde).
-2. Připraví vedlejší worktree `../myinvoice-upstream` na `upstream/master`.
-3. Spustí tvůj development stack z `docker-compose.yml`.
-4. Spustí upstream baseline stack z `docker-compose.production.yml` (GHCR image).
-
-Výchozí URL po startu:
-
-- development: `http://localhost:8080`
-- upstream baseline: `http://localhost:8090`
-
-Pokud je `development` už nastavený na `8090`, skript při prvním bootstrapu
-automaticky posune upstream baseline na `8100`, aby nedošlo ke kolizi portů.
-Pokud je obsazený development `APP_PORT` nebo `DB_PORT`, skript při startu
-automaticky přepíše port v `.env` na nejbližší volný.
-
-Další akce:
-
-```powershell
-.\cmd\docker-dual-local.ps1 -Action status
-.\cmd\docker-dual-local.ps1 -Action down
-```
 
 ### Export/import DB mezi dvěma PC (SQL dump)
 

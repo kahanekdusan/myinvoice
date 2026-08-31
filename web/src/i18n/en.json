@@ -2233,12 +2233,14 @@
       "current_status": "Current status",
       "change_status": "Change status",
       "modal_title": "Change quote status",
-      "modal_hint": "Sent is set by sending to the client. Expired and invoiced are derived automatically.",
+      "modal_hint": "Sent is set by sending to the client. Expired can be set manually; invoiced is created by a linked document.",
       "option_none": "Draft",
       "option_approved": "Approved",
+      "option_expired": "Expired",
       "option_rejected": "Rejected",
       "modal_desc_none": "Returns the quote back to draft.",
       "modal_desc_approved": "Marks the quote as approved without issuing another document.",
+      "modal_desc_expired": "Marks the quote as expired and blocks creating a linked document.",
       "modal_desc_rejected": "Marks the quote as rejected and stores the reason.",
       "sent_at": "Sent at",
       "valid_until": "Valid until",
@@ -2246,10 +2248,11 @@
       "linked_advance_invoice": "Linked advance invoice",
       "rejection_reason": "Rejection reason",
       "comment": "Comment",
-      "expired_hint": "Expired is shown automatically after the validity date if no linked document has been issued yet.",
+      "expired_hint": "Expired can be set manually; it is also shown automatically after the validity date if no linked document has been issued yet.",
       "invoiced_hint": "Invoiced is shown automatically after an invoice or advance invoice is created from this quote.",
       "bulk_set_draft": "Draft ({n})",
       "bulk_set_approved": "Approve ({n})",
+      "bulk_set_expired": "Mark expired ({n})",
       "bulk_set_rejected": "Reject ({n})",
       "bulk_no_eligible": "None of the selected quotes can change status.",
       "bulk_status_success": "Updated the status of {n} quotes.",
@@ -4596,7 +4599,7 @@
       "transport": "Transport",
       "sender_mailbox": "Sender mailbox",
       "redirect_uri": "Redirect URI",
-      "post_connect_hint": "After connecting, close the Microsoft confirmation window and return here. Connection status updates automatically."
+      "post_connect_hint": "After a successful connection, you will return here automatically. The connection status loads immediately."
     }
   },
   "imports": {

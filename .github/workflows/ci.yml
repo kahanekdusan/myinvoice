@@ -156,3 +156,39 @@ jobs:
       - name: Production build
         working-directory: web
         run: pnpm build
+
+  local-development-contract:
+    name: Local Docker contract
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: Verify local development isolation
+        run: bash ops/docker/tests/local-development-contract.sh
+
+  local-development-powershell:
+    name: Local Docker PowerShell contract
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: Parse with Windows PowerShell 5.1
+        shell: powershell
+        run: |
+          $tokens = $null
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path 'cmd/docker-local.ps1'), [ref]$tokens, [ref]$errors
+          ) | Out-Null
+          if ($errors.Count -ne 0) { throw ($errors | Format-List | Out-String) }
+          powershell -NoProfile -File ops/docker/tests/local-development-contract.ps1
+      - name: Parse with PowerShell 7
+        shell: pwsh
+        run: |
+          $tokens = $null
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path 'cmd/docker-local.ps1'), [ref]$tokens, [ref]$errors
+          ) | Out-Null
+          if ($errors.Count -ne 0) { throw ($errors | Format-List | Out-String) }
+          pwsh -NoProfile -File ops/docker/tests/local-development-contract.ps1

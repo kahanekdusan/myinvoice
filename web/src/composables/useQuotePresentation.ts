@@ -32,6 +32,7 @@ function isExpired(doc: QuoteLike): boolean {
 export function quoteDisplayStatus(doc: QuoteLike | null | undefined): QuoteDisplayStatus {
   if (!doc || !isQuoteDocument(doc)) return 'draft'
   if (doc.final_invoice || doc.advance_invoice || doc.has_final_invoice || doc.has_advance_invoice) return 'invoiced'
+  if (doc.approval_status === 'expired') return 'expired'
   if (doc.approval_status === 'approved') return 'approved'
   if (doc.approval_status === 'rejected') return 'rejected'
   if (isExpired(doc)) return 'expired'

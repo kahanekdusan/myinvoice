@@ -216,6 +216,11 @@ table.items .vat { font-size: 8.5pt; }
 .totals td { vertical-align: top; padding: 0; }
 .totals .left { width: 55%; padding-right: 4mm; }
 .totals .right { width: 45%; }
+.totals .right.quote-right { width: 100%; }
+.totals .right.quote-right .totals-table {
+    width: 45%;
+    margin-left: auto;
+}
 
 table.totals-table {
     width: 100%;
