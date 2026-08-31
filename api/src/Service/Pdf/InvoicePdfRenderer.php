@@ -611,7 +611,7 @@ final class InvoicePdfRenderer
             'SELECT varsymbol, invoice_type, numbering_type FROM invoices WHERE id = ?'
         );
         $stmt->execute([$invoice['parent_invoice_id']]);
-        $parent = $stmt->fetch(PDO::FETCH_ASSOC);
+        $parent = $stmt->fetch(\PDO::FETCH_ASSOC);
         $varsymbol = trim((string) ($parent['varsymbol'] ?? ''));
         if ($varsymbol === '') return null;
 
