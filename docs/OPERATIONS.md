@@ -5,16 +5,23 @@
 - `master` mirrors `radekhulan/myinvoice:master`; custom commits do not belong
   there.
 - `development` contains reviewed local development changes.
+- Feature/fix branches are optional and merge into `development`; they never
+  release directly to `production`. During active development, `development`
+  is expected to be ahead of `production`.
 - `production` is updated only by a reviewed Pull Request with green required
   checks from `development`. A merge builds an immutable GHCR image on a
   GitHub-hosted runner and deploys its exact digest to srv01.
+- Merge the release Pull Request with a regular merge commit, never squash or
+  rebase, so `development` can be fast-forwarded to the resulting production
+  commit.
 - After a successful production release, fast-forward `development` to the
   resulting `production` commit. Both branches must point to the same commit
-  before new development starts.
+  before new development starts; exact 1:1 equality is required at this release
+  boundary, not while development is in progress.
 
-Source moves between the desktop and Mac only through Git feature branches.
-Runtime env files, cfg files, Docker volumes, database dumps and customer data
-are never synchronized through Git.
+Source moves between the desktop and Mac only through Git branches, never by
+copying the working tree. Runtime env files, cfg files, Docker volumes, database
+dumps and customer data are never synchronized through Git.
 
 ## Local Docker development
 
