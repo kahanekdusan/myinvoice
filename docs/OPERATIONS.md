@@ -6,7 +6,11 @@
   there.
 - `development` contains reviewed local development changes.
 - `production` is updated only by a reviewed Pull Request with green required
-  checks. A merge builds an immutable GHCR image on a GitHub-hosted runner.
+  checks from `development`. A merge builds an immutable GHCR image on a
+  GitHub-hosted runner and deploys its exact digest to srv01.
+- After a successful production release, fast-forward `development` to the
+  resulting `production` commit. Both branches must point to the same commit
+  before new development starts.
 
 Source moves between the desktop and Mac only through Git feature branches.
 Runtime env files, cfg files, Docker volumes, database dumps and customer data
@@ -24,7 +28,7 @@ customer documents. The app and DB bind to loopback, cron is disabled and mail
 is forced to a closed local sink.
 
 Except for the explicit `ops/docker/compose.local.yaml` contract, historical
-Windows/NUC files under `ops/docker/`, `ops/deploy/` and `ops/gateway/` are not
+files under `ops/docker/`, `ops/deploy/` and `ops/gateway/` are not
 local-development or srv01 templates. Do not run them.
 
 ## Production
@@ -33,11 +37,12 @@ Production runs only on srv01. No source build and no long-lived development
 slot runs there. Changes follow this path:
 
 ```text
-feature branch -> Pull Request -> green CI -> production merge
--> immutable private GHCR digest -> restricted srv01 deployment gate
+development -> Pull Request -> production -> green CI
+-> immutable GHCR digest -> automatic srv01 deployment -> health check
 ```
 
-Direct edits, direct `docker compose up`, direct pushes to `production`, the
-old NUC watcher and a self-hosted GitHub runner are outside the supported
-production process. Runtime secrets remain root-owned on srv01 and outside Git.
-The NUC remains an unchanged rollback source until a separate explicit decision.
+FTP/SFTP uploads, direct server edits, direct `docker compose up`, direct pushes
+to `production` and self-hosted runners are outside the supported production
+process. Production runs only on netcup srv01; NUC is not a deployment target,
+migration source, watcher or rollback source. Runtime secrets remain root-owned
+on srv01 and outside Git.
