@@ -1,0 +1,516 @@
+#!/bin/sh
+set -eu
+set -f
+
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+
+AWK=/usr/bin/awk
+CHMOD=/usr/bin/chmod
+CHOWN=/usr/bin/chown
+CP=/usr/bin/cp
+DOCKER=/usr/bin/docker
+FLOCK=/usr/bin/flock
+GREP=/usr/bin/grep
+ID=/usr/bin/id
+MKTEMP=/usr/bin/mktemp
+MV=/usr/bin/mv
+PYTHON=/usr/bin/python3
+RM=/usr/bin/rm
+SLEEP=/usr/bin/sleep
+STAT=/usr/bin/stat
+
+test_mode=false
+case ${NETCUP_MYINVOICE_TEST_MODE-} in
+  '') ;;
+  1)
+    [ "${0##*/}" = netcup-myinvoice-deploy.test ] || {
+      printf 'deploy: test mode requires the dedicated .test copy\n' >&2
+      exit 1
+    }
+    [ "$($ID -u)" -ne 0 ] || {
+      printf 'deploy: test mode is forbidden for root\n' >&2
+      exit 1
+    }
+    test_mode=true
+    DOCKER=${NETCUP_MYINVOICE_TEST_DOCKER:?test docker path required}
+    CHMOD=${NETCUP_MYINVOICE_TEST_CHMOD:?test chmod path required}
+    CHOWN=${NETCUP_MYINVOICE_TEST_CHOWN:?test chown path required}
+    CP=${NETCUP_MYINVOICE_TEST_CP:?test cp path required}
+    PLATFORM_ROOT=${NETCUP_MYINVOICE_TEST_PLATFORM_ROOT:?test platform root required}
+    TRUSTED_UID=${NETCUP_MYINVOICE_TEST_TRUSTED_UID:?test trusted uid required}
+    FLOCK=${NETCUP_MYINVOICE_TEST_FLOCK:?test flock path required}
+    MV=${NETCUP_MYINVOICE_TEST_MV:?test mv path required}
+    RM=${NETCUP_MYINVOICE_TEST_RM:?test rm path required}
+    SLEEP=${NETCUP_MYINVOICE_TEST_SLEEP:?test sleep path required}
+    STAT=${NETCUP_MYINVOICE_TEST_STAT:?test stat path required}
+    ;;
+  *)
+    printf 'deploy: invalid test mode\n' >&2
+    exit 1
+    ;;
+esac
+
+if [ "$test_mode" = false ]; then
+  PLATFORM_ROOT=/opt/docker/myinvoice
+  TRUSTED_UID=0
+fi
+
+COMPOSE_FILE=$PLATFORM_ROOT/compose.yml
+RUNTIME_ENV=$PLATFORM_ROOT/runtime.env
+PREFLIGHT=$PLATFORM_ROOT/scripts/preflight.sh
+GATEWAY_CONFIG=$PLATFORM_ROOT/gateway/Caddyfile
+SECRETS_DIR=$PLATFORM_ROOT/secrets
+STATE_DIR=$PLATFORM_ROOT/state
+LOCK_FILE=$STATE_DIR/candidate-deploy.lock
+
+fail() {
+  printf 'deploy: %s\n' "$*" >&2
+  exit 1
+}
+
+usage() {
+  printf 'usage: netcup-myinvoice-deploy candidate IMAGE@sha256:DIGEST SOURCE_SHA\n' >&2
+  exit 2
+}
+
+require_binary() {
+  [ -x "$1" ] || fail "required trusted binary is unavailable: $1"
+}
+
+mode_has_no_group_world_write() {
+  mode=$1
+  permissions=$((0$mode))
+  [ $((permissions & 0022)) -eq 0 ]
+}
+
+require_secure_directory() {
+  path=$1
+  exact_mode=${2-}
+  [ ! -L "$path" ] || fail "directory must not be a symlink: $path"
+  [ -d "$path" ] || fail "required directory is missing: $path"
+  owner=$($STAT -c %u "$path")
+  mode=$($STAT -c %a "$path")
+  [ "$owner" -eq "$TRUSTED_UID" ] || fail "directory has untrusted owner: $path"
+  mode_has_no_group_world_write "$mode" || fail "directory is group/world writable: $path"
+  [ -z "$exact_mode" ] || [ "$mode" = "$exact_mode" ] || \
+    fail "directory has unexpected mode $mode: $path"
+}
+
+require_secure_file() {
+  path=$1
+  exact_mode=${2-}
+  [ ! -L "$path" ] || fail "file must not be a symlink: $path"
+  [ -f "$path" ] || fail "required regular file is missing: $path"
+  owner=$($STAT -c %u "$path")
+  mode=$($STAT -c %a "$path")
+  [ "$owner" -eq "$TRUSTED_UID" ] || fail "file has untrusted owner: $path"
+  mode_has_no_group_world_write "$mode" || fail "file is group/world writable: $path"
+  [ -z "$exact_mode" ] || [ "$mode" = "$exact_mode" ] || \
+    fail "file has unexpected mode $mode: $path"
+}
+
+verify_trusted_platform() {
+  if [ "$test_mode" = false ]; then
+    require_secure_directory /opt
+    require_secure_directory /opt/docker
+  fi
+  require_secure_directory "$PLATFORM_ROOT"
+  require_secure_file "$COMPOSE_FILE"
+  require_secure_file "$RUNTIME_ENV" 600
+  require_secure_directory "$PLATFORM_ROOT/scripts"
+  require_secure_file "$PREFLIGHT"
+  [ -x "$PREFLIGHT" ] || fail "preflight is not executable"
+  require_secure_directory "$PLATFORM_ROOT/gateway"
+  require_secure_file "$GATEWAY_CONFIG"
+  require_secure_directory "$SECRETS_DIR" 700
+  require_secure_file "$SECRETS_DIR/mariadb_root_password" 600
+  require_secure_file "$SECRETS_DIR/mariadb_app_password" 600
+  require_secure_file "$SECRETS_DIR/cfg.php" 440
+  require_secure_directory "$STATE_DIR" 700
+
+  set +f
+  set -- "$SECRETS_DIR"/*
+  set -f
+  for entry in "$@"; do
+    [ -e "$entry" ] || [ -L "$entry" ] || continue
+    require_secure_file "$entry"
+  done
+
+  if [ -e "$STATE_DIR/candidate.env" ] || [ -L "$STATE_DIR/candidate.env" ]; then
+    require_secure_file "$STATE_DIR/candidate.env" 600
+  fi
+}
+
+read_env_value() {
+  key=$1
+  file=$2
+  count=$($AWK -F= -v key="$key" '$1 == key {n++} END {print n+0}' "$file")
+  [ "$count" -eq 1 ] || fail "$key must occur exactly once in runtime.env"
+  $AWK -F= -v key="$key" '$1 == key {sub(/^[^=]*=/, ""); print; exit}' "$file"
+}
+
+replace_env_value() {
+  key=$1
+  value=$2
+  file=$3
+  temporary=$($MKTEMP "$STATE_DIR/.runtime-env.XXXXXX")
+  umask 077
+  if ! $AWK -F= -v key="$key" -v value="$value" '
+    BEGIN {seen=0}
+    $1 == key {print key "=" value; seen++; next}
+    {print}
+    END {if (seen != 1) exit 42}
+  ' "$file" > "$temporary"; then
+    $RM -f "$temporary"
+    fail "could not replace $key exactly once"
+  fi
+  file_group=$($STAT -c %g "$file")
+  $CHOWN "$TRUSTED_UID:$file_group" "$temporary"
+  $CHMOD 0600 "$temporary"
+  $MV "$temporary" "$file"
+  require_secure_file "$file" 600
+}
+
+compose() {
+  $DOCKER compose \
+    --profile blue --profile green \
+    --env-file "$RUNTIME_ENV" \
+    -f "$COMPOSE_FILE" \
+    "$@"
+}
+
+container_id_running() {
+  compose ps -q "$1"
+}
+
+container_id_all() {
+  compose ps -aq "$1"
+}
+
+container_fingerprint() {
+  $DOCKER inspect --format '{{.Id}} {{.State.StartedAt}} {{index .Config.Labels "com.docker.compose.config-hash"}} {{.Config.Image}}' "$1"
+}
+
+require_unchanged() {
+  label=$1
+  id=$2
+  before=$3
+  after=$(container_fingerprint "$id")
+  [ "$after" = "$before" ] || fail "$label container changed during candidate deploy"
+}
+
+fingerprint_matches() {
+  id=$1
+  expected=$2
+  current=$(container_fingerprint "$id") || return 1
+  [ "$current" = "$expected" ]
+}
+
+wait_healthy() {
+  id=$1
+  attempts=0
+  while [ "$attempts" -lt 60 ]; do
+    status=$($DOCKER inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$id" 2>/dev/null || printf 'inspect-failed')
+    case "$status" in
+      healthy) return 0 ;;
+      unhealthy|exited|dead|inspect-failed) return 1 ;;
+    esac
+    attempts=$((attempts + 1))
+    $SLEEP 2
+  done
+  return 1
+}
+
+verify_resolved_candidate() {
+  profile=$1
+  service=$2
+  expected_image=$3
+  resolved=$($MKTEMP "$STATE_DIR/.compose-config.XXXXXX")
+  umask 077
+  if ! $DOCKER compose \
+    --profile "$profile" \
+    --env-file "$RUNTIME_ENV" \
+    -f "$COMPOSE_FILE" \
+    config --format json > "$resolved"; then
+    $RM -f "$resolved"
+    fail "could not resolve candidate Compose model"
+  fi
+
+  if ! $PYTHON -c '
+import json, sys
+path, service, expected = sys.argv[1:]
+with open(path, encoding="utf-8") as handle:
+    data = json.load(handle)
+candidate = data.get("services", {}).get(service)
+if not candidate:
+    raise SystemExit("candidate service missing")
+environment = candidate.get("environment", {})
+required = {
+    "MYINVOICE_ENABLE_CRON": "0",
+    "MYINVOICE_DATA_DIR": "/data",
+    "MYINVOICE_SKIP_MIGRATIONS": "1",
+}
+if any(str(environment.get(k)) != v for k, v in required.items()):
+    raise SystemExit("candidate safety environment is not hardcoded")
+if candidate.get("image") != expected:
+    raise SystemExit("resolved candidate image differs from requested digest")
+if candidate.get("ports"):
+    raise SystemExit("candidate must not publish a host port")
+mounts = candidate.get("volumes", [])
+data_mount = [m for m in mounts if m.get("target") == "/data"]
+if len(data_mount) != 1 or data_mount[0].get("type") != "volume" or data_mount[0].get("read_only"):
+    raise SystemExit("candidate /data mount is not the shared writable volume")
+cfg_mount = [m for m in mounts if m.get("target") == "/var/www/html/cfg.php"]
+if len(cfg_mount) != 1 or not cfg_mount[0].get("read_only"):
+    raise SystemExit("candidate cfg.php mount is not read-only")
+' "$resolved" "$service" "$expected_image"; then
+    $RM -f "$resolved"
+    fail "resolved candidate Compose safety validation failed"
+  fi
+  $RM -f "$resolved"
+}
+
+verify_running_candidate() {
+  id=$1
+  for expected in \
+    MYINVOICE_ENABLE_CRON=0 \
+    MYINVOICE_DATA_DIR=/data \
+    MYINVOICE_SKIP_MIGRATIONS=1
+  do
+    if ! $DOCKER inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$id" | \
+      $GREP -Fqx "$expected"; then
+      fail "running candidate is missing $expected"
+    fi
+  done
+
+  bindings=$($DOCKER inspect --format '{{json .HostConfig.PortBindings}}' "$id")
+  case "$bindings" in
+    null|'{}') ;;
+    *) fail "running candidate unexpectedly publishes a host port" ;;
+  esac
+}
+
+verify_restored_candidate() {
+  case "$old_candidate_state" in
+    absent)
+      [ -z "$(container_id_all "$candidate_service")" ] || return 1
+      ;;
+    stopped|running)
+      restored_id=$(container_id_all "$candidate_service")
+      [ -n "$restored_id" ] || return 1
+      restored_state=$($DOCKER inspect --format '{{.State.Status}}' "$restored_id")
+      case "$restored_state" in
+        created|exited) restored_state=stopped ;;
+      esac
+      restored_image=$($DOCKER inspect --format '{{.Config.Image}}' "$restored_id")
+      restored_hash=$($DOCKER inspect --format '{{index .Config.Labels "com.docker.compose.config-hash"}}' "$restored_id")
+      [ "$restored_state" = "$old_candidate_state" ] || return 1
+      [ "$restored_image" = "$old_candidate_image" ] || return 1
+      [ "$restored_hash" = "$old_candidate_hash" ] || return 1
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+rollback_candidate() {
+  rollback_ok=true
+
+  if [ ! -f "$runtime_backup" ] || ! $MV "$runtime_backup" "$RUNTIME_ENV"; then
+    printf 'deploy: rollback could not restore runtime.env\n' >&2
+    rollback_ok=false
+  fi
+
+  if [ "$rollback_ok" = true ]; then
+    case "$old_candidate_state" in
+      absent)
+        if ! compose rm -f -s "$candidate_service" >/dev/null; then
+          printf 'deploy: rollback could not remove newly created candidate\n' >&2
+          rollback_ok=false
+        fi
+        ;;
+      stopped)
+        if ! compose create --no-deps --force-recreate --no-build --pull never "$candidate_service" >/dev/null; then
+          printf 'deploy: rollback could not recreate stopped candidate\n' >&2
+          rollback_ok=false
+        fi
+        ;;
+      running)
+        if ! compose up -d --no-deps "$candidate_service" >/dev/null; then
+          printf 'deploy: rollback could not restore running candidate\n' >&2
+          rollback_ok=false
+        fi
+        ;;
+    esac
+  fi
+
+  if [ "$rollback_ok" = true ] && ! verify_restored_candidate; then
+    printf 'deploy: rollback candidate state/image/config verification failed\n' >&2
+    rollback_ok=false
+  fi
+  if [ "$rollback_ok" = true ] && ! fingerprint_matches "$active_id" "$active_before"; then
+    printf 'deploy: rollback detected active-slot drift\n' >&2
+    rollback_ok=false
+  fi
+  if [ "$rollback_ok" = true ] && ! fingerprint_matches "$db_id" "$db_before"; then
+    printf 'deploy: rollback detected database drift\n' >&2
+    rollback_ok=false
+  fi
+  if [ "$rollback_ok" = true ] && ! fingerprint_matches "$gateway_id" "$gateway_before"; then
+    printf 'deploy: rollback detected gateway drift\n' >&2
+    rollback_ok=false
+  fi
+
+  [ "$rollback_ok" = true ]
+}
+
+on_exit() {
+  status=$?
+  trap - EXIT HUP INT TERM
+  if [ "$status" -ne 0 ] && [ "${rollback_needed-false}" = true ]; then
+    if ! rollback_candidate; then
+      printf 'deploy: ROLLBACK FAILED; manual intervention required\n' >&2
+      exit 70
+    fi
+  elif [ "$status" -ne 0 ] && [ -n "${runtime_backup-}" ] && [ -f "$runtime_backup" ]; then
+    $RM -f "$runtime_backup"
+  fi
+  exit "$status"
+}
+
+if [ "$test_mode" = false ]; then
+  [ "$($ID -u)" -eq 0 ] || fail "must run as root through the restricted sudo rule"
+fi
+[ "$#" -eq 3 ] || usage
+[ "$1" = candidate ] || usage
+image=$2
+revision=$3
+
+printf '%s\n' "$image" | $GREP -Eq '^ghcr\.io/kahanekdusan/myinvoice@sha256:[0-9a-f]{64}$' || \
+  fail "unexpected image reference"
+printf '%s\n' "$revision" | $GREP -Eq '^[0-9a-f]{40}$' || \
+  fail "unexpected source revision"
+
+for binary in "$AWK" "$CHMOD" "$CHOWN" "$CP" "$DOCKER" "$FLOCK" "$GREP" \
+  "$ID" "$MKTEMP" "$MV" "$PYTHON" "$RM" "$SLEEP" "$STAT"; do
+  if [ "$test_mode" = true ] && [ "$binary" = "$DOCKER" ]; then
+    [ -x "$binary" ] || fail "fake docker is not executable"
+  else
+    require_binary "$binary"
+  fi
+done
+
+verify_trusted_platform
+
+if [ ! -e "$LOCK_FILE" ] && [ ! -L "$LOCK_FILE" ]; then
+  umask 077
+  : > "$LOCK_FILE"
+  $CHOWN "$TRUSTED_UID" "$LOCK_FILE"
+  $CHMOD 0600 "$LOCK_FILE"
+fi
+require_secure_file "$LOCK_FILE" 600
+exec 9>"$LOCK_FILE"
+$FLOCK -x 9
+
+active_upstream=$(read_env_value ACTIVE_UPSTREAM "$RUNTIME_ENV")
+case "$active_upstream" in
+  myinvoice-blue:80)
+    active_service=myinvoice-blue
+    candidate_profile=green
+    candidate_service=myinvoice-green
+    candidate_key=MYINVOICE_GREEN_IMAGE
+    ;;
+  myinvoice-green:80)
+    active_service=myinvoice-green
+    candidate_profile=blue
+    candidate_service=myinvoice-blue
+    candidate_key=MYINVOICE_BLUE_IMAGE
+    ;;
+  *) fail "ACTIVE_UPSTREAM is outside the approved allowlist" ;;
+esac
+
+active_id=$(container_id_running "$active_service")
+db_id=$(container_id_running myinvoice-db)
+gateway_id=$(container_id_running gateway)
+[ -n "$active_id" ] || fail "active application slot is not running"
+[ -n "$db_id" ] || fail "database is not running"
+[ -n "$gateway_id" ] || fail "gateway is not running"
+
+active_before=$(container_fingerprint "$active_id")
+db_before=$(container_fingerprint "$db_id")
+gateway_before=$(container_fingerprint "$gateway_id")
+
+old_candidate_id=$(container_id_all "$candidate_service")
+if [ -z "$old_candidate_id" ]; then
+  old_candidate_state=absent
+  old_candidate_image=
+  old_candidate_hash=
+else
+  old_candidate_state=$($DOCKER inspect --format '{{.State.Status}}' "$old_candidate_id")
+  case "$old_candidate_state" in
+    running|stopped) ;;
+    created|exited) old_candidate_state=stopped ;;
+    *) fail "candidate has unsupported pre-deploy state: $old_candidate_state" ;;
+  esac
+  old_candidate_image=$($DOCKER inspect --format '{{.Config.Image}}' "$old_candidate_id")
+  old_candidate_hash=$($DOCKER inspect --format '{{index .Config.Labels "com.docker.compose.config-hash"}}' "$old_candidate_id")
+  [ -n "$old_candidate_image" ] || fail "candidate previous image is unknown"
+  [ -n "$old_candidate_hash" ] || fail "candidate previous config hash is unknown"
+fi
+
+$DOCKER pull "$image" >/dev/null || fail "image pull failed"
+image_revision=$($DOCKER image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$image")
+[ "$image_revision" = "$revision" ] || fail "OCI revision label does not match SOURCE_SHA"
+
+runtime_backup=$($MKTEMP "$STATE_DIR/.runtime-env-backup.XXXXXX")
+umask 077
+rollback_needed=false
+trap 'on_exit' EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+$CP -p "$RUNTIME_ENV" "$runtime_backup"
+require_secure_file "$runtime_backup" 600
+
+rollback_needed=true
+replace_env_value "$candidate_key" "$image" "$RUNTIME_ENV"
+if ! "$PREFLIGHT" "$RUNTIME_ENV" >/dev/null; then
+  fail "platform preflight failed"
+fi
+verify_resolved_candidate "$candidate_profile" "$candidate_service" "$image"
+
+if ! $DOCKER compose \
+  --profile "$candidate_profile" \
+  --env-file "$RUNTIME_ENV" \
+  -f "$COMPOSE_FILE" \
+  up -d --no-deps "$candidate_service" >/dev/null; then
+  fail "candidate container start failed"
+fi
+
+candidate_id=$(container_id_running "$candidate_service")
+if [ -z "$candidate_id" ] || ! wait_healthy "$candidate_id"; then
+  fail "candidate did not become healthy"
+fi
+
+verify_running_candidate "$candidate_id"
+require_unchanged active "$active_id" "$active_before"
+require_unchanged database "$db_id" "$db_before"
+require_unchanged gateway "$gateway_id" "$gateway_before"
+[ "$(read_env_value ACTIVE_UPSTREAM "$RUNTIME_ENV")" = "$active_upstream" ] || \
+  fail "gateway target changed unexpectedly"
+
+state_tmp=$($MKTEMP "$STATE_DIR/.candidate-state.XXXXXX")
+umask 077
+{
+  printf 'SLOT=%s\n' "$candidate_profile"
+  printf 'IMAGE=%s\n' "$image"
+  printf 'REVISION=%s\n' "$revision"
+} > "$state_tmp"
+$CHOWN "$TRUSTED_UID" "$state_tmp"
+$CHMOD 0600 "$state_tmp"
+$MV "$state_tmp" "$STATE_DIR/candidate.env"
+
+$RM -f "$runtime_backup"
+trap - EXIT HUP INT TERM
+printf 'candidate healthy: slot=%s revision=%s image=%s\n' \
+  "$candidate_profile" "$revision" "$image"

@@ -47,11 +47,11 @@ jobs:
   deploy-candidate:
     name: Deploy inactive candidate on srv01
     if: >-
-      github.event_name == 'push' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
       vars.NETCUP_MYINVOICE_CANDIDATE_ENABLED == 'true'
     needs: build
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 30
     permissions:
       contents: read
       actions: read
@@ -62,15 +62,20 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SOURCE_SHA: ${{ github.sha }}
         run: |
-          run_count="$(gh run list \
-            --repo "$GITHUB_REPOSITORY" \
-            --workflow ci.yml \
-            --commit "$SOURCE_SHA" \
-            --event push \
-            --status success \
-            --json headSha \
-            --jq '[.[] | select(.headSha == env.SOURCE_SHA)] | length')"
-          test "$run_count" -ge 1
+          run_id=
+          for attempt in $(seq 1 60); do
+            run_id="$(gh run list \
+              --repo "$GITHUB_REPOSITORY" \
+              --workflow ci.yml \
+              --commit "$SOURCE_SHA" \
+              --event push \
+              --json databaseId,headSha \
+              --jq '[.[] | select(.headSha == env.SOURCE_SHA)][0].databaseId // empty')"
+            [ -z "$run_id" ] || break
+            sleep 10
+          done
+          test -n "$run_id"
+          gh run watch "$run_id" --repo "$GITHUB_REPOSITORY" --exit-status
 
       - name: Configure verified SSH access
         env:
@@ -95,3 +100,45 @@ jobs:
             -o BatchMode=yes -o StrictHostKeyChecking=yes \
             "$DEPLOY_USER@$DEPLOY_HOST" \
             "sudo /usr/local/sbin/netcup-myinvoice-deploy candidate '$IMAGE_REF' '$SOURCE_SHA'"
+
+  promote-production:
+    name: Promote candidate to live production
+    if: >-
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
+      vars.NETCUP_MYINVOICE_PROMOTE_ENABLED == 'true'
+    needs: [build, deploy-candidate]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    environment: netcup-myinvoice-production
+    steps:
+      - name: Configure verified SSH access
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.NETCUP_MYINVOICE_SSH_PRIVATE_KEY }}
+          SSH_HOST_KEY: ${{ secrets.NETCUP_MYINVOICE_SSH_HOST_KEY }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/netcup_myinvoice
+          printf '%s\n' "$SSH_HOST_KEY" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/netcup_myinvoice ~/.ssh/known_hosts
+
+      - name: Promote the exact healthy candidate
+        env:
+          DEPLOY_HOST: ${{ vars.NETCUP_MYINVOICE_DEPLOY_HOST }}
+          DEPLOY_PORT: ${{ vars.NETCUP_MYINVOICE_DEPLOY_PORT || '22' }}
+          DEPLOY_USER: ${{ vars.NETCUP_MYINVOICE_DEPLOY_USER || 'deploy-myinvoice' }}
+          IMAGE_REF: ghcr.io/kahanekdusan/myinvoice@${{ needs.build.outputs.digest }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          test -n "$DEPLOY_HOST"
+          ssh -i ~/.ssh/netcup_myinvoice -p "$DEPLOY_PORT" \
+            -o BatchMode=yes -o StrictHostKeyChecking=yes \
+            "$DEPLOY_USER@$DEPLOY_HOST" \
+            "sudo /usr/local/sbin/netcup-myinvoice-promote promote '$IMAGE_REF' '$SOURCE_SHA'"
+
+      - name: Verify public production health
+        run: |
+          response="$(curl --fail --silent --show-error --retry 5 --retry-delay 2 \
+            https://faktury.dusankahanek.cz/api/health)"
+          jq -e '.status == "ok" and .db == true' <<<"$response"
