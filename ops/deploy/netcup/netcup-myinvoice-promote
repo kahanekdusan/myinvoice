@@ -23,7 +23,6 @@ PLATFORM_ROOT=/opt/docker/myinvoice
 TRUSTED_UID=0
 COMPOSE_FILE=$PLATFORM_ROOT/compose.yml
 RUNTIME_ENV=$PLATFORM_ROOT/runtime.env
-PREFLIGHT=$PLATFORM_ROOT/scripts/preflight.sh
 GATEWAY_CONFIG=$PLATFORM_ROOT/gateway/Caddyfile
 SECRETS_DIR=$PLATFORM_ROOT/secrets
 STATE_DIR=$PLATFORM_ROOT/state
@@ -82,9 +81,6 @@ verify_trusted_platform() {
   require_secure_directory "$PLATFORM_ROOT"
   require_secure_file "$COMPOSE_FILE"
   require_secure_file "$RUNTIME_ENV" 600
-  require_secure_directory "$PLATFORM_ROOT/scripts"
-  require_secure_file "$PREFLIGHT"
-  [ -x "$PREFLIGHT" ] || fail "preflight is not executable"
   require_secure_directory "$PLATFORM_ROOT/gateway"
   require_secure_file "$GATEWAY_CONFIG"
   require_secure_directory "$SECRETS_DIR" 700
@@ -144,6 +140,21 @@ compose() {
 
 container_id_running() {
   compose ps -q "$1"
+}
+
+resolve_running_database() {
+  database_id=
+  database_service=
+  for database_candidate in myinvoice-db myinvoice-db-green; do
+    candidate_database_id=$(container_id_running "$database_candidate")
+    [ -n "$candidate_database_id" ] || continue
+    [ -z "$database_id" ] || \
+      fail "multiple database services are running: $database_service and $database_candidate"
+    database_id=$candidate_database_id
+    database_service=$database_candidate
+  done
+  [ -n "$database_id" ] || fail "database is not running"
+  printf '%s\n' "$database_id"
 }
 
 container_fingerprint() {
@@ -268,7 +279,7 @@ esac
 
 active_id=$(container_id_running "$active_service")
 candidate_id=$(container_id_running "$candidate_service")
-db_id=$(container_id_running myinvoice-db)
+db_id=$(resolve_running_database)
 gateway_id=$(container_id_running gateway)
 [ -n "$active_id" ] || fail "active application slot is not running"
 [ -n "$candidate_id" ] || fail "candidate application slot is not running"
@@ -303,9 +314,7 @@ trap 'exit 143' TERM
 
 gateway_change_started=true
 replace_env_value ACTIVE_UPSTREAM "$candidate_upstream" "$RUNTIME_ENV"
-if ! "$PREFLIGHT" "$RUNTIME_ENV" >/dev/null; then
-  fail "platform preflight failed for promoted upstream"
-fi
+compose config --quiet || fail "Docker Compose validation failed for promoted upstream"
 
 compose up -d --no-deps gateway >/dev/null || fail "gateway switch failed"
 gateway_id=$(container_id_running gateway)
