@@ -30,6 +30,7 @@ final class InvoiceEmailVarsBuilderQuoteTest extends TestCase
 
         self::assertSame($expectedPrefix, $vars['intro_prefix']);
         self::assertSame("{$expectedPrefix} č. 226002.", $vars['intro_plain']);
+        self::assertSame($expectedSubjectLabel, $vars['document_type_label']);
         self::assertSame("{$expectedSubjectLabel} 226002 — Testovací dodavatel s.r.o.", $vars['subject']);
     }
 
