@@ -123,6 +123,7 @@ final class InvoiceEmailVarsBuilder
             'intro'          => $intro,
             'intro_prefix'   => $intro_prefix,
             'intro_plain'    => $intro_plain,
+            'document_type_label' => $this->subjectLabel($invoice, $locale),
             'invoice'        => $invoice,
             'client_name'    => $invoice['client_company_name'] ?? '',
             'amount_to_pay'  => $amount,
@@ -188,28 +189,33 @@ final class InvoiceEmailVarsBuilder
         $varsymbol = $invoice['varsymbol'] ?? '';
         $supplier = $this->resolveSupplierName($invoice, false);
         $prefix = $isTest ? '[TEST] ' : '';
+
+        return "{$prefix}{$this->subjectLabel($invoice, $locale)} {$varsymbol}"
+            . ($supplier ? " — {$supplier}" : '');
+    }
+
+    private function subjectLabel(array $invoice, string $locale): string
+    {
         $type = (string) ($invoice['invoice_type'] ?? 'invoice');
         $isQuote = $this->isPriceQuote($invoice);
 
         // Předmět odpovídá typu dokladu (stejně jako text v těle e-mailu) —
         // zálohová faktura ani opravný daňový doklad nejsou „Faktura".
         if ($locale === 'en') {
-            $label = match ($type) {
+            return match ($type) {
                 'proforma'     => $isQuote ? 'Price quote' : 'Proforma invoice',
                 'credit_note'  => 'Credit note',
                 'tax_document' => 'Tax document for payment received',
                 default        => 'Invoice',
             };
-        } else {
-            $label = match ($type) {
-                'proforma'     => $isQuote ? 'Cenová nabídka' : 'Zálohová faktura',
-                'credit_note'  => 'Opravný daňový doklad',
-                'tax_document' => 'Daňový doklad k přijaté platbě',
-                default        => 'Faktura',
-            };
         }
 
-        return "{$prefix}{$label} {$varsymbol}" . ($supplier ? " — {$supplier}" : '');
+        return match ($type) {
+            'proforma'     => $isQuote ? 'Cenová nabídka' : 'Zálohová faktura',
+            'credit_note'  => 'Opravný daňový doklad',
+            'tax_document' => 'Daňový doklad k přijaté platbě',
+            default        => 'Faktura',
+        };
     }
 
     private function isPriceQuote(array $invoice): bool
