@@ -68,6 +68,37 @@ php tools/generateManualHtml.php
 php tools/exportManualToPdf.php
 ```
 
+## Vývojové větve a produkční nasazení
+
+Pro MyInvoice platí jediný podporovaný release tok:
+
+```text
+development → Pull Request → production → CI → GHCR → srv01 (netcup)
+```
+
+- `development` je integrační vývojová větev. Otestovaná verze se vydává
+  výhradně Pull Requestem z `development` do `production` se zeleným CI.
+- Běžné opravy ani funkce nesmějí jít přímo do `production`. Pokud je výjimečně
+  nutný explicitně schválený hotfix, musí se bezprostředně propsat také do
+  `development`.
+- Push vzniklý mergem do `production` sestaví immutable Docker image, publikuje
+  jej do `ghcr.io/kahanekdusan/myinvoice` a automatický deploy na srv01 stáhne
+  přesný digest, aktualizuje produkční kontejner a ověří health check.
+- GitHub Actions a GHCR jsou jediná podporovaná cesta nasazení. Pro release se
+  nepoužívá FTP, SFTP, rsync, ruční kopírování aplikačních souborů, přímý build
+  na serveru ani ruční `docker compose up`.
+- Produkce běží pouze na srv01 u netcup. NUC není deployment target, zdroj
+  migrace, watcher ani součást současného rollback plánu. Bez explicitního
+  požadavku uživatele se nesmí navrhovat migrace z/na NUC ani měnit topologie
+  produkčního deploymentu.
+- Při chybě nasazení nejprve diagnostikuj konkrétní neúspěšný krok existujícího
+  toku (CI, build/push GHCR, pull/deploy srv01, health check). Nevytvářej
+  náhradní deployment mechanismus ani nový bootstrap bez explicitního zadání.
+- Po každém úspěšném release musí být `development` fast-forward synchronizován
+  na výsledný commit `production`, aby obě větve před dalším vývojem ukazovaly
+  na tentýž commit. Synchronizace nesmí používat force-push. Pokud fast-forward
+  není možný, zastav se a nejprve vyřeš skutečnou divergenci větví.
+
 ## Tvrdá pravidla
 
 ### Migrace
