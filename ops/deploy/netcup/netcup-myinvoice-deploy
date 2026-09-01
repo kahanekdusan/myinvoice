@@ -188,6 +188,21 @@ container_id_all() {
   compose ps -aq "$1"
 }
 
+resolve_running_database() {
+  database_id=
+  database_service=
+  for database_candidate in myinvoice-db myinvoice-db-green; do
+    candidate_database_id=$(container_id_running "$database_candidate")
+    [ -n "$candidate_database_id" ] || continue
+    [ -z "$database_id" ] || \
+      fail "multiple database services are running: $database_service and $database_candidate"
+    database_id=$candidate_database_id
+    database_service=$database_candidate
+  done
+  [ -n "$database_id" ] || fail "database is not running"
+  printf '%s\n' "$database_id"
+}
+
 container_fingerprint() {
   $DOCKER inspect --format '{{.Id}} {{.State.StartedAt}} {{index .Config.Labels "com.docker.compose.config-hash"}} {{.Config.Image}}' "$1"
 }
@@ -430,10 +445,9 @@ case "$active_upstream" in
 esac
 
 active_id=$(container_id_running "$active_service")
-db_id=$(container_id_running myinvoice-db)
+db_id=$(resolve_running_database)
 gateway_id=$(container_id_running gateway)
 [ -n "$active_id" ] || fail "active application slot is not running"
-[ -n "$db_id" ] || fail "database is not running"
 [ -n "$gateway_id" ] || fail "gateway is not running"
 
 active_before=$(container_fingerprint "$active_id")
