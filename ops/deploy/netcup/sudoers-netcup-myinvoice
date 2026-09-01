@@ -1,0 +1,4 @@
+Defaults:deploy-myinvoice !requiretty
+Cmnd_Alias NETCUP_MYINVOICE_CANDIDATE = /usr/local/sbin/netcup-myinvoice-deploy candidate *
+Cmnd_Alias NETCUP_MYINVOICE_PROMOTE = /usr/local/sbin/netcup-myinvoice-promote promote *
+deploy-myinvoice ALL=(root) NOPASSWD: NETCUP_MYINVOICE_CANDIDATE, NETCUP_MYINVOICE_PROMOTE

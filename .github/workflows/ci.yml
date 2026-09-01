@@ -166,6 +166,15 @@ jobs:
       - name: Verify local development isolation
         run: bash ops/docker/tests/local-development-contract.sh
 
+  netcup-deploy-contract:
+    name: netcup deploy contract
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: Verify restricted candidate and promote commands
+        run: sh ops/deploy/netcup/tests/contract.sh
+
   local-development-powershell:
     name: Local Docker PowerShell contract
     runs-on: windows-latest
