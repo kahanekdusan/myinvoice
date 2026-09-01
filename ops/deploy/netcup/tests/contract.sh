@@ -45,6 +45,19 @@ if ! /usr/bin/grep -Fq 'compose config --quiet' "$PROMOTE"; then
   exit 1
 fi
 
+for network_contract in \
+  '"myinvoice-db-blue", "myinvoice-db-green"' \
+  'database network is missing the myinvoice-db alias' \
+  '$DOCKER network connect "$database_network" "$candidate_id"' \
+  'container_has_network "$candidate_id" "$database_network"'
+do
+  if ! /usr/bin/grep -Fq "$network_contract" "$CANDIDATE"; then
+    printf 'candidate must join the single approved active database network: %s\n' \
+      "$network_contract" >&2
+    exit 1
+  fi
+done
+
 tmp=$(/usr/bin/mktemp -d)
 trap '/bin/rm -rf "$tmp"' EXIT HUP INT TERM
 

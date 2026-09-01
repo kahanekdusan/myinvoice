@@ -199,6 +199,36 @@ resolve_running_database() {
   printf '%s\n' "$database_id"
 }
 
+resolve_database_network() {
+  database_id=$1
+  database_network=$($DOCKER inspect --format '{{json .NetworkSettings.Networks}}' "$database_id" | \
+    $PYTHON -c '
+import json, sys
+networks = json.load(sys.stdin)
+approved = [name for name in networks if name in {"myinvoice-db-blue", "myinvoice-db-green"}]
+if len(approved) != 1:
+    raise SystemExit("database must use exactly one approved database network")
+network = approved[0]
+aliases = networks[network].get("Aliases") or []
+if "myinvoice-db" not in aliases:
+    raise SystemExit("database network is missing the myinvoice-db alias")
+print(network)
+') || fail "could not resolve the database network"
+  [ -n "$database_network" ] || fail "database network is empty"
+  printf '%s\n' "$database_network"
+}
+
+container_has_network() {
+  container_id=$1
+  expected_network=$2
+  $DOCKER inspect --format '{{json .NetworkSettings.Networks}}' "$container_id" | \
+    $PYTHON -c '
+import json, sys
+networks = json.load(sys.stdin)
+raise SystemExit(0 if sys.argv[1] in networks else 1)
+' "$expected_network"
+}
+
 container_fingerprint() {
   $DOCKER inspect --format '{{.Id}} {{.State.StartedAt}} {{index .Config.Labels "com.docker.compose.config-hash"}} {{.Config.Image}}' "$1"
 }
@@ -442,6 +472,7 @@ esac
 
 active_id=$(container_id_running "$active_service")
 db_id=$(resolve_running_database)
+database_network=$(resolve_database_network "$db_id")
 gateway_id=$(container_id_running gateway)
 [ -n "$active_id" ] || fail "active application slot is not running"
 [ -n "$gateway_id" ] || fail "gateway is not running"
@@ -495,7 +526,14 @@ if ! $DOCKER compose \
 fi
 
 candidate_id=$(container_id_running "$candidate_service")
-if [ -z "$candidate_id" ] || ! wait_healthy "$candidate_id"; then
+[ -n "$candidate_id" ] || fail "candidate container is not running"
+if ! container_has_network "$candidate_id" "$database_network"; then
+  $DOCKER network connect "$database_network" "$candidate_id" || \
+    fail "could not connect candidate to the active database network"
+fi
+container_has_network "$candidate_id" "$database_network" || \
+  fail "candidate is not connected to the active database network"
+if ! wait_healthy "$candidate_id"; then
   fail "candidate did not become healthy"
 fi
 
