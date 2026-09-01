@@ -78,9 +78,18 @@ development → Pull Request → production → CI → GHCR → srv01 (netcup)
 
 - `development` je integrační vývojová větev. Otestovaná verze se vydává
   výhradně Pull Requestem z `development` do `production` se zeleným CI.
+- Feature/fix větve jsou volitelné: hodí se pro oddělenou kontrolu změn a
+  mergují se do `development`, ale jednoduchou změnu lze po dohodě commitovat
+  přímo do `development`. Nikdy se však nevydávají přímo do `production`.
+- Během vývoje je normální, že `development` obsahuje nové commity a je před
+  `production`. Požadavek 1:1 platí na hranici release: bezprostředně po
+  úspěšném nasazení a před zahájením dalšího vývoje.
 - Běžné opravy ani funkce nesmějí jít přímo do `production`. Pokud je výjimečně
   nutný explicitně schválený hotfix, musí se bezprostředně propsat také do
   `development`.
+- Release Pull Request `development` → `production` merguj klasickým merge
+  commitem. Nepoužívej squash ani rebase merge: výsledný commit `production`
+  musí zůstat potomkem `development`, aby šel bezpečně fast-forwardnout zpět.
 - Push vzniklý mergem do `production` sestaví immutable Docker image, publikuje
   jej do `ghcr.io/kahanekdusan/myinvoice` a automatický deploy na srv01 stáhne
   přesný digest, aktualizuje produkční kontejner a ověří health check.
