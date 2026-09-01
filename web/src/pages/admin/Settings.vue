@@ -743,7 +743,7 @@ async function removeLogo() {
             <div>
               <label class="block text-xs font-medium text-neutral-700 mb-1">{{ t('settings.quote_number_format') }}</label>
               <input v-model="supplier.quote_number_format" type="text"
-                placeholder="2{YY}{MM}{CCC}" maxlength="60"
+                :placeholder="supplier.cfg_varsymbol_fallback?.quote || '2{YY}{MM}{CCC}'" maxlength="60"
                 class="w-full h-9 px-3 border rounded-md text-sm font-mono"
                 :class="quoteFormatError ? 'border-danger-500 bg-danger-50' : 'border-neutral-300'" />
               <p v-if="quoteFormatError" class="text-xs text-danger-500 mt-1">{{ quoteFormatError }}</p>
