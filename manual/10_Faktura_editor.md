@@ -464,7 +464,10 @@ Cenovou nabídku nejprve vystav a odešli klientovi. Admin pak v detailu nabídk
 nastaví stav **Schválená**, **Propadnutá** nebo **Zamítnutá**. Navazující
 vydanou fakturu nebo zálohovou fakturu lze vytvořit pouze ze **schválené**
 cenové nabídky. Nový doklad vznikne jako koncept, převezme položky i režim
-cen s DPH / bez DPH a zůstane propojený se zdrojovou nabídkou.
+cen s DPH / bez DPH a zůstane propojený se zdrojovou nabídkou. Akce
+**Vytvořit fakturu** založí skutečný doklad typu **Faktura** v běžné číselné
+řadě, s dnešním datem vystavení a DUZP; před vystavením se otevře v editoru ke
+kontrole. Datum původní cenové nabídky se do faktury nepřebírá.
 
 Stav **Propadnutá** lze nastavit ručně. Nabídka po datu platnosti se také
 zobrazuje jako propadnutá automaticky, pokud z ní dosud nevznikl navazující

@@ -60,8 +60,22 @@ final class CloneInvoiceAction
         if ($quoteViolation !== null) {
             return Json::error($response, $quoteViolation['code'], $quoteViolation['message'], 409);
         }
-        if (QuoteLifecyclePolicy::isConversion($invoice, $targetInvoiceType, $targetNumberingType)) {
+        $isQuoteConversion = QuoteLifecyclePolicy::isConversion(
+            $invoice,
+            $targetInvoiceType,
+            $targetNumberingType,
+        );
+        if ($isQuoteConversion) {
             $parentInvoiceId = $id;
+        }
+        if ($isQuoteConversion && $targetInvoiceType === 'invoice') {
+            // Převod nabídky není klon nabídky: vždy zakládá běžnou fakturu v její
+            // číselné řadě a s aktuálními účetními daty. Starší klient může stále
+            // poslat issue_date nabídky, proto cílové hodnoty kanonizujeme i zde.
+            $issueDate = date('Y-m-d');
+            $incrementMonth = false;
+            $targetInvoiceType = 'invoice';
+            $targetNumberingType = 'default';
         }
 
         $user = (array) $request->getAttribute(AuthMiddleware::ATTR_USER, []);

@@ -2263,7 +2263,7 @@
     "create_proforma_from_quote": "Vystavit zálohovou fakturu",
     "create_proforma_from_quote_confirm": "Vytvořit z cenové nabídky {varsymbol} koncept zálohové faktury?\n\nZkopírují se všechny položky a otevře se editor nového dokladu.",
     "create_proforma_from_quote_failed": "Vytvoření zálohové faktury z cenové nabídky selhalo",
-    "create_invoice_from_quote": "Vystavit fakturu",
+    "create_invoice_from_quote": "Vytvořit fakturu",
     "create_invoice_from_quote_confirm": "Vytvořit z cenové nabídky {varsymbol} koncept faktury?\n\nZkopírují se všechny položky a otevře se editor nového dokladu.",
     "create_invoice_from_quote_failed": "Vytvoření faktury z cenové nabídky selhalo",
     "edit_issued_confirm_quote": "Opravdu otevřít vystavenou cenovou nabídku {varsymbol} k editaci? {sent}"
