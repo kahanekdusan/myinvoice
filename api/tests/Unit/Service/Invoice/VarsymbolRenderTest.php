@@ -32,6 +32,12 @@ final class VarsymbolRenderTest extends TestCase
         self::assertSame('92604042', $this->gen->render('9{YY}{MM}{CCC}', $date, 42));
     }
 
+    public function testQuoteDefaultFormat(): void
+    {
+        $date = new \DateTimeImmutable('2026-09-01');
+        self::assertSame('22609001', $this->gen->render('2{YY}{MM}{CCC}', $date, 1));
+    }
+
     public function testCreditNotePrefix(): void
     {
         $date = new \DateTimeImmutable('2026-12-15');

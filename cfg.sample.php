@@ -304,6 +304,7 @@ return [
         // Counter se reset na 1 každý měsíc, samostatně per typ dokladu.
         'templates' => [
             'invoice'     => '{YY}{MM}{CCC}',        // např. 2604001
+            'quote'       => '2{YY}{MM}{CCC}',       // např. 22604001 (prefix 2 = cenová nabídka)
             'proforma'    => '9{YY}{MM}{CCC}',       // např. 92604001 (prefix 9 = záloha)
             'credit_note' => '7{YY}{MM}{CCC}',       // např. 72604001 (prefix 7 = dobropis)
         ],

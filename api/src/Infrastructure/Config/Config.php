@@ -231,6 +231,11 @@ final class Config
                 'cache_ttl' => 86400,
                 'timeout'   => 8,
             ],
+            'varsymbol' => [
+                'templates' => [
+                    'quote' => '2{YY}{MM}{CCC}',
+                ],
+            ],
             'bank_email' => [
                 'notice_parsers' => [
                     'regex' => \MyInvoice\Service\Bank\EmailNotice\Parser\RegexBankEmailNoticeParser::class,
