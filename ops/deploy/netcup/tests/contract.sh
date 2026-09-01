@@ -5,8 +5,9 @@ ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 CANDIDATE=$ROOT/netcup-myinvoice-deploy
 PROMOTE=$ROOT/netcup-myinvoice-promote
 GATE=$ROOT/netcup-myinvoice-ssh-gate
+BOOTSTRAP=$ROOT/bootstrap.sh
 
-for script in "$CANDIDATE" "$PROMOTE" "$GATE"; do
+for script in "$CANDIDATE" "$PROMOTE" "$GATE" "$BOOTSTRAP"; do
   /bin/sh -n "$script"
 done
 
