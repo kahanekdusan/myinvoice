@@ -16,20 +16,32 @@ if /usr/bin/grep -Fq '"$STATE_DIR"/*' "$CANDIDATE"; then
   exit 1
 fi
 
-for database_contract in \
-  'for database_candidate in myinvoice-db myinvoice-db-green' \
-  'multiple database services are running' \
-  'db_id=$(resolve_running_database)'
-do
-  if ! /usr/bin/grep -Fq "$database_contract" "$CANDIDATE"; then
-    printf 'candidate must support both approved production database service names: %s\n' \
-      "$database_contract" >&2
+for deployment_script in "$CANDIDATE" "$PROMOTE"; do
+  for database_contract in \
+    'for database_candidate in myinvoice-db myinvoice-db-green' \
+    'multiple database services are running' \
+    'db_id=$(resolve_running_database)'
+  do
+    if ! /usr/bin/grep -Fq "$database_contract" "$deployment_script"; then
+      printf 'deployment script must support both approved production database service names: %s\n' \
+        "$database_contract" >&2
+      exit 1
+    fi
+  done
+
+  if /usr/bin/grep -Fq 'db_id=$(container_id_running myinvoice-db)' "$deployment_script"; then
+    printf 'deployment script must not assume only the legacy database service name\n' >&2
+    exit 1
+  fi
+
+  if /usr/bin/grep -Fq '"$PREFLIGHT" "$RUNTIME_ENV"' "$deployment_script"; then
+    printf 'deployment script must not invoke the migration-only platform preflight\n' >&2
     exit 1
   fi
 done
 
-if /usr/bin/grep -Fq 'db_id=$(container_id_running myinvoice-db)' "$CANDIDATE"; then
-  printf 'candidate must not assume only the legacy database service name\n' >&2
+if ! /usr/bin/grep -Fq 'compose config --quiet' "$PROMOTE"; then
+  printf 'promotion must validate the resolved Compose model before switching the gateway\n' >&2
   exit 1
 fi
 

@@ -58,7 +58,6 @@ fi
 
 COMPOSE_FILE=$PLATFORM_ROOT/compose.yml
 RUNTIME_ENV=$PLATFORM_ROOT/runtime.env
-PREFLIGHT=$PLATFORM_ROOT/scripts/preflight.sh
 GATEWAY_CONFIG=$PLATFORM_ROOT/gateway/Caddyfile
 SECRETS_DIR=$PLATFORM_ROOT/secrets
 STATE_DIR=$PLATFORM_ROOT/state
@@ -118,9 +117,6 @@ verify_trusted_platform() {
   require_secure_directory "$PLATFORM_ROOT"
   require_secure_file "$COMPOSE_FILE"
   require_secure_file "$RUNTIME_ENV" 600
-  require_secure_directory "$PLATFORM_ROOT/scripts"
-  require_secure_file "$PREFLIGHT"
-  [ -x "$PREFLIGHT" ] || fail "preflight is not executable"
   require_secure_directory "$PLATFORM_ROOT/gateway"
   require_secure_file "$GATEWAY_CONFIG"
   require_secure_directory "$SECRETS_DIR" 700
@@ -488,9 +484,6 @@ require_secure_file "$runtime_backup" 600
 
 rollback_needed=true
 replace_env_value "$candidate_key" "$image" "$RUNTIME_ENV"
-if ! "$PREFLIGHT" "$RUNTIME_ENV" >/dev/null; then
-  fail "platform preflight failed"
-fi
 verify_resolved_candidate "$candidate_profile" "$candidate_service" "$image"
 
 if ! $DOCKER compose \
