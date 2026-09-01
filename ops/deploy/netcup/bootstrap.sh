@@ -2,7 +2,7 @@
 set -eu
 set -f
 
-SOURCE_COMMIT=da3b93638f3159b4f202d38d2493febc1079071b
+SOURCE_COMMIT=63b1f4155a9ca10073eed796b145f8c2ec6e8561
 BASE_URL=https://raw.githubusercontent.com/kahanekdusan/myinvoice/$SOURCE_COMMIT/ops/deploy/netcup
 PLATFORM_ROOT=/opt/docker/myinvoice
 
@@ -18,7 +18,7 @@ curl -fsSLo "$stage/netcup-myinvoice-ssh-gate" "$BASE_URL/netcup-myinvoice-ssh-g
 curl -fsSLo "$stage/sudoers-netcup-myinvoice" "$BASE_URL/sudoers-netcup-myinvoice"
 
 printf '%s  %s\n' \
-  856b9b7c2732bb61cd902022561a511b688b32b012ea65a05edda965b7a11339 "$stage/netcup-myinvoice-deploy" \
+  ae890136445cfcbc47f183e4c5db820dd0b62eb891b4790f964c702005b4056d "$stage/netcup-myinvoice-deploy" \
   98c656f988bd6000f0cb4923078ad8efc9fb1efafc88315656b54108ec74cc1f "$stage/netcup-myinvoice-promote" \
   8ec3445bbc896e63d3de5c4853c7e3b5875eb6811de43c02fa91af859abfd82c "$stage/netcup-myinvoice-ssh-gate" \
   e197513b2ed9980943c9c5c063846a5825d44fbdc5081ae9e475554f172460dc "$stage/sudoers-netcup-myinvoice" \
