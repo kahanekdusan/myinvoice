@@ -75,6 +75,12 @@ The corresponding root-owned source files are versioned in `ops/deploy/netcup/`:
 - `sudoers-netcup-myinvoice` → `/etc/sudoers.d/netcup-myinvoice` mode `0440`,
   owner `root:root`, validated with `visudo -cf` before replacement.
 
+`bootstrap.sh` performs the one-time server installation from a pinned source
+commit. It downloads and checksums the four files above, validates sudoers,
+backs up the previous contract under root-only `state/`, and only then installs
+the replacements. Normal releases never run this bootstrap and transfer no
+application files over FTP or SFTP.
+
 Both commands independently restrict images to
 `ghcr.io/kahanekdusan/myinvoice@sha256:<64 lowercase hex>` and revisions to a
 40-character lowercase commit SHA.
