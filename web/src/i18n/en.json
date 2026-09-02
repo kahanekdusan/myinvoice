@@ -2263,7 +2263,7 @@
     "create_proforma_from_quote": "Issue advance invoice",
     "create_proforma_from_quote_confirm": "Create an advance invoice draft from quote {varsymbol}?\n\nAll items will be copied and the new document will open in the editor.",
     "create_proforma_from_quote_failed": "Creating an advance invoice from the quote failed",
-    "create_invoice_from_quote": "Issue invoice",
+    "create_invoice_from_quote": "Create invoice",
     "create_invoice_from_quote_confirm": "Create an invoice draft from quote {varsymbol}?\n\nAll items will be copied and the new document will open in the editor.",
     "create_invoice_from_quote_failed": "Creating an invoice from the quote failed",
     "edit_issued_confirm_quote": "Open issued price quote {varsymbol} for editing? {sent}"
