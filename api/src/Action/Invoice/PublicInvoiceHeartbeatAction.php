@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace MyInvoice\Action\Invoice;
 
 use MyInvoice\Http\Json;
+use MyInvoice\Middleware\AuthMiddleware;
 use MyInvoice\Repository\InvoiceRepository;
 use MyInvoice\Service\ActivityLogger;
 use MyInvoice\Service\Invoice\PublicInvoiceTokenValidator;
@@ -34,6 +35,11 @@ final class PublicInvoiceHeartbeatAction
             ?? $this->repo->findByPublicViewToken($token);
         if ($invoice === null) {
             return $this->invalidTokenResponse($response);
+        }
+
+        $user = $request->getAttribute(AuthMiddleware::ATTR_USER);
+        if (is_array($user) && !empty($user['id'])) {
+            return Json::ok($response, ['accepted' => false, 'reason' => 'internal_user']);
         }
 
         $body = (array) ($request->getParsedBody() ?? []);

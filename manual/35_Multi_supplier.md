@@ -245,7 +245,7 @@ gatuje obojí konzistentně.
 |---|---|
 | **Použít vlastní branding** | Toggle vpravo nahoře (default vypnuto = MyInvoice branding). Pokud zapnuté, hlavička emailů i PDF se sestaví z polí níže. |
 | **Logo** | Upload PNG / JPG / SVG (max 1 MiB, ideálně do 200 KiB). Pro raster ideální výška 240 px (zobrazí se v emailu jako 48 px na 5× retině). SVG: originál se uloží pro PDF (vektor = crisp v libovolném zoomu), pro email se serverstrana převede na transparentní PNG (Outlook a Gmail SVG strippují) — primárně přes PHP `Imagick` extension (cross-platform — Windows i Linux), fallback na `rsvg-convert` CLI (`librsvg2-bin`). Logo se v emailu připojí jako CID inline image, takže se zobrazí bez „Display images" promptu v Gmailu/Outlooku. Tlačítka **Nahradit logo** / **Odebrat**. |
-| **Akcent barva** | Hex `#RRGGBB` — akcentová barva **celého e-mailu** (částky, tlačítka, odkazy, náhradní „M" box) **i PDF faktury** (linka pod hlavičkou, hlavička tabulky položek, řádky „Celkem" / „K úhradě", labely, popisky QR/banky, nadpis a odkaz výkazu víceprací). Aplikuje se **jen při zapnutém brandingu**; jinak default `#3B2D83` (fialová MyInvoice). Sémantické barvy (dobropis červená, zelené „Schválit"/„Uhrazeno", oranžová „po splatnosti") zůstávají. Color picker + textový input + odkaz **↺ default** pro reset. |
+| **Akcent barva** | Hex `#RRGGBB` — akcentová barva **celého e-mailu** (tlačítka, odkazy, náhradní „M" box; u ostatních typů dokladů také částky) **i PDF faktury** (linka pod hlavičkou, hlavička tabulky položek, řádky „Celkem" / „K úhradě", labely, popisky QR/banky, nadpis a odkaz výkazu víceprací). Aplikuje se **jen při zapnutém brandingu**; jinak default `#3B2D83` (fialová MyInvoice). Sémantické barvy (dobropis červená, zelené „Schválit"/„Uhrazeno", oranžová „po splatnosti") zůstávají. Color picker + textový input + odkaz **↺ default** pro reset. |
 
 > 🛈 **Auto-save** — toggle a barva se ukládají **automaticky** (color picker
 > má 0,5 s debounce, ať se neukládá při každém pixelu pohybu). Logo se ukládá
@@ -258,9 +258,9 @@ V hlavičce se pak vykreslí:
 - **Brand name** = `display_name` dodavatele (fallback `company_name`)
 - **Subtitle** = `tagline` dodavatele (pokud vyplněno)
 
-**Live preview** — pod nastavením iframe se zkušebním emailem (faktura
-`2026005` s boxem „K úhradě" a tlačítkem „Zobrazit fakturu" — obojí
-obarvené akcent barvou, ať vidíš branding i v těle, ne jen v hlavičce/patičce).
+**Live preview** — pod nastavením iframe se stručným zkušebním e-mailem
+pro fakturu `2026005`, bez platebních údajů a s tlačítkem **Zobrazit fakturu**
+obarveným akcent barvou, ať vidíš branding i v těle, ne jen v hlavičce/patičce.
 Tlačítka **CS / EN** přepínají jazyk preview. Po každé změně toggle / barvy /
 loga se preview obnoví automaticky; tlačítko **↻** vpravo nahoře v hlavičce
 preview je manuální refresh, kdyby si cache hrála.
