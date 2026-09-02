@@ -1,0 +1,58 @@
+services:
+  app:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+      args:
+        SKIP_FRONTEND_TYPECHECK: "${SKIP_FRONTEND_TYPECHECK:-1}"
+    image: ${APP_IMAGE:-myinvoice-development:local}
+    pull_policy: never
+    volumes:
+      # PHP a Twig změny se projeví bez rebuildu image; vendor zůstává z image.
+      - ../../api/src:/var/www/html/api/src:ro
+      - ../../api/templates:/var/www/html/api/templates:ro
+      - ../../api/public:/var/www/html/api/public:ro
+      - ../../api/bin:/var/www/html/api/bin:ro
+      - ../../api/openapi.yaml:/var/www/html/api/openapi.yaml:ro
+      - ../../styles:/var/www/html/styles:ro
+      - ../../web/dist:/var/www/html/web/dist:ro
+      - ${CFG_PATH:-../../cfg.docker.php}:/var/www/html/cfg.php:ro
+      - ../../.htaccess:/var/www/html/.htaccess:ro
+      - ../../docker/php-development.ini:/usr/local/etc/php/conf.d/zz-development.ini:ro
+    environment:
+      MYINVOICE_APP_URL: http://localhost:${APP_PORT:?APP_PORT is required}
+      MYINVOICE_PEPPER: ${MYINVOICE_PEPPER:?MYINVOICE_PEPPER is required}
+      MYINVOICE_SECRET_KEY: ${MYINVOICE_SECRET_KEY:?MYINVOICE_SECRET_KEY is required}
+      MYINVOICE_SESSION_COOKIE_SECURE: "false"
+      MYINVOICE_SESSION_COOKIE_NAME: myinvoice_dev_session
+      # Základní local compose fail-closed vypíná SMTP. Tento explicitní dev
+      # override nechá Config načíst SMTP/Microsoft OAuth z cfg.docker.php.
+      MYINVOICE_SMTP_TRANSPORT: ""
+      MYINVOICE_SMTP_HOST: ""
+      MYINVOICE_SMTP_PORT: ""
+      MYINVOICE_SMTP_AUTH: ""
+    networks:
+      - app-net
+      - db-net
+    healthcheck:
+      test:
+        - CMD
+        - php
+        - -r
+        - "exit(@file_get_contents('http://127.0.0.1/api/health') === false ? 1 : 0);"
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+
+  db:
+    networks:
+      - db-net
+
+networks:
+  app-net:
+    external: true
+    name: myinvoice-dev-app
+  db-net:
+    external: true
+    name: myinvoice-dev-db

@@ -1899,7 +1899,10 @@ paths:
         `issue_date`, prázdný `number`, status `draft`. Vhodné pro periodicky
         opakované faktury (předplatné, paušál). Při převodu cenové nabídky
         na fakturu nebo zálohovou fakturu musí být nabídka ve stavu `approved`;
-        nový draft se automaticky naváže přes `parent_invoice_id`.
+        nový draft se automaticky naváže přes `parent_invoice_id`. Převod na
+        běžnou fakturu vždy vytvoří `invoice_type=invoice` s
+        `numbering_type=default` a dnešním datem vystavení i DUZP; případné
+        `issue_date` z požadavku se pro tento konkrétní převod nepoužije.
       requestBody:
         required: false
         content:

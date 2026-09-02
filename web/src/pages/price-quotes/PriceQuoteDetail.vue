@@ -354,7 +354,9 @@ async function createDocumentFromQuote(targetType: 'invoice' | 'proforma') {
   try {
     const result = await invoicesApi.clone(invoice.value.id, {
       increment_month_in_descriptions: false,
-      issue_date: invoice.value.issue_date,
+      // Běžná faktura dostane dnešní datum na backendu. Datum nabídky zachováváme
+      // jen u existujícího toku vytvoření zálohové faktury.
+      issue_date: targetType === 'proforma' ? invoice.value.issue_date : undefined,
       target_invoice_type: targetType,
       target_numbering_type: 'default',
       parent_invoice_id: invoice.value.id,

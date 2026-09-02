@@ -15,19 +15,19 @@
 Datum vystavení: {{ invoice.issue_date|date('j.n.Y') }}
 Platnost:        {{ invoice.due_date|date('j.n.Y') }}
 Cena celkem:     {{ document_total|number_format(2, ',', ' ') }} {{ currency_display }}
-{% else %}Variabilní symbol: {{ invoice.varsymbol }}
+{% elseif not is_standard_invoice %}Variabilní symbol: {{ invoice.varsymbol }}
 Datum vystavení:   {{ invoice.issue_date|date('j.n.Y') }}
 Splatnost:         {{ invoice.due_date|date('j.n.Y') }}
 {% if is_paid %}Uhrazeno:          {{ amount_to_pay|number_format(2, ',', ' ') }} {{ currency_display }} ✓{% else %}K úhradě:          {{ amount_to_pay|number_format(2, ',', ' ') }} {{ currency_display }}{% endif %}
 {% endif %}
 
-{% if not is_quote and is_paid %}>>> Doklad již byl uhrazen{% if payment_method == 'card' %} platební kartou online — neplaťte prosím znovu{% elseif payment_method == 'cash' %} v hotovosti{% else %} — neplaťte prosím znovu{% endif %}.
+{% if not is_quote and not is_standard_invoice and is_paid %}>>> Doklad již byl uhrazen{% if payment_method == 'card' %} platební kartou online — neplaťte prosím znovu{% elseif payment_method == 'cash' %} v hotovosti{% else %} — neplaťte prosím znovu{% endif %}.
 
-{% elseif not is_quote and payment_method == 'card' %}>>> Úhrada platební kartou. Bankovní převod ani QR kód se nepoužije.
+{% elseif not is_quote and not is_standard_invoice and payment_method == 'card' %}>>> Úhrada platební kartou. Bankovní převod ani QR kód se nepoužije.
 
-{% elseif not is_quote and payment_method == 'cash' %}>>> Úhrada v hotovosti.
+{% elseif not is_quote and not is_standard_invoice and payment_method == 'cash' %}>>> Úhrada v hotovosti.
 
-{% endif %}{% if invoice_view_url and not is_quote %}Otevřít doklad: {{ invoice_view_url }}
+{% endif %}{% if invoice_view_url and not is_quote %}{% if is_standard_invoice %}Zobrazit fakturu: {{ invoice_view_url }}{% else %}Otevřít doklad: {{ invoice_view_url }}{% endif %}
 {% endif %}
 
 {% if not is_test %}Děkujeme za spolupráci.

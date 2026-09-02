@@ -34,6 +34,13 @@ final class QuoteLifecyclePolicyTest extends TestCase
         $violation = QuoteLifecyclePolicy::conversionViolation($quote, 'invoice', 'default');
 
         self::assertSame('quote_already_invoiced', $violation['code'] ?? null);
+
+        $quote = $this->quote('approved');
+        $quote['advance_invoice'] = ['id' => 43];
+
+        $violation = QuoteLifecyclePolicy::conversionViolation($quote, 'invoice', 'default');
+
+        self::assertSame('quote_already_invoiced', $violation['code'] ?? null);
     }
 
     public function testQuoteCloneAndOrdinaryInvoiceCloneAreNotConversions(): void

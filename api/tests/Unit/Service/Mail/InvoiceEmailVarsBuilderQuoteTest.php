@@ -47,6 +47,21 @@ final class InvoiceEmailVarsBuilderQuoteTest extends TestCase
         self::assertNull($vars['qr_data_uri']);
     }
 
+    public function testStandardInvoiceEmailNeverBuildsPaymentQr(): void
+    {
+        // QrPaymentGenerator je záměrně vytvořen bez konstruktoru. Kdyby ho
+        // build() pro běžnou fakturu zavolal, test spadne dřív, než by mohl
+        // Mailer QR přibalit jako skrytou CID přílohu.
+        $vars = $this->builder()->build(
+            $this->invoice('invoice', 'default'),
+            false,
+            'cs',
+        );
+
+        self::assertTrue($vars['is_standard_invoice']);
+        self::assertNull($vars['qr_data_uri']);
+    }
+
     public static function czechDocumentPhrases(): iterable
     {
         yield 'faktura' => ['invoice', 'default', 'Zasíláme vám fakturu', 'Faktura'];

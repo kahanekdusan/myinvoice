@@ -106,6 +106,9 @@ final class AutoIssueAndSendService
         $locale = (string) ($invoice['language'] ?? 'cs');
         $vars = $this->varsBuilder->build($invoice, false, $locale);
         $vars['invoice_view_url'] = $invoiceViewUrl;
+        $emailAttachments = ($invoice['invoice_type'] ?? 'invoice') === 'invoice'
+            ? []
+            : [['path' => $pdfPath, 'name' => basename($pdfPath), 'contentType' => 'application/pdf']];
 
         try {
             $this->mailer->sendTemplate(
@@ -116,7 +119,7 @@ final class AutoIssueAndSendService
                 null,
                 $cc,
                 $bcc,
-                [['path' => $pdfPath, 'name' => basename($pdfPath), 'contentType' => 'application/pdf']],
+                $emailAttachments,
                 $userId,
             );
         } catch (\Throwable $e) {

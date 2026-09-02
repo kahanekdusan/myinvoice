@@ -11,7 +11,6 @@ use MyInvoice\Infrastructure\Database\Connection;
 use MyInvoice\Middleware\AuthMiddleware;
 use MyInvoice\Repository\InvoiceRepository;
 use MyInvoice\Service\ActivityLogger;
-use MyInvoice\Service\Invoice\PublicInvoiceLinkFactory;
 use MyInvoice\Service\IpMatcher;
 use MyInvoice\Service\Mail\InvoiceEmailVarsBuilder;
 use MyInvoice\Service\Mail\Mailer;
@@ -33,7 +32,6 @@ final class SendTestEmailAction
         private readonly InvoicePdfRenderer $renderer,
         private readonly Mailer $mailer,
         private readonly InvoiceEmailVarsBuilder $varsBuilder,
-        private readonly PublicInvoiceLinkFactory $linkFactory,
         private readonly Config $config,
         private readonly ActivityLogger $logger,
         private readonly IpMatcher $ipMatcher,
@@ -77,8 +75,14 @@ final class SendTestEmailAction
             && ($invoice['numbering_type'] ?? 'default') === 'quote';
         $invoiceViewUrl = null;
         if (!$isQuote) {
-            $publicToken = $this->repo->rotatePublicViewToken($id);
-            $invoiceViewUrl = $this->linkFactory->build($publicToken);
+            // Test nesmí rotovat klientský token ani vynulovat důkaz zobrazení.
+            // Příjemcem je dodavatel, proto tlačítko vede na přihlášený interní
+            // detail; funguje tak i pro draft, který veřejný endpoint správně odmítá.
+            $appUrl = rtrim((string) $this->config->get('app.url', ''), '/');
+            if ($appUrl === '') {
+                $appUrl = 'http://localhost:8080';
+            }
+            $invoiceViewUrl = $appUrl . '/invoices/' . $id;
         }
 
         $locale = (string) ($invoice['language'] ?? 'cs');
@@ -113,7 +117,7 @@ final class SendTestEmailAction
         $ip = $this->ipMatcher->clientIpFromRequest($request->getServerParams());
         $this->logger->log('email.sent_test', $user['id'] ?? null, 'invoice', $id, [
             'to'            => $testRecipient,
-            'delivery_mode' => $isQuote ? 'attachment' : 'public_link',
+            'delivery_mode' => $isQuote ? 'attachment' : 'internal_preview',
             'invoice_view_url' => $invoiceViewUrl,
             'smtp_response' => $smtpResponse,
         ], $ip, $request->getHeaderLine('User-Agent'));

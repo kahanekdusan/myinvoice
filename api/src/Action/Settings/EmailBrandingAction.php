@@ -253,26 +253,17 @@ final class EmailBrandingAction
             'subject'  => $locale === 'en' ? 'Invoice 2026005 — sample preview' : 'Faktura 2026005 — ukázka náhledu',
             'supplier' => $supplier,
         ];
-        // Inline sample obsah dědící z _layout. Obsahuje částku + tlačítko obarvené
-        // přes {{ accent }}, aby náhled reprezentativně ukázal branding barvu i v těle
-        // (ne jen v hlavičce/patičce) — stejně jako reálný invoice_send.
+        // Inline sample obsah dědící z _layout. Běžná faktura je v e-mailu
+        // záměrně stručná: bez platebního boxu, jen s trackovaným tlačítkem
+        // obarveným přes {{ accent }} — stejně jako reálný invoice_send.
         $sample = $locale === 'en'
             ? <<<'TWIG'
 {% extends '_layout.html.twig' %}
 {% block content %}
 <p>Hello,</p>
-<p>Please find attached invoice <strong>2026005</strong>.</p>
-<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:16px 0;background:{{ accent_soft }};border:1px solid #E5E0F4;border-radius:8px;">
-  <tr><td style="padding:16px 20px;">
-    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="font-size:14px;">
-      <tr><td style="padding:4px 0;color:#7A748C;">Due date</td><td style="padding:4px 0;font-weight:600;text-align:right;">2026-05-21</td></tr>
-      <tr><td style="padding:8px 0 0;color:#7A748C;border-top:1px solid #E5E0F4;">Amount due</td>
-          <td style="padding:8px 0 0;border-top:1px solid #E5E0F4;font-size:18px;font-weight:700;color:{{ accent }};font-family:monospace;text-align:right;">1,000.00 CZK</td></tr>
-    </table>
-  </td></tr>
-</table>
-<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:8px 0;"><tr>
-  <td style="border-radius:8px;background:{{ accent }};"><a href="#" style="display:inline-block;padding:12px 24px;font-size:15px;font-weight:600;color:#ffffff;text-decoration:none;border-radius:8px;">View invoice</a></td>
+<p>Here is your invoice <strong>No. 2026005</strong>.</p>
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" align="center" style="margin:24px auto 16px;"><tr>
+  <td align="center" bgcolor="#3B2D83" style="background:{{ accent }};border-radius:8px;mso-padding-alt:12px 28px;"><a href="#" style="display:inline-block;padding:12px 28px;font-size:14px;font-weight:600;line-height:1;color:#ffffff;text-decoration:none;border-radius:8px;">View invoice</a></td>
 </tr></table>
 <p>Thank you,<br>{{ supplier.display_name|default(supplier.company_name) }}</p>
 {% endblock %}
@@ -281,18 +272,9 @@ TWIG
 {% extends '_layout.html.twig' %}
 {% block content %}
 <p>Dobrý den,</p>
-<p>v příloze posíláme fakturu <strong>2026005</strong>.</p>
-<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:16px 0;background:{{ accent_soft }};border:1px solid #E5E0F4;border-radius:8px;">
-  <tr><td style="padding:16px 20px;">
-    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="font-size:14px;">
-      <tr><td style="padding:4px 0;color:#7A748C;">Splatnost</td><td style="padding:4px 0;font-weight:600;text-align:right;">21.05.2026</td></tr>
-      <tr><td style="padding:8px 0 0;color:#7A748C;border-top:1px solid #E5E0F4;">K úhradě</td>
-          <td style="padding:8px 0 0;border-top:1px solid #E5E0F4;font-size:18px;font-weight:700;color:{{ accent }};font-family:monospace;text-align:right;">1 000,00 Kč</td></tr>
-    </table>
-  </td></tr>
-</table>
-<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:8px 0;"><tr>
-  <td style="border-radius:8px;background:{{ accent }};"><a href="#" style="display:inline-block;padding:12px 24px;font-size:15px;font-weight:600;color:#ffffff;text-decoration:none;border-radius:8px;">Zobrazit fakturu</a></td>
+<p>Zasíláme vám fakturu <strong>č. 2026005</strong>.</p>
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" align="center" style="margin:24px auto 16px;"><tr>
+  <td align="center" bgcolor="#3B2D83" style="background:{{ accent }};border-radius:8px;mso-padding-alt:12px 28px;"><a href="#" style="display:inline-block;padding:12px 28px;font-size:14px;font-weight:600;line-height:1;color:#ffffff;text-decoration:none;border-radius:8px;">Zobrazit fakturu</a></td>
 </tr></table>
 <p>Děkujeme,<br>{{ supplier.display_name|default(supplier.company_name) }}</p>
 {% endblock %}

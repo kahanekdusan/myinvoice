@@ -70,6 +70,7 @@ final class InvoiceEmailVarsBuilder
         $type = (string) $invoice['invoice_type'];
         $varsymbol = (string) ($invoice['varsymbol'] ?? '');
         $isQuote = $this->isPriceQuote($invoice);
+        $isStandardInvoice = $type === 'invoice';
         // Částka k úhradě v e-mailu = zbývající dluh — částečné úhrady (#89) se odečítají
         // (upomínka po částečné platbě musí chtít jen zbytek).
         $amount = round(
@@ -129,9 +130,13 @@ final class InvoiceEmailVarsBuilder
             'amount_to_pay'  => $amount,
             'document_total' => $documentTotal,
             'is_quote'       => $isQuote,
+            'is_standard_invoice' => $isStandardInvoice,
             'is_test'        => $isTest,
             'subject'        => $this->buildSubject($invoice, $isTest, $locale),
-            'qr_data_uri'    => $this->paymentQrDataUri($invoice),
+            // Prvotní e-mail běžné faktury je jen trackovaná vstupní brána
+            // k web faktuře. QR zůstává na webu, v PDF a v upomínkách,
+            // ale nesmí se dostat ani jako skrytá CID příloha tohoto e-mailu.
+            'qr_data_uri'    => $isStandardInvoice ? null : $this->paymentQrDataUri($invoice),
             'supplier'       => $this->loadSupplierFooter($invoice),
             'is_paid'        => ($invoice['status'] ?? '') === 'paid',
             'payment_method' => (string) ($invoice['payment_method'] ?? 'bank_transfer'),

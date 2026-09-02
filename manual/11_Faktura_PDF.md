@@ -186,8 +186,17 @@ Tlačítko **Odeslat e-mailem** (na detailu faktury). E-mail jde na:
 - `klient.hlavni_email`
 - `+ zakazka.fakturacni_emaily[]` (až 3 dodatečné adresy)
 
-Předmět + tělo e-mailu se vezme ze šablony `invoice_new` (CZ / EN podle jazyka
+Předmět + tělo e-mailu se vezme ze šablony `invoice_send` (CZ / EN podle jazyka
 klienta) — viz [36. Nastavení](36_Nastaveni.md).
+
+U běžné **Faktury** je e-mail záměrně stručný: obsahuje pozdrav, číslo
+faktury, volitelnou poznámku a tlačítko **Zobrazit fakturu**. Částka, splatnost,
+variabilní symbol, platební údaje ani QR kód v e-mailu nejsou. Klient je uvidí
+až na webové faktuře, kde se zároveň eviduje její zobrazení. Textová varianta
+e-mailu obsahuje přímou URL, protože v čistém textu nelze vykreslit tlačítko.
+
+Zálohové faktury, opravné a daňové doklady používají svůj dosavadní
+souhrn včetně platebních informací. Stejně zůstávají beze změny upomínky.
 
 Po odeslání:
 
@@ -252,11 +261,13 @@ z Fakturoidu.
 - **Kopírovat / Otevřít** — v modalu lze odkaz zkopírovat do schránky nebo
   rovnou otevřít v novém panelu.
 - **E-mail klientovi** — odkaz se automaticky vkládá do e-mailu při akci
-  **Odeslat e-mailem** (tlačítko „Zobrazit fakturu online" + textový odkaz).
-- **Zobrazeno klientem** — první anonymní návštěva stránky se zapíše; v detailu
-  faktury se pak ukazuje badge **👁 Zobrazeno klientem** (datum posledního
-  zobrazení je v modalu Web faktury a v historii akcí, včetně stažení PDF).
-  Náhled přihlášeného uživatele indikaci neovlivní.
+  **Odeslat e-mailem**. V HTML je pouze tlačítko **Zobrazit fakturu**; celá
+  URL se zobrazí jen v textové záložní variantě e-mailu.
+- **Zobrazeno klientem** — otevření odkazu se zapíše do historie a po
+  alespoň 10 sekundách na stránce se v detailu a seznamu faktur ukáže badge
+  **👁 Zobrazeno klientem**. Náhled přihlášeného uživatele ani
+  **Test odeslání**
+  indikaci neovlivní a test nezneplatní odkaz dříve odeslaný klientovi.
 - **Vygenerovat nový odkaz** — revokace: stávající URL okamžitě přestane
   platit (hodí se při úniku odkazu nesprávnému příjemci). Nový odkaz se pak
   posílá i v dalších e-mailech.
@@ -266,6 +277,10 @@ položky, součty s rozpadem DPH, platební údaje s QR kódem a poznámky z dok
 Klient si stáhne i **přílohy e-mailu** nahrané k faktuře (smlouva, výkaz…).
 Stav úhrady se ukazuje živě (Uhrazeno / Částečně uhrazeno / Po splatnosti).
 Koncepty veřejný odkaz nemají — stránka je dostupná až po vystavení dokladu.
+
+> 💡 Evidence zobrazení dokládá, že byl použit unikátní odkaz zaslaný
+> s fakturou. Sama o sobě neurčuje totožnost konkrétní osoby, pokud byl e-mail
+> nebo odkaz přeposlaný.
 
 > 🔒 Odkaz obsahuje 48znakový náhodný token — nelze ho uhodnout ani odvodit.
 > Kdo odkaz má, fakturu vidí; pokud se dostal do nesprávných rukou, vygenerujte

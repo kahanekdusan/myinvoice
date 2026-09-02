@@ -1351,9 +1351,9 @@ const invoiceActions = computed<ActionItem[]>(() => {
               ? t('invoice.approval.status_expired')
               : t('invoice.approval.status_' + approvalStatus) }}
         </span>
-        <span v-if="invoice.public_viewed_at"
+        <span v-if="invoice.public_first_viewed_at"
           class="text-xs px-2 py-0.5 rounded font-normal bg-success-50 text-success-600"
-          :title="t('invoice.public_link.viewed_at', { date: invoice.public_viewed_at.replace('T', ' ').slice(0, 16) })">
+          :title="t('invoice.public_link.viewed_at', { date: invoice.public_first_viewed_at.replace('T', ' ').slice(0, 16) })">
           👁 {{ t('invoice.public_link.viewed_badge') }}
         </span>
       </h1>
