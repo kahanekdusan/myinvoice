@@ -385,9 +385,20 @@
         </tr>
         {% endif %}
         {% endif %}
+        {% set rounding = invoice.totals.rounding ?? 0 %}
+        {% if rounding != 0 %}
+        <tr class="subtotal">
+          <td class="tot-label">{{ t('Celkem s DPH', 'Total incl. VAT') }}</td>
+          <td class="tot-num nowrap">{{ invoice.totals.with_vat|number_format(2, decimal_sep, thousand_sep) }} {{ currency_display }}</td>
+        </tr>
+        <tr class="subtotal">
+          <td class="tot-label">{{ t('Zaokrouhlení', 'Rounding') }}</td>
+          <td class="tot-num nowrap">{{ rounding|number_format(2, decimal_sep, thousand_sep) }} {{ currency_display }}</td>
+        </tr>
+        {% endif %}
         <tr class="grand">
           <td class="tot-label">{{ t('Celkem', 'Total') }}</td>
-          <td class="tot-num nowrap">{{ invoice.totals.with_vat|number_format(2, decimal_sep, thousand_sep) }} {{ currency_display }}</td>
+          <td class="tot-num nowrap">{{ (invoice.totals.with_vat + rounding)|number_format(2, decimal_sep, thousand_sep) }} {{ currency_display }}</td>
         </tr>
         {% if not is_quote and invoice.advance_paid_amount > 0 %}
         <tr class="advance">
@@ -419,8 +430,8 @@
         {% if invoice.czk_recap %}
         <tr class="rate-note">
           <td colspan="2" class="rate-note-cell">
-            {{ t('Kurz ČNB', 'CNB rate') }}:
-            {{ invoice.czk_recap.rate|number_format(3, decimal_sep, thousand_sep) }}&nbsp;CZK / 1&nbsp;{{ currency_display }}
+            {{ t('Kurz', 'Exchange rate') }}:
+            {{ invoice.czk_recap.rate|number_format(invoice.czk_recap.rate_decimals ?? 3, decimal_sep, thousand_sep) }}&nbsp;CZK / 1&nbsp;{{ currency_display }}
             ({{ invoice.czk_recap.rate_date }})
           </td>
         </tr>
@@ -436,8 +447,8 @@
     <td colspan="2" class="czk-recap-title">
       {{ t('Přepočet do CZK', 'Conversion to CZK') }}
       <span class="czk-recap-rate">
-        {{ t('kurz ČNB', 'CNB rate') }}:
-        {{ invoice.czk_recap.rate|number_format(3, decimal_sep, thousand_sep) }}&nbsp;CZK / 1&nbsp;{{ currency_display }}
+        {{ t('kurz', 'exchange rate') }}:
+        {{ invoice.czk_recap.rate|number_format(invoice.czk_recap.rate_decimals ?? 3, decimal_sep, thousand_sep) }}&nbsp;CZK / 1&nbsp;{{ currency_display }}
         ({{ invoice.czk_recap.rate_date }})
       </span>
     </td>

@@ -39,7 +39,11 @@ RUN composer install --no-dev --no-scripts --no-autoloader --prefer-dist --no-in
 COPY api/ ./
 # dump-autoload + cleanup mPDF fontů. Cleanup voláme explicitně, protože composer
 # install výše běží s --no-scripts (post-install-cmd z composer.json se nespustí).
-RUN composer dump-autoload --optimize --classmap-authoritative \
+# Remove upstream test mail and development-only archives before copying vendor.
+RUN rm -rf vendor/webklex/php-imap/tests \
+ && rm -f vendor/paragonie/random_compat/dist/random_compat.phar.pubkey.asc \
+          vendor/phpoffice/phpspreadsheet/src/PhpSpreadsheet/Calculation/locale/Translations.xlsx \
+ && composer dump-autoload --optimize --classmap-authoritative \
  && php bin/cleanup-mpdf-fonts.php
 
 # ---------- Stage 3: runtime ----------

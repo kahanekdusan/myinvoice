@@ -39,8 +39,11 @@ final class RaiffeisenbankStatementPdfParser implements BankStatementPdfParserIn
     private const FX_RATE = '-?\d{1,3}(?:[\x{00A0} ]\d{3})*\.\d+';
     private const FX_RATE_LINE = '/^' . self::FX_RATE . '\s+[A-Z]{3}\/[A-Z]{3}$/u';
 
-    /** Hlavičkové zůstatky/součty: číslo s mezerami tisíců a tečkou (bez povinného znaménka). */
-    private const MONEY_H = '([\d\x{00A0} ]+\.\d{2})';
+    /** Hlavičkové zůstatky/součty: volitelné znaménko, mezery tisíců a desetinná tečka. */
+    private const MONEY_H = '(-?[\d\x{00A0} ]+\.\d{2})';
+
+    /** Za tímto textem RB rozepisuje složení poplatku, nikoli další bankovní pohyby. */
+    private const FEE_BREAKDOWN_START = 'V rámci souhrnné položky k účtu jsou zahrnuty poplatky';
 
     /**
      * Řádky, které v tabulce transakcí NEJSOU transakce — opakovaná záhlaví/hlavička
@@ -228,9 +231,42 @@ final class RaiffeisenbankStatementPdfParser implements BankStatementPdfParserIn
             $from = $starts[$k];
             $to = ($k + 1 < $cnt) ? $starts[$k + 1] : $n;
             $row = $this->parseSlice(array_slice($lines, $from, $to - $from), $currency);
-            if ($row !== null) $rows[] = $row;
+            if ($row === null) continue;
+            $fee = $row['fee'];
+            unset($row['fee']);
+            $rows[] = $row;
+            if ($fee !== null) {
+                $rows[] = $this->feeRow($row, $fee);
+            }
         }
         return $rows;
+    }
+
+    /**
+     * Poplatek tištěný u položky jako samostatný pohyb. Kód transakce dostane příponu,
+     * aby zůstal jedinečný: shodná reference by u obou pohybů přestala sloužit jako
+     * identita a import by přešel na náhradní otisk.
+     *
+     * @param array<string,mixed> $row
+     * @return array<string,mixed>
+     */
+    private function feeRow(array $row, float $fee): array
+    {
+        $ref = $row['bank_ref'] !== null ? $row['bank_ref'] . '-POPLATEK' : null;
+        $description = 'Poplatek' . ($row['description'] !== null ? ' | ' . $row['description'] : '');
+
+        return [
+            'posted_at'            => $row['posted_at'],
+            'amount'               => $fee,
+            'variable_symbol'      => null,
+            'constant_symbol'      => null,
+            'specific_symbol'      => null,
+            'counterparty_account' => null,
+            'counterparty_bank'    => null,
+            'counterparty_name'    => null,
+            'description'          => mb_substr($description, 0, 255),
+            'bank_ref'             => $ref,
+        ];
     }
 
     private function isEndLine(string $line): bool
@@ -272,20 +308,38 @@ final class RaiffeisenbankStatementPdfParser implements BankStatementPdfParserIn
             $idx++;
         }
 
-        // Částka = POSLEDNÍ peněžní hodnota (s tečkou) ve zbytku slice, ale JEN ve měně účtu.
+        // Částka = POSLEDNÍ peněžní hodnota (s tečkou) před případným rozpisem
+        // souhrnného poplatku, ale JEN ve měně účtu.
         // Symboly/reference jsou celočíselné, takže „poslední s .dd" je jednoznačné; u kartové
         // platby v cizí měně se ale za CZK částkou tiskne ještě původní částka („-6.06 USD")
         // a kurz („21.83 CZK/USD") — obojí je nutné vynechat, jinak by amount = kurz (#205).
+        // Sloupec „Poplatek" stojí v tabulce těsně před „Částkou" na tomtéž řádku
+        // („-49.00 12 300.00 CZK" u vkladu hotovosti na pobočce). Poplatek je samostatný
+        // pohyb na účtu: zůstatek i „Výdaje celkem" ho obsahují zvlášť od částky.
         $amount = null;
+        $fee = null;
+        $inFeeBreakdown = false;
         for ($j = $idx; $j < $n; $j++) {
+            // Rozpis služeb patří do popisu stejné transakce, jeho dílčí hodnoty ale
+            // nesmějí přepsat hlavní účetní částku uvedenou před rozpisem.
+            if (str_starts_with($slice[$j], self::FEE_BREAKDOWN_START)) {
+                $inFeeBreakdown = true;
+            }
+            if ($inFeeBreakdown) continue;
             if (preg_match(self::FX_RATE_LINE, $slice[$j])) continue; // řádek kurzu, ne částka
             // Hodnota s volitelným měnovým sufixem; cizí měnu (např. USD) přeskoč, ber jen
             // částku bez sufixu nebo v měně účtu.
             if (preg_match_all('/(' . self::AMOUNT . ')(?:\s*([A-Z]{3}))?/u', $slice[$j], $mm, PREG_SET_ORDER)) {
+                $lineAmounts = [];
                 foreach ($mm as $match) {
                     $suffix = $match[2] ?? '';
                     if ($suffix !== '' && $suffix !== $currency) continue; // původní částka v cizí měně
-                    $amount = $this->num($match[1]);
+                    $lineAmounts[] = $this->num($match[1]);
+                }
+                if ($lineAmounts !== []) {
+                    $amount = $lineAmounts[count($lineAmounts) - 1];
+                    $candidate = count($lineAmounts) >= 2 ? $lineAmounts[count($lineAmounts) - 2] : null;
+                    $fee = $candidate !== null && $candidate < 0 ? $candidate : null;
                 }
             }
         }
@@ -360,6 +414,7 @@ final class RaiffeisenbankStatementPdfParser implements BankStatementPdfParserIn
             'counterparty_name'    => $counterpartyName !== null ? mb_substr($counterpartyName, 0, 190) : null,
             'description'          => $description,
             'bank_ref'             => $bankRef,
+            'fee'                  => $fee !== null ? round($fee, 2) : null,
         ];
     }
 
