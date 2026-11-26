@@ -7,7 +7,16 @@ on:
     branches: [master, development, production]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
+  delivery-data:
+    uses: ./.github/workflows/delivery-data.yml
+    with:
+      base-sha: ${{ github.event.pull_request.base.sha || github.event.before }}
+      head-sha: ${{ github.event.pull_request.head.sha || github.sha }}
+
   backend:
     name: Backend (PHP 8.5 + PHPUnit)
     runs-on: ubuntu-latest
@@ -42,22 +51,17 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
 
       - name: Setup PHP 8.5
-        uses: shivammathur/setup-php@v2
+        uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # v2
         with:
           php-version: '8.5'
           extensions: pdo, pdo_mysql, mbstring, intl, gd, zip, opcache, bcmath, exif
           coverage: none
           tools: composer:v2
-
-      - name: Cache composer dependencies
-        uses: actions/cache@v5
-        with:
-          path: api/vendor
-          key: ${{ runner.os }}-composer-${{ hashFiles('api/composer.lock') }}
-          restore-keys: ${{ runner.os }}-composer-
 
       - name: Install composer dependencies
         working-directory: api
@@ -79,8 +83,8 @@ jobs:
                   'debug' => false,
                   'url'   => 'http://localhost:8080',
                   // Syntetické klíče jen pro běh testů (32 B po dekódování).
-                  'pepper'                => 'Y2ktcGVwcGVyLWZvci10ZXN0cy1vbmx5ISEhISEhISE=',
-                  'secret_encryption_key' => 'Y2ktc2VjcmV0LWtleS1mb3ItdGVzdHMhISEhISEhISE=',
+                  'pepper'                => base64_encode(str_repeat('p', 32)),
+                  'secret_encryption_key' => base64_encode(str_repeat('k', 32)),
               ],
               'db' => [
                   'host' => '127.0.0.1',
@@ -110,7 +114,7 @@ jobs:
             if curl -fsS http://127.0.0.1:8080/api/health >/dev/null; then exit 0; fi
             sleep 1
           done
-          echo "Server se nerozeběhl:"; cat /tmp/php-server.log; exit 1
+          echo "Syntetický testovací server neprošel health checkem"; exit 1
 
       - name: Run PHPUnit
         working-directory: api
@@ -124,22 +128,17 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
 
       - name: Setup Node 24 + pnpm
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: '24'
 
       - name: Install pnpm
         run: corepack enable && corepack prepare pnpm@latest --activate
-
-      - name: Cache pnpm store
-        uses: actions/cache@v5
-        with:
-          path: ~/.local/share/pnpm/store
-          key: ${{ runner.os }}-pnpm-${{ hashFiles('web/pnpm-lock.yaml') }}
-          restore-keys: ${{ runner.os }}-pnpm-
 
       - name: Install dependencies
         working-directory: web
@@ -162,7 +161,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
       - name: Verify local development isolation
         run: bash ops/docker/tests/local-development-contract.sh
 
@@ -171,7 +172,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
       - name: Verify restricted candidate and promote commands
         run: sh ops/deploy/netcup/tests/contract.sh
 
@@ -180,7 +183,9 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
       - name: Parse with Windows PowerShell 5.1
         shell: powershell
         run: |
@@ -201,3 +206,28 @@ jobs:
           ) | Out-Null
           if ($errors.Count -ne 0) { throw ($errors | Format-List | Out-String) }
           pwsh -NoProfile -File ops/docker/tests/local-development-contract.ps1
+
+  ci-required:
+    name: CI required
+    if: ${{ always() }}
+    needs:
+      - delivery-data
+      - backend
+      - frontend
+      - local-development-contract
+      - netcup-deploy-contract
+      - local-development-powershell
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Require success from every mandatory job
+        env:
+          DELIVERY_DATA: ${{ needs.delivery-data.result }}
+          BACKEND: ${{ needs.backend.result }}
+          FRONTEND: ${{ needs.frontend.result }}
+          DOCKER: ${{ needs.local-development-contract.result }}
+          NETCUP: ${{ needs.netcup-deploy-contract.result }}
+          POWERSHELL: ${{ needs.local-development-powershell.result }}
+        run: python3 ops/security/ci-gate.py "$DELIVERY_DATA" "$BACKEND" "$FRONTEND" "$DOCKER" "$NETCUP" "$POWERSHELL"

@@ -11,72 +11,85 @@ concurrency:
 
 permissions:
   contents: read
-  packages: write
 
 jobs:
   build:
     name: Build immutable production image
     if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/production'
+    permissions:
+      contents: read
+      packages: write
+      actions: read
     runs-on: ubuntu-latest
     outputs:
-      digest: ${{ steps.build.outputs.digest }}
+      digest: ${{ steps.publish.outputs.digest }}
     steps:
-      - uses: actions/checkout@v6
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - id: build
-        uses: docker/build-push-action@v6
+          persist-credentials: false
+      - name: Require successful CI for the exact production commit
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: python3 ops/security/require-production-ci.py
+      - name: Prepare checked build context
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y skopeo poppler-utils
+          python3 ops/security/install-gitleaks.py "$RUNNER_TEMP/gitleaks"
+          PATH="$RUNNER_TEMP:$PATH" python3 ops/security/delivery-check.py context "$RUNNER_TEMP/image-context"
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Build image locally
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        env:
+          DOCKER_BUILD_RECORD_UPLOAD: "false"
+          DOCKER_BUILD_SUMMARY: "false"
         with:
-          context: .
-          push: true
+          context: ${{ runner.temp }}/image-context
+          outputs: type=oci,dest=${{ runner.temp }}/image.tar,compression=gzip
+          provenance: false
+          sbom: false
+          file: ${{ runner.temp }}/image-context/Dockerfile
           build-args: SKIP_FRONTEND_TYPECHECK=0
-          tags: |
-            ghcr.io/kahanekdusan/myinvoice:production
-            ghcr.io/kahanekdusan/myinvoice:sha-${{ github.sha }}
           labels: |
             org.opencontainers.image.source=https://github.com/kahanekdusan/myinvoice
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.version=sha-${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+      - name: Verify manifest, config and every image layer
+        id: verified
+        run: |
+          digest=$(python3 ops/security/delivery-check.py image "$RUNNER_TEMP/image.tar" "$RUNNER_TEMP/image-context")
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish the verified image without changing its digest
+        id: publish
+        env:
+          DIGEST: ${{ steps.verified.outputs.digest }}
+        run: |
+          image=ghcr.io/kahanekdusan/myinvoice
+          source="oci-archive:$RUNNER_TEMP/image.tar"
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          skopeo copy --preserve-digests "$source" "docker://$image:sha-$GITHUB_SHA"
+          skopeo copy --preserve-digests "$source" "docker://$image:production"
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
 
   deploy-candidate:
     name: Deploy inactive candidate on srv01
-    if: >-
-      (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
-      vars.NETCUP_MYINVOICE_CANDIDATE_ENABLED == 'true'
+    # Keep deployment disabled until independent review and a verified staging digest gate exist.
+    if: ${{ false }}
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
       contents: read
-      actions: read
     environment: netcup-myinvoice-candidate
     steps:
-      - name: Require successful CI for the exact production commit
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          SOURCE_SHA: ${{ github.sha }}
-        run: |
-          run_id=
-          for attempt in $(seq 1 60); do
-            run_id="$(gh run list \
-              --repo "$GITHUB_REPOSITORY" \
-              --workflow ci.yml \
-              --commit "$SOURCE_SHA" \
-              --event push \
-              --json databaseId,headSha \
-              --jq '[.[] | select(.headSha == env.SOURCE_SHA)][0].databaseId // empty')"
-            [ -z "$run_id" ] || break
-            sleep 10
-          done
-          test -n "$run_id"
-          gh run watch "$run_id" --repo "$GITHUB_REPOSITORY" --exit-status
-
       - name: Configure verified SSH access
         env:
           SSH_PRIVATE_KEY: ${{ secrets.NETCUP_MYINVOICE_SSH_PRIVATE_KEY }}
@@ -103,9 +116,8 @@ jobs:
 
   promote-production:
     name: Promote candidate to live production
-    if: >-
-      (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
-      vars.NETCUP_MYINVOICE_PROMOTE_ENABLED == 'true'
+    # Keep deployment disabled until independent review and a verified staging digest gate exist.
+    if: ${{ false }}
     needs: [build, deploy-candidate]
     runs-on: ubuntu-latest
     timeout-minutes: 10

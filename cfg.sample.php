@@ -160,7 +160,7 @@ return [
         ],
 
         // Sender identity
-        'from_email'     => 'info@dusankahanek.cz',   // adresa v hlavičce From: (musí být na doméně, kde máš DKIM/SPF)
+        'from_email'     => 'smtp-user@example.invalid',   // adresa v hlavičce From: (musí být na doméně, kde máš DKIM/SPF)
         'from_name'      => 'Dušan Kahánek',             // zobrazované jméno odesílatele
         'reply_to_email' => '',                      // pokud prázdné, použije se from_email
         'reply_to_name'  => '',
@@ -284,6 +284,11 @@ return [
     ],
     'qr' => [
         'czk_constant_symbol' => '0308',             // KS pro CZK platby (0308 = běžný platební styk)
+    ],
+    'invoices' => [
+        // true = v seznamech a souhrnech zahrnout mezi doklady po splatnosti i dnešní.
+        // Odeslání upomínky zůstává možné až po dni splatnosti.
+        'overdue_includes_today' => false,
     ],
     'pagination' => [
         // Velikost stránky pro tlačítko "Další" v UI seznamech.

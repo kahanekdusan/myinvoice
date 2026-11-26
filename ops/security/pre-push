@@ -1,0 +1,9 @@
+#!/bin/sh
+set -eu
+root=$(git rev-parse --show-toplevel)
+scanner_dir=$(git rev-parse --path-format=absolute --git-path myinvoice-security)
+export PATH="$scanner_dir:$PATH"
+case "$(uname -s)" in
+    MINGW*|MSYS*) exec python "$root/ops/security/delivery-check.py" pre-push "$2" ;;
+    *) exec python3 "$root/ops/security/delivery-check.py" pre-push "$2" ;;
+esac

@@ -574,7 +574,7 @@ DSN se sestaví z `cfg.smtp.*`:
 - `smtp://user:pass@smtp.seznam.cz:465?encryption=ssl` (SSL/465)
 - `smtp://user:pass@smtp.gmail.com:587?encryption=tls&auth_mode=login` (STARTTLS/587)
 - `smtp://127.0.0.1:1025` (lokální MailHog, bez auth)
-- `smtp://USER:OAUTH_ACCESS_TOKEN@smtp.office365.com:587?auth_mode=xoauth2` (OAuth2 přes SMTP XOAUTH2)
+- `smtp://USER:smtp-user@example.invalid:587?auth_mode=xoauth2` (OAuth2 přes SMTP XOAUTH2)
 
 Příklad odeslání faktury:
 ```php

@@ -1,0 +1,37 @@
+name: Delivery data
+
+on:
+  workflow_call:
+    inputs:
+      base-sha:
+        type: string
+        required: false
+      head-sha:
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  delivery-data:
+    name: Check outgoing Git data
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ inputs.head-sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Inspect every proposed commit
+        env:
+          BASE_SHA: ${{ inputs.base-sha }}
+          HEAD_SHA: ${{ inputs.head-sha }}
+        run: |
+          python3 ops/security/install-gitleaks.py "$RUNNER_TEMP/gitleaks"
+          export PATH="$RUNNER_TEMP:$PATH"
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            BASE_SHA="$(git rev-parse --verify 'HEAD^')"
+          fi
+          python3 ops/security/delivery-check.py git-range "$BASE_SHA" "$HEAD_SHA"
+          python3 ops/security/test-delivery.py

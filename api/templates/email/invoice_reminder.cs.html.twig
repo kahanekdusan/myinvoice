@@ -33,12 +33,6 @@
           <td style="padding:4px 0;color:#7A748C;">Po splatnosti</td>
           <td style="padding:4px 0;font-weight:600;color:#C2410C;">{{ days_overdue }} {% if days_overdue == 1 %}den{% elseif days_overdue < 5 %}dny{% else %}dní{% endif %}</td>
         </tr>
-        <tr>
-          <td style="padding:8px 0 0;color:#7A748C;border-top:1px solid #FBC78A;">K úhradě</td>
-          <td style="padding:8px 0 0;border-top:1px solid #FBC78A;font-size:18px;font-weight:700;color:{{ accent }};font-family:monospace;">
-            {{ amount_to_pay|number_format(2, ',', ' ') }} {{ invoice.currency }}
-          </td>
-        </tr>
       </table>
     </td>
   </tr>

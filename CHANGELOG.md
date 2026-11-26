@@ -7,6 +7,114 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.59.5] - 2026-11-22
+
+### Fixed
+
+- **Kurz cizí měny po změně DUZP.** Editor dřív posílal kurz při každém uložení jako ruční hodnotu, takže koncept po změně DUZP, data vystavení nebo měny ponechal kurz k původnímu dni. Kurz se nově posílá jen při skutečné změně pole a jinak se kurz ČNB přenačte. (#294)
+- **Ruční kurz se ukládá k DUZP.** Dřív dostal datum vystavení, nově rozhodný den (DUZP, a když chybí, datum vystavení). (#294)
+- **Náhradní kurz není novější než DUZP.** Když ČNB není dostupná, poslední známý kurz se bere jen do rozhodného dne, starší faktura tak nedostane pozdější kurz. (#294)
+- **`POST /api/v1/invoices` respektuje ruční `exchange_rate`** stejně jako PUT, dřív ho přepsal kurz ČNB. (#294)
+- **Pole kurzu v editoru už nemění šipky ani kolečko myši**, jedním stiskem šipky šlo nechtěně změnit kurz o 0,0001. (#293)
+- **Změna kurzu v historii faktury.** Úprava kurzu a data kurzu se zapisuje do historie (i u odemčené vystavené faktury). (#293)
+- **Přesný kurz v PDF.** Kurz se tiskne se všemi platnými desetinnými místy (3 až 6), takže odpovídá přepočtu do CZK (např. 24,9999 nebo 0,06123 CZK / 1 HUF). Popisek je neutrální „Kurz", protože může jít i o ručně zadaný kurz. (#293)
+
+## [4.59.4] - 2026-10-29
+
+### Added
+
+- **Anglická e-mailová avíza Fio banky.** Systémový Fio parser rozpozná i avíza v angličtině („the balance of account … has increased by CZK 1.00 on 10/25/2026"), vlastní regex provider na ně už není potřeba. (#291)
+
+### Fixed
+
+- **Nahrávání přijatých faktur z iPhonu.** Service worker přeposílal požadavky na API a iOS Safari při tom zahodilo tělo souboru, takže AI extrakce i import přijatých faktur končily chybou „Nahrajte PDF" / „Nahrajte alespoň jeden soubor". Požadavky na API teď service worker nechává přímo prohlížeči. Aplikaci přidanou na plochu iPhonu je po aktualizaci potřeba ukončit a znovu spustit. (#292)
+- **Doména ve whitelistu odesílatelů e-mailových avíz.** Položka bez „@" (např. `fio.cz`) se dřív brala jen jako přesná adresa, takže prošla v Testu parseru, ale při scanu schránky s odesílatelem `automat@fio.cz` ne. Nově znamená doménu včetně subdomén. (#291)
+- **Automatický scan e-mailových avíz u všech dodavatelů.** Cron skenoval jen výchozího dodavatele z konfigurace, schránka nastavená u jiného dodavatele se zpracovala jen ručně. Nově projde všechny dodavatele se zapnutou IMAP schránkou. (#291)
+
+## [4.59.3] - 2026-10-21
+
+### Security
+
+- **Docker image na PHP 8.5.12.** Obraz se staví na PHP 8.5.12 s bezpečnostními opravami jádra PHP (GHSA-w8hw-w9fx-j79w, GHSA-6wmf-4rv5-p3rp) a řadou oprav use-after-free. Doporučujeme aktualizovat.
+
+### Fixed
+
+- **Sestavení Docker image nezávisí na pecl.php.net.** Rozšíření redis se sestavuje ze zdrojů phpredis 6.3.0 s připnutou verzí, takže výpadek PECL už nezastaví publikaci image.
+
+## [4.59.2] - 2026-10-15
+
+### Fixed
+
+- **PDF výpis Raiffeisenbank s vkladem hotovosti a poplatkem na jednom řádku.** Vklad hotovosti na pobočce tiskne RB na jeden řádek se sloupcem Poplatek. Parser bral jen poslední částku, poplatek zahodil a kontrola součtů pak odmítla celý výpis. Nově vznikne vklad v plné výši a samostatný pohyb poplatku, takže součty sedí na zůstatek výpisu.
+
+## [4.59.1] - 2026-10-14
+
+### Fixed
+
+- **Import vydaných faktur z ISDOC zachovává zaokrouhlení.** Import zahazoval `PayableRoundingAmount`, takže částka k úhradě zůstala haléřová a zaokrouhlená úhrada klienta vyšla jako nedoplatek. Zaokrouhlení se nově převezme do `invoices.rounding` přímo z `PayableRoundingAmount`, a když chybí, z rozdílu nenulového `PayableAmount` proti položkám (jen u dokladu bez odečtených záloh). Do DPH ani položek nevstupuje. (#289, díky @janvalentik)
+- **Výzva „Pošli upomínky“ se shoduje se seznamem faktur po splatnosti.** Výzva na dashboardu započítávala i faktury splatné dnes, zatímco seznam je ve výchozím nastavení ukazuje až následující den. Nově používá stejnou hranici splatnosti (`OverduePolicy`) jako seznam, včetně volitelného zahrnutí dnešní splatnosti. (#287, díky @blondak)
+- **PDF záloha obsahuje originály a přílohy faktur.** `cron-backup-pdf` dřív bral jen soubory `.pdf` a vynechával strojové originály přijatých faktur (ISDOC, ISDOCX, XML, JSON), přílohy vystavených faktur jiných typů i převzatá PDF z `invoices-imported`. Archiv `*-pdf-*.zip` je nově obsahuje a používá pevné cesty `storage/...` i při externím úložišti nebo nastaveném `MYINVOICE_DATA_DIR`. Soubory mimo zdrojový adresář (symlinky) se přeskočí. (#288, díky @blondak)
+
+### Documentation
+
+- Manuál popisuje obsah záloh a doporučené časy `cron-backup-pdf` a `cron-backup-documents`, a hranici splatnosti u výzvy k upomínkám.
+
+## [4.59.0] - 2026-10-02
+
+### Added
+
+- **Přenos ignorování z e-mailových avíz do bankovního výpisu.** Při ručním importu GPC/ABO nebo PDF výpisu aplikace nabídne převzetí ignorování a poznámky z odpovídajících ručně ignorovaných e-mailových avíz. Uživatel vybere jednotlivé pohyby nebo použije „Vybrat vše“, případně import dokončí bez přenosu nebo zruší bez uložení výpisu. Nabízí se jen jednoznačné shody podle účtu, měny, částky včetně znaménka, data a VS nebo protiúčtu. Automaticky ignorovaná avíza a avíza navázaná na platby se vyřazují a jedno avízo lze použít nejvýše jednou. Automatické skenování adresáře zůstává bez přenosu. Migrace 0153 přidává `bank_transactions.ignore_origin` a auditní tabulku `bank_notice_ignore_transfers`, OpenAPI je aktualizované. (#285, díky @blondak)
+- **Akce v detailu bankovní transakce.** Detail pohybu nově nabízí podle stavu a oprávnění akce Vytvořit fakturu (nespárovaná odchozí platba), Spárovat, Ignorovat, Zrušit spárování a Zrušit ignorování. Zrušení akce vrátí původní detail, po dokončení se detail znovu neotevírá. (#284, díky @blondak)
+
+### Changed
+
+- **Texty o přechodu na MyÚčto.** Stránka přechodu, modal podpory, stránka Aktualizace a tip na dashboardu už neslibují, že vše zdarma v MyInvoice je zdarma i v MyÚčtu. Seznam placených doplňků je sjednocený: daňová evidence a účetnictví, mzdy a personalistika, sklady a e-shop, více účtovaných firem.
+
+## [4.58.0] - 2026-09-21
+
+### Added
+
+- **Poznámka k ignorování bankovního pohybu a jednotné dialogy transakcí.** Ignorování i zrušení spárování nově používají dialog aplikace s identifikací pohybu místo potvrzení prohlížeče. K ignorování lze připojit volitelnou poznámku (až 1000 znaků), která se zobrazí v detailu a zapisuje se do auditního logu. Zpětná akce se jmenuje „Zrušit ignorování" a upozorní na odstranění poznámky. Po akci se aktualizuje jen dotčený pohyb, filtr zůstává zachovaný a stránka se znovu nenačítá. Nový detail pohybu (ikona oka) ukazuje částku, stav, protistranu, účty, symboly, bankovní referenci, zůstatek, spárované faktury a nezkrácený popis. Migrace 0151 přidává `bank_transactions.ignore_note`, OpenAPI popisuje nové pole. (#281, díky @blondak)
+
+### Fixed
+
+- **Párování přijatých faktur podle platebního VS a se zaokrouhlením.** Bankovní párování hledalo přijaté faktury jen podle interního a dodavatelského čísla dokladu a samostatný platební variabilní symbol přehlíželo. Očekávaná částka navíc nezahrnovala zaokrouhlení, takže i úplná úhrada mohla skončit jako částečná shoda. Nově se zohledňuje `payment_variable_symbol` včetně normalizace úvodních nul a oddělovačů a částka k úhradě zahrnuje zaokrouhlení při zachování odpočtu uhrazených záloh. (#282, díky @blondak)
+- **Přepárování výpisu nezakládá duplicitní úhrady přijatých faktur.** Opakované „Přepárovat" u odchozí platby ve stavu částečné shody vkládalo při každém běhu další řádek párování. Částečná shoda podle VS se nově zahodí a vyhodnotí znovu, takže ji započtené zaokrouhlení povýší na přesnou. Shody, které už fakturu označily jako zaplacenou, zůstávají beze změny. (#272)
+- **Import vydaných faktur zachovává zaokrouhlení.** Import z Fakturoidu a iDokladu přepočítal celkovou částku z položek a zaokrouhlení zdroje zahodil, takže zaokrouhlená úhrada klienta vycházela jako přeplatek nebo částečná úhrada. Částka k úhradě vydané faktury nově zahrnuje zaokrouhlení (migrace 0152, u stávajících dokladů beze změny), Fakturoid přenáší rozdíl celku proti položkám, iDoklad ukládá zaokrouhlovací položku jako zaokrouhlení místo řádku s 0 % DPH. Dobropis ze storna vrací zaokrouhlení s opačným znaménkem, PDF i detail faktury zobrazují řádek Zaokrouhlení. Skript `api/bin/backfill-imported-invoice-rounding.php` doplní zaokrouhlení u dříve importovaných faktur (výchozí je dry-run). (#258)
+- **Importované otevřené vydané doklady jsou vystavené.** Neuhrazené, po splatnosti a částečně uhrazené doklady z iDokladu i Fakturoidu se nově zakládají jako vystavené se snapshoty a původním číslem, ne jako koncepty. Automatické upomínky jsou u nich vypnuté, aby historické pohledávky nezačaly hromadně upomínat. Doklad bez čísla zůstává konceptem. (#250)
+
+## [4.57.0] - 2026-09-09
+
+### Added
+
+- **Automatické odeslání TOTP při přihlášení.** Po zadání nebo vložení šesté číslice se kód odešle automaticky. Odeslání počká na captchu a nevytváří opakované ani souběžné požadavky. (#279)
+- **Oprava příštího termínu pravidelné fakturace.** Detail šablony umožňuje změnit příští termín po potvrzení kontroly existujících faktur. Kontroluje platnost data, již vytvořené doklady a otevřený koncept období. Ukončenou šablonu vrací do pozastaveného stavu. Ruční generování nově rozlišuje nahrazení plánovaného termínu a mimořádnou fakturu bez posunu plánu; dialog předem ukazuje výsledný termín. (#280)
+
+### Fixed
+
+- **Ruční fakturace zachovává původní cyklus šablony.** Příští termín se počítá od plánovaného data, nikoli od data ručně vytvořené faktury. Běžná editace zachovává opravený termín. Změnu plánu a generování chrání společný zámek; cron znovu ověřuje načtený termín, aby nepřepsal souběžnou opravu. (#280)
+- **Jednotné vyhodnocování splatnosti.** Faktura splatná dnes zůstává ve výchozím nastavení ve splatnosti až do konce dne. Seznamy, dashboard a souhrny klientů a zakázek používají stejnou hranici. Frontend respektuje nastavené časové pásmo aplikace a počítá kalendářní dny správně i při změně letního času. Volba `invoices.overdue_includes_today` umožňuje zahrnout dnešní doklady do označení a filtrů po splatnosti; upomínky jsou nadále dostupné až následující den. (#278)
+- **Import PDF výpisu Raiffeisenbank se zápornými zůstatky a rozpisem poplatků.** Parser podporuje záporný počáteční i konečný zůstatek. Dílčí částky rozpisu souhrnného poplatku nepřepisují částku bankovního pohybu a rozpis zůstává v jeho popisu. (#275)
+
+## [4.56.4] — 2026-09-04
+
+### Fixed
+
+- **Kontrolní hlášení vynechávalo oddíl A.2 u dodavatele bez EU DIČ.** Přijaté plnění se samovyměřením od dodavatele, který nemá DIČ registrace k DPH v členském státě EU (třetí země, ale i neplátce se sídlem v EU), se z oddílu A.2 vyřazovalo, jenže řádek 12 (případně 5) přiznání zůstal naplněný. Křížová kontrola kontrolního součtu `celk_zd_a2` proti řádkům 3, 4, 5, 6, 9, 12 a 13 přiznání s tolerancí ±1000 Kč se proto rozešla přesně o objem těch plnění, u firmy s pravidelnými zahraničními službami každý měsíc. Odůvodnění opravy z 4.56.1 neobstálo: dokumentace atributu `vatid_dod` v `dphkh1.xsd` ten případ jmenuje doslova, u dodavatele bez VAT ID včetně „identifikace zahraniční osoby povinné k dani" zůstává pole „Identifikace dodavatele" prázdné, a obě položky (`k_stat` i `vatid_dod`) jsou v XSD `use="optional"` s `minLength="0"`. Původní analýza četla jen anotaci u `k_stat` a tuhle větu minula. Ověřeno zkušebním podáním na testovací podatelně EPO, podepsaným kvalifikovaným certifikátem: na řádek bez identifikace vrátí EPO dvě zprávy typu `P`, tedy propustné, „Kód státu dodavatele by měl být vyplněn" a „Identifikace dodavatele (VAT ID) by měla být vyplněna", a podání jako celek projde. Odpovídá to chybám č. 58 a č. 60, které GFŘ výslovně označuje za propustné; tvrzení z 4.56.1, že EPO takové podání zamítne, tedy neplatí. Nově řádek do A.2 jde s prázdnou identifikací. Kritériem už není sídlo dodavatele, ale existence DIČ registrace k DPH: osoba se sídlem ve třetí zemi registrovaná v některém členském státě identifikaci má a kód státu se odvodí z prefixu jejího VAT ID, zatímco číslo, které EU VAT ID není (OSS mimo Unii, domácí identifikátor třetí země, britské DIČ po Brexitu), se do `vatid_dod` nedostane. U dodavatele se sídlem v EU bez VAT ID náhled varuje, protože tam jde skoro vždy o neúplný kontakt. **Přiznání k DPH se nemění**: řídí se zařazením dokladu na řádek, ne sekcí kontrolního hlášení, takže samovyměření i zrcadlový odpočet zůstávají ve stejné výši a mění se výhradně kontrolní hlášení. Kniha DPH u takového dokladu nově tiskne ve sloupci „KH" sekci A.2 (ve 4.56.1 tiskla prázdno). (Ruší opravu z 4.56.1.)
+
+## [4.56.3] — 2026-08-27
+
+### Fixed
+
+- **Přiznání k DPH složené ze samovyměření bylo nepodatelné.** Atribut `VetaD/@trans` se odvozoval ze znaménka vlastní daně, takže přiznání, ve kterém se daň na výstupu a zrcadlový odpočet vyruší (ř. 64 = 0) — typicky jediná přijatá faktura v režimu reverse charge —, dostalo `trans="N"`. EPO ale podle toho atributu **přeškrtne celý oddíl C**: sekce I.–VI. se vykreslí jako „v období nedošlo k žádnému zdanitelnému plnění" a obsahová kontrola podání shodí hláškou „JE ZAŠKRTNUTO, ŽE NEEXISTUJÍ ÚDAJE PRO C. ODDÍL, NESMÍ BÝT VYPLNĚNY ÚDAJE V ODDÍLE C." Vyplnil se jen ř. 63, takže formulář navíc vykazoval nadměrný odpočet místo nulové daňové povinnosti a soubor byl bez ručního zásahu nepodatelný, přestože `Veta1` i `Veta4` byly v pořádku. Totéž hrozilo u každého nadměrného odpočtu. `trans` je ve skutečnosti zaškrtávátko „Neexistují-li údaje pro C. oddíl", ne znaménko daně — nově je `A`, kdykoli je v oddílu C cokoliv vyplněné, a `N` zůstává pro období, ve kterém se opravdu nic nestalo. (#273, díky @TOPOSV)
+- **Manuál mapoval zrcadlový odpočet na špatný řádek.** Příklad reverse charge v kapitole *Výkazy DPH* uváděl ř. 43 jako `odp_rezim`/`odp_rez_nar`, jenže ta dvojice patří na **ř. 45** (korekce odpočtu podle § 75, § 77 a § 79 — registrace, vyrovnání); zrcadlový odpočet ze samovyměření nese `nar_zdp23`/`od_zdp23`. Protože tatáž kapitola doporučuje před podáním XML zkontrolovat a případně ručně upravit, vedl by ten příklad k vykázání korekce odpočtu místo odpočtu ze samovyměření. Opraveno i tvrzení, že builder převádí město na velká písmena — `naz_obce` se posílá beze změny a normalizuje si ho EPO samo. (#274, díky @TOPOSV)
+
+## [4.56.2] — 2026-08-25
+
+### Fixed
+
+- **Novější avíza Fio banky se importují.** Fio rozesílá dva různé tvary e-mailového avíza a vestavěný parser uměl jen ten starší, řádkový („Příjem/Výdaj na kontě: … / Částka: … / VS: … / Protiúčet: …"), navíc vázaný na předmět „Fio banka - prijem/vydaj na konte". Novější prozaická varianta — typicky okamžitá platba z aktuálních aplikací Fio — nese směr, datum, částku i měnu ve větě „zůstatek účtu … se … zvýšil o … CZK" a zbytek má v bloku **Další parametry**; neprošla tedy ani detekcí, ani vytěžením a import skončil hláškou o nenalezeném parseru. Nově parser zvládá oba tvary: nový se pozná podle úvodní věty (ne podle předmětu, ten se u něj liší), „zvýšil" znamená příjem a „snížil" výdaj se záporným znaménkem, z bloku parametrů se berou Protistrana včetně názvu v závorce, variabilní i konstantní symbol, Zpráva pro příjemce (s fallbackem na Zprávu pro mě a Uživatelský symbol), ID pokynu jako reference banky a Aktuální zůstatek. Cílový účet je i tady bez kódu banky, doplní se `/2010`. Kontrola odesílatele na doménu fio.cz zůstává v platnosti. (#271, díky @TOPOSV)
+
 ## [4.56.1] — 2026-08-20
 
 ### Fixed

@@ -29,6 +29,7 @@ env:
 # Rollback na Debian: pinni starší version tag (≤ v4.31.0) nebo build z `Dockerfile` lokálně.
 jobs:
   build:
+    timeout-minutes: 35
     strategy:
       fail-fast: false
       matrix:
@@ -42,6 +43,7 @@ jobs:
     permissions:
       contents: read
       packages: write     # nutné pro push do ghcr.io
+      actions: read
 
     steps:
       - name: Prepare platform pair
@@ -49,21 +51,23 @@ jobs:
         run: echo "PLATFORM_PAIR=${{ matrix.platform }}" | sed 's|/|-|' >> "$GITHUB_ENV"
 
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Require successful CI for the exact production commit
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: python3 ops/security/require-production-ci.py
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
-      - name: Log in to GHCR
-        uses: docker/login-action@v4
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
 
       - name: Extract metadata (labels)
         id: meta
-        uses: docker/metadata-action@v6
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           labels: |
@@ -73,30 +77,53 @@ jobs:
             org.opencontainers.image.licenses=MIT
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
 
-      - name: Build and push by digest
-        id: build
-        uses: docker/build-push-action@v7
+      - name: Prepare checked build context
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y skopeo poppler-utils
+          python3 ops/security/install-gitleaks.py "$RUNNER_TEMP/gitleaks"
+          PATH="$RUNNER_TEMP:$PATH" python3 ops/security/delivery-check.py context "$RUNNER_TEMP/image-context"
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+
+      - name: Build image locally
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        env:
+          DOCKER_BUILD_RECORD_UPLOAD: "false"
+          DOCKER_BUILD_SUMMARY: "false"
         with:
-          context: .
-          file: ./Dockerfile.alpine
+          context: ${{ runner.temp }}/image-context
+          outputs: type=oci,dest=${{ runner.temp }}/image.tar,compression=gzip
+          provenance: false
+          sbom: false
+          file: ${{ runner.temp }}/image-context/Dockerfile.alpine
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
-          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
-          # GHA cache — per-platform scope, aby se amd64/arm64 navzájem nepřepisovaly.
-          # ignore-error=true: flaky GHA cache backend (občas „error writing layer blob:
-          # not_found" při exportu) nesmí shodit build — image se stejně pushne, jen se
-          # neuloží cache. Bez toho spadl arm64 leg u v4.32.0 a merge se přeskočil.
-          cache-from: type=gha,scope=${{ env.PLATFORM_PAIR }}
-          cache-to:   type=gha,scope=${{ env.PLATFORM_PAIR }},mode=min,ignore-error=true
 
-      - name: Export digest
+      - name: Verify manifest, config and every image layer
+        id: verified
         run: |
+          digest=$(python3 ops/security/delivery-check.py image "$RUNNER_TEMP/image.tar" "$RUNNER_TEMP/image-context")
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish the verified platform image
+        env:
+          DIGEST: ${{ steps.verified.outputs.digest }}
+        run: |
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          image="$REGISTRY/$IMAGE_NAME"
+          skopeo copy --preserve-digests "oci-archive:$RUNNER_TEMP/image.tar" "docker://$image@$DIGEST"
           mkdir -p /tmp/digests
-          digest="${{ steps.build.outputs.digest }}"
-          touch "/tmp/digests/${digest#sha256:}"
+          touch "/tmp/digests/${DIGEST#sha256:}"
 
       - name: Upload digest
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: digests-${{ env.PLATFORM_PAIR }}
           path: /tmp/digests/*
@@ -113,17 +140,17 @@ jobs:
 
     steps:
       - name: Download digests
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           path: /tmp/digests
           pattern: digests-*
           merge-multiple: true
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
 
       - name: Log in to GHCR
-        uses: docker/login-action@v4
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -134,7 +161,7 @@ jobs:
       # - workflow_dispatch → image tag: <input>
       - name: Extract metadata (tags)
         id: meta
-        uses: docker/metadata-action@v6
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
@@ -159,16 +186,18 @@ jobs:
   # tarball a rozbalí ho přes hostingy bez Composer / Node).
   bundle:
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v')
+    # Re-enable only after independent review of the allowlist and a check
+    # that verifies the assembled archive before uploading it.
+    if: ${{ false }}
     permissions:
       contents: write   # nutné pro upload release asset
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Set up PHP
-        uses: shivammathur/setup-php@v2
+        uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # v2
         with:
           php-version: '8.5'
           extensions: mbstring, gd, intl, zip, pdo_mysql, exif, bcmath
@@ -176,10 +205,10 @@ jobs:
           tools: composer:v2
 
       - name: Set up Node + pnpm
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: '24'
-      - uses: pnpm/action-setup@v6
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6
         with:
           # Pin na konkrétní verzi (shoda s lokálem) — `latest` vytáhlo pnpm 11.12.0,
           # které padá při čtení pnpm-lock.yaml v9.0 („Cannot use 'in' operator to
@@ -251,7 +280,7 @@ jobs:
           echo "BUNDLE=$BUNDLE" >> "$GITHUB_ENV"
 
       - name: Upload bundle to release
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3
         with:
           files: |
             ${{ env.BUNDLE }}
